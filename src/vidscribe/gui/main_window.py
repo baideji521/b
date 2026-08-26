@@ -266,7 +266,9 @@ class MainWindow(QMainWindow):
                     doc = json.load(fh)
                 self.timeline = doc.get("timeline", [])
                 self.statusBar().showMessage(
-                    f"{self.video_path.name}：{len(self.timeline)} 条时间轴，语言 {doc.get('language') or '无语音'}"
+                    f"{self.video_path.name}：{len(self.timeline)} 条时间轴，"
+                    f"音频语言 {doc.get('original_language') or doc.get('language') or '无语音'}"
+                    f" -> 输出语言 {doc.get('output_language') or '-'}"
                 )
             except Exception as exc:
                 self.append_log(f"[警告] 读取 timeline.json 失败: {exc}")

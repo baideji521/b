@@ -83,6 +83,11 @@ class QwenVLAnalyzer:
         self._patch_size = PIXEL_FACTOR // 2
         self.load_seconds = 0.0
         self.model_path: str | None = None
+        # 最终自然语言由程序决定（见 language.decide_output_language），模型不自己选
+        self.output_language: str = "zh"
+
+    def set_output_language(self, code: str) -> None:
+        self.output_language = code or "zh"
 
     # ------------------------------------------------------------------ 模型
     def load(self, model_id: str | None = None) -> None:
@@ -224,12 +229,15 @@ class QwenVLAnalyzer:
     def _messages(self, video_content: dict, start: float, end: float,
                   timestamps: list[float], previous_summary: str | None) -> list[dict]:
         return [
-            {"role": "system", "content": [{"type": "text", "text": prompts.SYSTEM_PROMPT}]},
+            {"role": "system",
+             "content": [{"type": "text", "text": prompts.system_prompt(self.output_language)}]},
             {
                 "role": "user",
                 "content": [
                     video_content,
-                    {"type": "text", "text": prompts.build_user_prompt(start, end, timestamps, previous_summary)},
+                    {"type": "text",
+                     "text": prompts.build_user_prompt(start, end, timestamps, previous_summary,
+                                                       output_language=self.output_language)},
                 ],
             },
         ]
@@ -398,6 +406,43 @@ class QwenVLAnalyzer:
             results.append((events, meta))
         return results
 
+    # ------------------------------------------------------ 语言改写（纯文本）
+    def rewrite_texts(self, texts: list[str], output_language: str,
+                      max_new_tokens: int | None = None) -> list[str | None]:
+        """把语种不符的描述批量改写成目标语言。
+
+        复用已在显存里的视觉模型做一次纯文本调用，不额外加载翻译模型；
+        返回与输入等长的列表，失败位置为 None（由调用方决定兜底策略）。
+        """
+        if not texts:
+            return []
+        if self.model is None or self.processor is None:
+            logger.warning("视觉模型已卸载，无法做语言改写")
+            return [None] * len(texts)
+        import torch  # noqa: PLC0415
+
+        system, user = prompts.build_rewrite_prompt(texts, output_language)
+        messages = [
+            {"role": "system", "content": [{"type": "text", "text": system}]},
+            {"role": "user", "content": [{"type": "text", "text": user}]},
+        ]
+        prompt = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        budget = max_new_tokens or min(1024, 64 * len(texts) + 64)
+        try:
+            inputs = self.processor(text=[prompt], return_tensors="pt").to(self.model.device)
+            with torch.inference_mode():
+                generated = self.model.generate(**inputs, max_new_tokens=budget, do_sample=False)
+            raw = self.processor.batch_decode(
+                generated[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+            )[0]
+            del inputs, generated
+            self._free()
+        except Exception as exc:
+            logger.warning("语言改写调用失败：%s", str(exc)[:200])
+            return [None] * len(texts)
+
+        return _parse_rewrite(raw, len(texts))
+
     def _free(self) -> None:
         try:
             import torch  # noqa: PLC0415
@@ -488,6 +533,17 @@ def _loads_lenient(text: str) -> Any:
         return json.loads(_TRAILING_COMMA.sub(r"\1", repaired))
 
 
+def _label(value: Any) -> str | None:
+    """内部结构化标签：统一成英文小写 snake_case，非英文内容直接丢弃。"""
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or None
+
+
 def _to_float(value: Any) -> float | None:
     if isinstance(value, (int, float)):
         return float(value)
@@ -538,6 +594,12 @@ def parse_events(raw_text: str) -> list[VisualEvent]:
         conf = 0.5 if conf is None else max(0.0, min(1.0, conf))
         ocr = item.get("ocr_text")
         ocr = None if ocr in (None, "", "null", "None", "无") else str(ocr).strip()
+        action = _label(item.get("action"))
+        scene = _label(item.get("scene"))
+        subjects_raw = item.get("subjects") or item.get("participants") or []
+        if isinstance(subjects_raw, str):
+            subjects_raw = re.split(r"[,;/]| and ", subjects_raw)
+        subjects = [s for s in (_label(x) for x in subjects_raw if x) if s][:5]
         events.append(
             VisualEvent(
                 id=i + 1,
@@ -548,9 +610,34 @@ def parse_events(raw_text: str) -> list[VisualEvent]:
                 confidence=round(conf, 3),
                 importance=importance,
                 ocr_text=ocr,
+                action=action,
+                scene=scene,
+                subjects=subjects,
             )
         )
     return events
+
+
+def _parse_rewrite(raw: str, expected: int) -> list[str | None]:
+    """解析改写结果：优先 JSON 数组，退化成按行/编号解析。"""
+    out: list[str | None] = [None] * expected
+    try:
+        data = _loads_lenient(raw if raw.strip().startswith(("[", "{")) else f"[{raw}]")
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        data = data.get("texts") or data.get("result") or list(data.values())
+    if isinstance(data, list) and data:
+        for i, item in enumerate(data[:expected]):
+            if isinstance(item, str) and item.strip():
+                out[i] = item.strip()
+        if any(out):
+            return out
+
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    for i, line in enumerate(lines[:expected]):
+        out[i] = re.sub(r'^\s*[\d]+[.、)]\s*|^["\'\[\s]+|["\'\],\s]+$', "", line).strip() or None
+    return out
 
 
 # ------------------------------------------------------------ 时间戳校准

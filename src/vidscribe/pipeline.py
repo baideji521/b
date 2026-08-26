@@ -14,6 +14,7 @@ from . import benchmark as bench
 from .checkpoint import Checkpoint
 from .config import Config
 from .events import SpeechEvent, SpeechWord, VisualEvent, finalize
+from .language import LanguageRenderer, decide_output_language, labels_for
 from .logging_setup import get_logger
 from .speech.whisper_asr import WhisperASR
 from .timeline.engine import build_timeline, filter_timeline
@@ -70,28 +71,7 @@ class Pipeline:
         )
         write_json(out_dir / "video_metadata.json", {"video": info.to_dict(), "scene_cuts": cuts})
 
-        # 2) 视觉分析
-        visual_meta: dict[str, Any] = {}
-        visual_events: list[VisualEvent] = []
-        if skip_visual:
-            logger.warning("按要求跳过视觉分析")
-        elif ckpt.done("visual"):
-            payload = ckpt.load("visual")
-            visual_events = [VisualEvent(**e) for e in payload["events"]]
-            visual_meta = payload.get("meta", {})
-            logger.info("复用已有视觉分析结果：%d 个事件", len(visual_events))
-        else:
-            with timer.stage("visual_seconds"):
-                visual_events, visual_meta = self._run_visual(info, cuts, ckpt)
-            ckpt.save("visual", {"events": [e.to_dict() for e in visual_events], "meta": visual_meta})
-        write_json(out_dir / "visual_events.json", {
-            "video": info.name,
-            "duration": info.duration,
-            "meta": visual_meta,
-            "events": [e.to_dict() for e in visual_events],
-        })
-
-        # 3) 语音识别
+        # 2) 语音识别（必须在视觉分析之前：最终输出语言由音频语言决定）
         if skip_speech:
             speech_payload = {"available": False, "reason": "skipped", "language": None, "segments": []}
             logger.warning("按要求跳过语音识别")
@@ -108,11 +88,53 @@ class Pipeline:
                     speech_payload = {"available": False, "reason": f"error: {exc}"[:300],
                                       "language": None, "segments": []}
             ckpt.save("speech", speech_payload)
-        write_json(out_dir / "speech_events.json", speech_payload)
 
+        # 3) 语言判定：程序决定 output_language，不交给视觉模型自己选
+        lcfg = self.cfg.language
+        decision = decide_output_language(
+            speech_payload,
+            default_language=str(lcfg.get("default_language", "zh")),
+            min_confidence=float(lcfg.get("min_language_confidence", 0.4)),
+        )
+        renderer = LanguageRenderer(decision.output_language)
+        speech_payload["language_decision"] = decision.to_dict()
+        _ensure_speech_originals(speech_payload)
+        write_json(out_dir / "speech_events.json", speech_payload)
         speech_events = _speech_events_from_payload(speech_payload)
 
-        # 4) Timeline 合并 + 导出
+        # 4) 视觉分析（用 output_language 生成最终描述，内部事实固定英文）
+        visual_meta: dict[str, Any] = {}
+        visual_events: list[VisualEvent] = []
+        cached_visual = ckpt.load("visual") if ckpt.done("visual") else None
+        if cached_visual is not None and cached_visual.get("output_language") != decision.output_language:
+            logger.info("已有视觉结果是 %s，本次需要 %s，重新分析",
+                        cached_visual.get("output_language"), decision.output_language)
+            cached_visual = None
+        if skip_visual:
+            logger.warning("按要求跳过视觉分析")
+        elif cached_visual is not None:
+            visual_events = [VisualEvent(**e) for e in cached_visual["events"]]
+            visual_meta = cached_visual.get("meta", {})
+            logger.info("复用已有视觉分析结果：%d 个事件", len(visual_events))
+        else:
+            with timer.stage("visual_seconds"):
+                visual_events, visual_meta = self._run_visual(
+                    info, cuts, ckpt, decision.output_language, renderer
+                )
+            ckpt.save("visual", {
+                "events": [e.to_dict() for e in visual_events],
+                "meta": visual_meta,
+                "output_language": decision.output_language,
+            })
+        write_json(out_dir / "visual_events.json", {
+            "video": info.name,
+            "duration": info.duration,
+            "output_language": decision.output_language,
+            "meta": visual_meta,
+            "events": [e.to_dict() for e in visual_events],
+        })
+
+        # 5) Timeline 合并 + 导出
         with timer.stage("timeline_seconds"):
             entries = build_timeline(
                 visual_events, speech_events,
@@ -129,6 +151,16 @@ class Pipeline:
                 "video_path": info.path,
                 "duration": info.duration,
                 "language": language,
+                # 语言字段：original_* 是音频事实，output_language 是最终自然语言
+                "original_language": decision.dominant_language or decision.detected_language,
+                "output_language": decision.output_language,
+                "detected_language": decision.detected_language,
+                "language_confidence": decision.language_confidence,
+                "dominant_language": decision.dominant_language,
+                "secondary_languages": decision.secondary_languages,
+                "language_default_used": decision.default_used,
+                "language_reason": decision.reason,
+                "language_render": renderer.stats(),
                 "speech_available": bool(speech_payload.get("available")),
                 "counts": {
                     "visual_events": len(visual_events),
@@ -155,7 +187,8 @@ class Pipeline:
                 ],
             }
             write_json(out_dir / "timeline.json", timeline_doc)
-            write_timeline_txt(out_dir / "timeline.txt", info.name, info.duration, language, filtered)
+            write_timeline_txt(out_dir / "timeline.txt", info.name, info.duration, language, filtered,
+                               output_language=decision.output_language)
             srt_kind = write_srt(
                 out_dir / "timeline.srt",
                 speech_payload.get("segments", []),
@@ -177,6 +210,11 @@ class Pipeline:
                 "degrade_attempts": visual_meta.get("degrade_attempts", 0),
             },
             "speech_model": speech_payload.get("model"),
+            "language": {
+                **decision.to_dict(),
+                "render": renderer.stats(),
+                "labels": labels_for(decision.output_language),
+            },
             "timings": {**timer.stages, "total_seconds": timer.total},
             "peak_vram": bench.peak_vram_mb(),
             "counts": timeline_doc["counts"],
@@ -197,13 +235,18 @@ class Pipeline:
             "visual_events": len(visual_events),
             "speech_segments": len(speech_events),
             "language": speech_payload.get("language"),
+            "output_language": decision.output_language,
+            "language_decision": decision.to_dict(),
+            "language_render": renderer.stats(),
             "speech_available": bool(speech_payload.get("available")),
             "benchmark": benchmark,
         }
 
     # --------------------------------------------------------------- 视觉阶段
-    def _run_visual(self, info: VideoInfo, cuts: list[float], ckpt: Checkpoint) -> tuple[list[VisualEvent], dict]:
+    def _run_visual(self, info: VideoInfo, cuts: list[float], ckpt: Checkpoint,
+                    output_language: str, renderer: LanguageRenderer) -> tuple[list[VisualEvent], dict]:
         vcfg = self.cfg.visual
+        self.analyzer.set_output_language(output_language)
         params = VisualParams(
             fps=float(vcfg["fps"]),
             max_frames=int(vcfg["max_frames"]),
@@ -223,8 +266,11 @@ class Pipeline:
 
         bench.reset_peak_vram()
         cache = ckpt.load_window_cache()
-        # 所有窗口都有缓存时不必加载模型（断点续跑/只改后处理时省下几十秒）
-        all_cached = all(f"{i}:{s:.3f}-{e:.3f}" in cache for i, (s, e) in enumerate(windows))
+        # 缓存键带上输出语言：换语言重跑时不能复用另一种语言的描述
+        def key_of(idx: int, s: float, e: float) -> str:
+            return f"{output_language}|{idx}:{s:.3f}-{e:.3f}"
+
+        all_cached = all(key_of(i, s, e) in cache for i, (s, e) in enumerate(windows))
         if all_cached:
             logger.info("全部 %d 个窗口命中缓存，跳过视觉模型加载", len(windows))
         else:
@@ -244,7 +290,7 @@ class Pipeline:
             queue = queue[batch_size:]
             todo: list[tuple[int, float, float]] = []
             for idx, start, end in chunk:
-                key = f"{idx}:{start:.3f}-{end:.3f}"
+                key = key_of(idx, start, end)
                 if key in cache:
                     cached = cache[key]
                     events = [VisualEvent(**e) for e in cached["events"]]
@@ -299,7 +345,7 @@ class Pipeline:
                 total_frames += int(meta.get("frames", 0))
                 all_events.extend(events)
                 window_metas.append(meta)
-                cache[f"{idx}:{start:.3f}-{end:.3f}"] = {
+                cache[key_of(idx, start, end)] = {
                     "events": [e.to_dict() for e in events], "meta": meta,
                 }
             ckpt.save_window_cache(cache)
@@ -316,8 +362,13 @@ class Pipeline:
         )
         logger.info("视觉事件：原始 %d -> 合并去重后 %d", len(all_events), len(events))
 
+        # Language Renderer：最终描述统一到 output_language（模型还在显存里，改写最便宜）
+        events = self._render_language(events, renderer)
+
         meta = {
             "model_id": self.analyzer.model_id,
+            "output_language": output_language,
+            "language_render": renderer.stats(),
             "frame_source": window_metas[0].get("frame_source") if window_metas else None,
             "params": params.to_dict(),
             "window_count": len(windows),
@@ -328,6 +379,22 @@ class Pipeline:
             "peak_vram": bench.peak_vram_mb(),
         }
         return events, meta
+
+    def _render_language(self, events: list[VisualEvent], renderer: LanguageRenderer) -> list[VisualEvent]:
+        """最终自然语言层：语种不符的描述先让模型改写，再走模板/标记降级。"""
+        bad = renderer.needs_rewrite(events)
+        if bad and self.cfg.language.get("rewrite_mismatch_with_model", True):
+            texts = [events[i].description or events[i].event for i in bad]
+            rewritten = self.analyzer.rewrite_texts(texts, renderer.output_language)
+            for i, text in zip(bad, rewritten):
+                if renderer.apply_rewrite(events[i], text):
+                    logger.info("事件 %d 描述已改写为 %s", events[i].id, renderer.output_language)
+        events = renderer.finalize_events(events)
+        stats = renderer.stats()
+        if stats["template_or_kept"]:
+            logger.warning("仍有 %d 个事件未能生成 %s 描述（已标记 language_fallback）",
+                           stats["template_or_kept"], renderer.output_language)
+        return events
 
     def _load_visual_model(self, model_id: str | None = None) -> None:
         try:
@@ -348,6 +415,18 @@ class Pipeline:
 
 def _looks_like_oom(exc: BaseException) -> bool:
     return "out of memory" in str(exc).lower()
+
+
+def _ensure_speech_originals(payload: dict[str, Any]) -> None:
+    """补齐 original_text / original_language。
+
+    旧版本（以及断点续跑复用的 speech.json）里没有这两个字段，
+    但"原始语音识别结果不可被覆盖"是硬要求，所以在写出前统一回填。
+    """
+    detected = payload.get("language")
+    for seg in payload.get("segments", []):
+        seg.setdefault("original_text", seg.get("text"))
+        seg.setdefault("original_language", seg.get("language") or detected)
 
 
 def _speech_events_from_payload(payload: dict[str, Any]) -> list[SpeechEvent]:

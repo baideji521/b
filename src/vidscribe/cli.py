@@ -217,12 +217,15 @@ def _preview(output_dir: str, limit: int = 4) -> list[str]:
             doc = json.load(fh)
     except Exception:
         return lines
+    from vidscribe.language import labels_for  # noqa: PLC0415
+
+    labels = labels_for(doc.get("output_language"))
     for entry in doc.get("timeline", [])[:limit]:
         lines.append(f"    [{fmt_time(entry['start'])} - {fmt_time(entry['end'])}]  ({entry['start']}s)")
         if entry.get("visual"):
-            lines.append(f"      画面: {entry['visual']}")
+            lines.append(f"      {labels['visual']}: {entry['visual']}")
         if entry.get("speech"):
-            lines.append(f"      语音: {entry['speech']}")
+            lines.append(f"      {labels['speech']}: {entry['speech']}")
     return lines
 
 
@@ -265,9 +268,22 @@ def write_final_report(path: Path, cfg: Config, results: list[dict], total: floa
         peak = b.get("peak_vram") or {}
         vm = b.get("visual_model", {})
         sm = b.get("speech_model") or {}
+        ld = r.get("language_decision") or {}
+        lr = r.get("language_render") or {}
+        audio_line = "NONE" if not video.get("has_audio") else (
+            "OK" if ld.get("audio_available") else f"UNUSABLE ({ld.get('reason', '')})"
+        )
+        lang_line = "DEFAULT" if ld.get("default_used") else str(ld.get("output_language"))
         lines += [
             f"  输出目录:   {r['output_dir']}",
             f"  视频规格:   {video.get('duration')}s  {video.get('width')}x{video.get('height')}  {video.get('fps')} fps  音轨={video.get('has_audio')}",
+            f"  Audio:      {audio_line}",
+            f"  Language:   {lang_line}   detected={ld.get('detected_language')}({ld.get('language_confidence')})  "
+            f"dominant={ld.get('dominant_language')}  secondary={ld.get('secondary_languages') or []}  "
+            f"output_language={ld.get('output_language')}",
+            f"  语言判定依据: {ld.get('reason')}",
+            f"  最终语言渲染: 语种不符={lr.get('mismatched', 0)}  模型改写={lr.get('rewritten_by_model', 0)}  "
+            f"模板/保留原文={lr.get('template_or_kept', 0)}",
             f"  视觉模型:   {vm.get('model_id')}  帧来源={vm.get('frame_source')}  窗口={vm.get('windows')}  分析帧数={vm.get('analyzed_frames')}  降级次数={vm.get('degrade_attempts')}",
             f"  视觉参数:   {json.dumps(vm.get('params'), ensure_ascii=False)}",
             f"  语音模型:   {sm.get('size')} / {sm.get('device')} / {sm.get('compute_type')}   语言={r.get('language')}",
@@ -291,6 +307,8 @@ def write_final_report(path: Path, cfg: Config, results: list[dict], total: floa
             f"1. 什么时候发生了什么 -> {r['output_dir']}\\timeline.txt / timeline.json 的 visual 字段",
             f"2. 什么时候说了什么   -> 同上的 speech 字段；词级时间戳在 speech_events.json",
             "3. 定位回原视频       -> timeline.json 的 start/end 是真实秒数（浮点），可直接 seek",
+            "4. 最终语言           -> timeline.json 的 original_language / output_language；"
+            "原始对白始终保存在 speech_events.json 的 original_text / original_language",
         ]
     else:
         lines.append("没有成功的视频，请查看 logs/ 下的日志定位问题。")

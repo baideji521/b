@@ -40,25 +40,37 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def write_timeline_txt(path: Path, video_name: str, duration: float, language: str | None,
-                       entries: list[dict[str, Any]]) -> None:
-    lines = [
-        f"视频: {video_name}",
-        f"时长: {duration:.2f}s   语音语言: {language or '无语音'}",
-        f"条目: {len(entries)}",
-        "=" * 60,
-        "",
-    ]
+                       entries: list[dict[str, Any]], output_language: str = "zh") -> None:
+    """最终用户可见文本。段落标签跟随 output_language（英文音频 -> Visual/Speech）。"""
+    from ..language import labels_for, normalize_code
+
+    labels = labels_for(output_language)
+    lang = normalize_code(output_language) or "zh"
+    if lang == "zh":
+        header = [
+            f"视频: {video_name}",
+            f"时长: {duration:.2f}s   语音语言: {language or labels['no_speech']}   输出语言: {lang}",
+            f"条目: {len(entries)}",
+        ]
+    else:
+        header = [
+            f"Video: {video_name}",
+            f"Duration: {duration:.2f}s   Audio language: {language or labels['no_speech']}   Output language: {lang}",
+            f"Entries: {len(entries)}",
+        ]
+    lines = [*header, "=" * 60, ""]
     for entry in entries:
         lines.append(f"[{fmt_time(entry['start'])} - {fmt_time(entry['end'])}]")
         lines.append("")
         if entry.get("visual"):
-            lines.append("画面：")
+            lines.append(f"{labels['visual']}：" if lang == "zh" else f"{labels['visual']}:")
             lines.append(entry["visual"])
         if entry.get("ocr_text"):
-            lines.append(f"画面文字：{entry['ocr_text']}")
+            sep = "：" if lang == "zh" else ": "
+            lines.append(f"{labels['ocr']}{sep}{entry['ocr_text']}")
         if entry.get("speech"):
             lines.append("")
-            lines.append("语音：")
+            lines.append(f"{labels['speech']}：" if lang == "zh" else f"{labels['speech']}:")
             lines.append(entry["speech"])
         lines.append("")
         lines.append("")

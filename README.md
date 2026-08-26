@@ -7,6 +7,19 @@ Windows 11 本地离线视频理解工具：输入一个视频，输出「什么
 - 时间轴引擎：按区间重叠把画面事件与语音段配对，相邻事件合并、跨窗口去重
 - 时间戳来源显式标注：`frame_based` / `hybrid` / `model_estimated`，不伪造精度
 
+## 最终语言
+
+最终用户可见的自然语言由**原始音频语言**决定，由程序判定，不让模型自己选：
+
+1. 先跑 faster-whisper，拿到 `detected_language` + 置信度，按时长加权投票得出 `dominant_language`
+2. 程序确定 `output_language`，再开始视觉分析——英文音频输出英文，中文音频输出中文
+3. 中文夹英文单词不会把整段切成英文（判的是主导语言，`secondary_languages` 单独记录）
+4. 无音频/无有效语音 → 用 `config.json` 里的 `language.default_language`（默认中文），
+   并在 `FINAL_REPORT.txt` 中明确写出 `Audio: NONE` / `Language: DEFAULT`
+5. 内部结构化事实（`action` / `scene` / `subjects`）固定英文小写标签，不随输出语言变化
+6. 原始对白永不被覆盖：`speech_events.json` 保留 `original_text` / `original_language`
+
+
 ## 环境要求
 
 - Windows 11 + NVIDIA GPU（CUDA 12，实测 24GB 显存峰值约 10.3GB）
@@ -38,9 +51,13 @@ python run.py gui                :: 打开 GUI
 - `visual_events.json` / `speech_events.json`
 - `video_metadata.json` / `benchmark.json`
 
-`timeline.txt` 形如：
+`timeline.txt` 的段落标签跟随 `output_language`：
 
 ```
+[00:00.00 - 00:06.80] 画面：两人展示巧克力并互动 / 语音：If this is pink, Blake's not allowed to drink beer.
+[00:12.00 - 00:17.00] Visual: A man eats a chocolate egg while a woman smiles at the camera.
+```
+
 [00:00.00 - 00:06.80] 画面：两人展示巧克力并互动 / 语音：If this is pink, Blake's not allowed to drink beer anymore.
 [00:12.00 - 00:17.00] 画面：男子吃巧克力蛋，女子微笑看镜头
 ```

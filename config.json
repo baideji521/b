@@ -41,6 +41,11 @@
     "word_timestamps": true,
     "condition_on_previous_text": false
   },
+  "language": {
+    "default_language": "zh",
+    "min_language_confidence": 0.4,
+    "rewrite_mismatch_with_model": true
+  },
   "timeline": {
     "min_overlap_seconds": 0.2,
     "importance_filter": "low",

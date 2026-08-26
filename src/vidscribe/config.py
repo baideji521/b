@@ -58,6 +58,13 @@ DEFAULTS: dict[str, Any] = {
         "word_timestamps": True,
         "condition_on_previous_text": False,
     },
+    "language": {
+        # 最终自然语言由原始音频语言决定；这里只配置兜底与判定门槛
+        "default_language": "zh",       # 无音频/无语音时使用
+        "min_language_confidence": 0.4,  # 低于此置信度时改用默认语言
+        # 描述语种与 output_language 不符时，用视觉模型做一次文本改写
+        "rewrite_mismatch_with_model": True,
+    },
     "timeline": {
         "min_overlap_seconds": 0.2,
         "importance_filter": "low",
@@ -129,6 +136,10 @@ class Config:
     @property
     def speech(self) -> dict[str, Any]:
         return self.data["speech"]
+
+    @property
+    def language(self) -> dict[str, Any]:
+        return self.data["language"]
 
     @property
     def timeline(self) -> dict[str, Any]:

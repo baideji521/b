@@ -23,6 +23,13 @@ class VisualEvent:
     source_frames: list[int] = field(default_factory=list)
     ocr_text: str | None = None
     window: list[float] | None = None
+    # --- 内部结构化事实：固定英文，不随最终输出语言变化（用于合并/去重/兜底渲染）---
+    action: str | None = None
+    scene: str | None = None
+    subjects: list[str] = field(default_factory=list)
+    # --- 最终自然语言层的记录 ---
+    description_language: str | None = None
+    language_fallback: bool = False
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -52,9 +59,18 @@ class SpeechEvent:
     text: str
     confidence: float | None = None
     language: str | None = None
+    # 原始语音识别结果永不被覆盖：最终输出语言变了也要能拿回原话
+    original_text: str | None = None
+    original_language: str | None = None
     no_speech_prob: float | None = None
     avg_logprob: float | None = None
     words: list[SpeechWord] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.original_text is None:
+            self.original_text = self.text
+        if self.original_language is None:
+            self.original_language = self.language
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -108,6 +124,14 @@ def _absorb(keep: VisualEvent, other: VisualEvent) -> VisualEvent:
         keep.description = other.description
     if other.ocr_text and not keep.ocr_text:
         keep.ocr_text = other.ocr_text
+    # 内部英文事实：动作/场景保留先出现的，主体取并集（跨窗口更完整）
+    if not keep.action and other.action:
+        keep.action = other.action
+    if not keep.scene and other.scene:
+        keep.scene = other.scene
+    if other.subjects:
+        keep.subjects = sorted(set(keep.subjects) | set(other.subjects))
+    keep.language_fallback = keep.language_fallback or other.language_fallback
     frames = sorted(set(keep.source_frames) | set(other.source_frames))
     keep.source_frames = frames
     ranks = {s: i for i, s in enumerate(TIMESTAMP_SOURCES)}
