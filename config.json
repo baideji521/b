@@ -1,0 +1,80 @@
+{
+  "paths": {
+    "input_dir": "input",
+    "output_dir": "output",
+    "work_dir": "work",
+    "log_dir": "logs",
+    "model_dir": "models"
+  },
+  "visual": {
+    "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+    "fallback_model_ids": ["Qwen/Qwen3-VL-2B-Instruct"],
+    "dtype": "bfloat16",
+    "attn_implementation": "sdpa",
+    "frame_source": "opencv",
+    "fps": 1.5,
+    "max_frames": 16,
+    "min_frames": 6,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "max_new_tokens": 512,
+    "batch_size": 2,
+    "window_seconds": 15.0,
+    "window_overlap_seconds": 3.0,
+    "long_video_threshold": 18.0,
+    "scene_detect": true,
+    "scene_threshold": 0.35,
+    "scene_sample_fps": 3.0,
+    "snap_tolerance_seconds": 1.0,
+    "min_event_seconds": 0.4,
+    "merge_similarity": 0.82,
+    "dedup_similarity": 0.72
+  },
+  "speech": {
+    "model_size": "large-v3",
+    "fallback_model_sizes": ["medium", "small"],
+    "device": "auto",
+    "compute_type": "float16",
+    "language": null,
+    "beam_size": 5,
+    "vad_filter": true,
+    "word_timestamps": true,
+    "condition_on_previous_text": false
+  },
+  "timeline": {
+    "min_overlap_seconds": 0.2,
+    "importance_filter": "low",
+    "confidence_filter": 0.0
+  },
+  "runtime": {
+    "max_auto_retries": 3,
+    "keep_models_loaded": true
+  },
+  "mirrors": {
+    "pypi": [
+      "https://pypi.tuna.tsinghua.edu.cn/simple",
+      "https://mirrors.aliyun.com/pypi/simple",
+      "https://pypi.org/simple"
+    ],
+    "pytorch_index": [
+      "https://mirror.nju.edu.cn/pytorch/whl/cu126",
+      "https://download.pytorch.org/whl/cu126"
+    ],
+    "pytorch_find_links": [
+      "https://mirrors.aliyun.com/pytorch-wheels/cu126/"
+    ],
+    "hf_endpoint": "https://hf-mirror.com",
+    "model_sources": ["modelscope", "hf_mirror", "hf"],
+    "modelscope_map": {
+      "Qwen/Qwen3-VL-4B-Instruct": "Qwen/Qwen3-VL-4B-Instruct",
+      "Qwen/Qwen3-VL-2B-Instruct": "Qwen/Qwen3-VL-2B-Instruct",
+      "Qwen/Qwen3-VL-8B-Instruct": "Qwen/Qwen3-VL-8B-Instruct"
+    },
+    "whisper_sources": ["modelscope", "hf_mirror", "hf"],
+    "whisper_modelscope_map": {
+      "Systran/faster-whisper-large-v3": "Systran/faster-whisper-large-v3",
+      "Systran/faster-whisper-medium": "Systran/faster-whisper-medium",
+      "Systran/faster-whisper-small": "Systran/faster-whisper-small"
+    }
+  }
+}

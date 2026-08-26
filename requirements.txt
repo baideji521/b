@@ -1,0 +1,14 @@
+# 核心依赖（torch / torchvision 由 setup_and_test.bat 单独用 CUDA index 安装）
+transformers>=4.57.0,<5.0.0
+accelerate>=1.0.0
+qwen-vl-utils==0.0.14
+faster-whisper==1.2.1
+huggingface_hub>=0.34.0
+modelscope>=1.20.0
+opencv-python==4.11.0.86
+Pillow>=10.2.0
+numpy>=1.26.0,<3.0.0
+av>=13.0.0
+tqdm>=4.66.0
+PyQt5==5.15.11
+

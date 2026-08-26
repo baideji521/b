@@ -1,0 +1,35 @@
+# 虚拟环境与依赖
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 模型权重（几个 GB，从 ModelScope/HF 镜像自行下载）
+models/
+
+# 运行产物
+output/
+work/
+logs/
+FINAL_REPORT.txt
+
+# 输入与测试素材
+input/*
+!input/.gitkeep
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.m4v
+*.webm
+*.flv
+*.wmv
+*.ts
+
+# 工具与编辑器
+.comate/
+.idea/
+.vscode/
+Thumbs.db
+desktop.ini
