@@ -71,6 +71,8 @@ def _is_oom(exc: BaseException) -> bool:
 
 
 class QwenVLAnalyzer:
+    backend = "qwen3vl"
+
     def __init__(self, cfg: dict[str, Any], model_dir: str | None = None,
                  mirrors: dict[str, Any] | None = None):
         self.cfg = cfg

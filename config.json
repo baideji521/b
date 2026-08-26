@@ -8,7 +8,33 @@
   },
   "visual": {
     "model_id": "Qwen/Qwen3-VL-4B-Instruct",
-    "fallback_model_ids": ["Qwen/Qwen3-VL-2B-Instruct"],
+    "fallback_model_ids": [
+      "Qwen/Qwen3-VL-2B-Instruct"
+    ],
+    "backend": "auto",
+    "models": [
+      {
+        "label": "Qwen3-VL-4B-Instruct (默认)",
+        "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "backend": "qwen3vl"
+      },
+      {
+        "label": "Qwen3-VL-2B-Instruct (更省显存)",
+        "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+        "backend": "qwen3vl"
+      },
+      {
+        "label": "MiniCPM-V-4.5 int4 (8.7B/4bit)",
+        "model_id": "openbmb/MiniCPM-V-4_5-int4",
+        "backend": "minicpm"
+      }
+    ],
+    "minicpm": {
+      "packing_nums": 1,
+      "max_slice_nums": 1,
+      "use_image_id": false,
+      "num_beams": 1
+    },
     "dtype": "bfloat16",
     "attn_implementation": "sdpa",
     "frame_source": "opencv",
@@ -32,7 +58,10 @@
   },
   "speech": {
     "model_size": "large-v3",
-    "fallback_model_sizes": ["medium", "small"],
+    "fallback_model_sizes": [
+      "medium",
+      "small"
+    ],
     "device": "auto",
     "compute_type": "float16",
     "language": null,
@@ -53,7 +82,8 @@
   },
   "runtime": {
     "max_auto_retries": 3,
-    "keep_models_loaded": true
+    "keep_models_loaded": true,
+    "unload_speech_before_visual": true
   },
   "mirrors": {
     "pypi": [
@@ -69,13 +99,23 @@
       "https://mirrors.aliyun.com/pytorch-wheels/cu126/"
     ],
     "hf_endpoint": "https://hf-mirror.com",
-    "model_sources": ["modelscope", "hf_mirror", "hf"],
+    "model_sources": [
+      "modelscope",
+      "hf_mirror",
+      "hf"
+    ],
     "modelscope_map": {
       "Qwen/Qwen3-VL-4B-Instruct": "Qwen/Qwen3-VL-4B-Instruct",
       "Qwen/Qwen3-VL-2B-Instruct": "Qwen/Qwen3-VL-2B-Instruct",
-      "Qwen/Qwen3-VL-8B-Instruct": "Qwen/Qwen3-VL-8B-Instruct"
+      "Qwen/Qwen3-VL-8B-Instruct": "Qwen/Qwen3-VL-8B-Instruct",
+      "openbmb/MiniCPM-V-4_5-int4": "OpenBMB/MiniCPM-V-4_5-int4",
+      "openbmb/MiniCPM-V-4_5": "OpenBMB/MiniCPM-V-4_5"
     },
-    "whisper_sources": ["modelscope", "hf_mirror", "hf"],
+    "whisper_sources": [
+      "modelscope",
+      "hf_mirror",
+      "hf"
+    ],
     "whisper_modelscope_map": {
       "Systran/faster-whisper-large-v3": "Systran/faster-whisper-large-v3",
       "Systran/faster-whisper-medium": "Systran/faster-whisper-medium",

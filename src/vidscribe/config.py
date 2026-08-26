@@ -19,6 +19,25 @@ DEFAULTS: dict[str, Any] = {
     "visual": {
         "model_id": "Qwen/Qwen3-VL-4B-Instruct",
         "fallback_model_ids": ["Qwen/Qwen3-VL-2B-Instruct"],
+        # auto = 按 model_id 猜后端；也可显式写 qwen3vl / minicpm
+        "backend": "auto",
+        # GUI / CLI 可切换的模型清单（label 只影响界面显示）
+        "models": [
+            {"label": "Qwen3-VL-4B-Instruct (默认)", "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+             "backend": "qwen3vl"},
+            {"label": "Qwen3-VL-2B-Instruct (更省显存)", "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+             "backend": "qwen3vl"},
+            {"label": "MiniCPM-V-4.5 int4 (8.7B/4bit)", "model_id": "openbmb/MiniCPM-V-4_5-int4",
+             "backend": "minicpm"},
+        ],
+        # MiniCPM 专属参数：3D-Resampler 把 packing_nums 帧压成 64 token
+        "minicpm": {
+            "packing_nums": 1,
+            "max_slice_nums": 1,
+            "use_image_id": False,
+            # 官方 sampling=False 默认 num_beams=3（3 倍耗时/显存），压回 1 才和 Qwen 可比
+            "num_beams": 1,
+        },
         "dtype": "bfloat16",
         "attn_implementation": "sdpa",
         # opencv | official | auto
@@ -73,6 +92,8 @@ DEFAULTS: dict[str, Any] = {
     "runtime": {
         "max_auto_retries": 3,
         "keep_models_loaded": True,
+        # 语音跑完就释放 whisper 显存再加载视觉模型（12GB 卡上必须开，否则会换页）
+        "unload_speech_before_visual": True,
     },
     "mirrors": {
         # 优先国内镜像，只加速下载，仓库仍是官方仓库

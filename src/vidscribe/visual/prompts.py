@@ -45,23 +45,41 @@ def system_prompt(output_language: str | None) -> str:
 
 def build_user_prompt(window_start: float, window_end: float, timestamps: list[float],
                       previous_summary: str | None = None,
-                      output_language: str = "zh") -> str:
+                      output_language: str = "zh",
+                      timestamp_mode: str = "markers") -> str:
     """构造窗口级提示词。时间戳用绝对秒数，与最终 timeline 保持同一坐标系。
+
+    timestamp_mode:
+      - "markers"：Qwen3-VL 会在每帧前注入 `<x.x seconds>`，提示词只需说明它是真实时间
+      - "list"   ：MiniCPM-V 等没有原生时间戳注入的模型，把每帧真实秒数显式列出来
 
     输出要求刻意压缩：这台机器上解码速度受单步开销限制，输出 token 越少越快。
     """
     lang = normalize_code(output_language) or "zh"
     if lang == "zh":
-        return _prompt_zh(window_start, window_end, timestamps, previous_summary)
-    return _prompt_en(window_start, window_end, timestamps, previous_summary, lang)
+        return _prompt_zh(window_start, window_end, timestamps, previous_summary, timestamp_mode)
+    return _prompt_en(window_start, window_end, timestamps, previous_summary, lang, timestamp_mode)
+
+
+def _ts_list(timestamps: list[float], limit: int = 24) -> str:
+    items = [f"{t:.1f}" for t in timestamps[:limit]]
+    tail = " ..." if len(timestamps) > limit else ""
+    return ", ".join(items) + tail
 
 
 def _prompt_zh(window_start: float, window_end: float, timestamps: list[float],
-               previous_summary: str | None) -> str:
-    parts = [
-        f"以上是同一段视频在 {window_start:.1f}s ~ {window_end:.1f}s 之间按时间顺序采样的 {len(timestamps)} 帧，"
-        f"每帧前面的 <x.x seconds> 就是它的真实时间。",
-    ]
+               previous_summary: str | None, timestamp_mode: str = "markers") -> str:
+    if timestamp_mode == "list":
+        head = (
+            f"以上是同一段视频在 {window_start:.1f}s ~ {window_end:.1f}s 之间按时间顺序采样的 {len(timestamps)} 帧，"
+            f"它们对应的真实时间（秒）依次是：{_ts_list(timestamps)}。"
+        )
+    else:
+        head = (
+            f"以上是同一段视频在 {window_start:.1f}s ~ {window_end:.1f}s 之间按时间顺序采样的 {len(timestamps)} 帧，"
+            f"每帧前面的 <x.x seconds> 就是它的真实时间。"
+        )
+    parts = [head]
     if previous_summary:
         parts.append(f"这段之前刚发生的内容（仅作上下文，不要重复输出）：{previous_summary}")
     parts += [
@@ -81,12 +99,20 @@ def _prompt_zh(window_start: float, window_end: float, timestamps: list[float],
 
 
 def _prompt_en(window_start: float, window_end: float, timestamps: list[float],
-               previous_summary: str | None, lang: str) -> str:
+               previous_summary: str | None, lang: str, timestamp_mode: str = "markers") -> str:
     target = language_name(lang)
-    parts = [
-        f"The frames above are {len(timestamps)} time-ordered samples of one video between "
-        f"{window_start:.1f}s and {window_end:.1f}s. The <x.x seconds> marker before each frame is its real time.",
-    ]
+    if timestamp_mode == "list":
+        head = (
+            f"The frames above are {len(timestamps)} time-ordered samples of one video between "
+            f"{window_start:.1f}s and {window_end:.1f}s. Their real timestamps in seconds are, in order: "
+            f"{_ts_list(timestamps)}."
+        )
+    else:
+        head = (
+            f"The frames above are {len(timestamps)} time-ordered samples of one video between "
+            f"{window_start:.1f}s and {window_end:.1f}s. The <x.x seconds> marker before each frame is its real time."
+        )
+    parts = [head]
     if previous_summary:
         parts.append(f"Context from just before this segment (do not repeat it): {previous_summary}")
     parts += [

@@ -11,4 +11,7 @@ numpy>=1.26.0,<3.0.0
 av>=13.0.0
 tqdm>=4.66.0
 PyQt5==5.15.11
+# MiniCPM-V-4.5 int4 后端需要（bnb nf4 预量化权重）；只用 Qwen3-VL 时可不装
+bitsandbytes==0.48.1
+
 

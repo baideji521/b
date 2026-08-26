@@ -20,7 +20,7 @@ from .logging_setup import get_logger
 logger = get_logger(__name__)
 
 HF_OFFICIAL = "https://huggingface.co"
-VISUAL_ALLOW = ["*.json", "*.safetensors", "*.txt", "*.py", "*.jinja", "*.model"]
+VISUAL_ALLOW = ["*.json", "*.safetensors", "*.txt", "*.py", "*.jinja", "*.model", "*.md"]
 WHISPER_ALLOW = None  # faster-whisper 仓库很小，整仓下载
 
 

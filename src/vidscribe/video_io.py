@@ -9,7 +9,7 @@ import math
 import subprocess
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 import cv2
 import numpy as np
@@ -249,10 +249,12 @@ def sample_frames(info: VideoInfo, frame_indices: Iterable[int], max_pixels: int
     return batch
 
 
-def detect_scene_cuts(info: VideoInfo, sample_fps: float = 3.0, threshold: float = 0.35) -> list[float]:
+def detect_scene_cuts(info: VideoInfo, sample_fps: float = 3.0, threshold: float = 0.35,
+                      on_progress: Callable[[float], None] | None = None) -> list[float]:
     """基于 HSV 直方图差异的镜头切换检测，返回真实秒数的切点列表（不含 0 和 duration）。
 
     这一步的时间戳完全来自解码器，是 timeline 里 frame_based 边界的来源。
+    on_progress 收到 0~1 的扫描进度：长视频这一步要整段解码，必须能看到进度。
     """
     if info.duration <= 0:
         return []
@@ -265,6 +267,8 @@ def detect_scene_cuts(info: VideoInfo, sample_fps: float = 3.0, threshold: float
     cuts: list[float] = []
     prev_hist = None
     frame_no = 0
+    total = float(info.total_frames or 0)
+    report_every = max(step, int(info.fps * 2))  # 约每 2 秒视频上报一次
     try:
         while True:
             ok = cap.grab()
@@ -284,9 +288,13 @@ def detect_scene_cuts(info: VideoInfo, sample_fps: float = 3.0, threshold: float
                             if not cuts or ts - cuts[-1] > 0.6:
                                 cuts.append(round(ts, 3))
                     prev_hist = hist
+            if on_progress is not None and total > 0 and frame_no % report_every == 0:
+                on_progress(min(1.0, frame_no / total))
             frame_no += 1
     finally:
         cap.release()
+    if on_progress is not None:
+        on_progress(1.0)
     logger.info("镜头切换检测：%d 个切点", len(cuts))
     return cuts
 

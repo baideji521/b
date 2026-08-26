@@ -29,6 +29,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSlider,
     QSplitter,
@@ -41,6 +42,7 @@ from PyQt5.QtWidgets import (
 
 from ..config import Config
 from ..constants import VIDEO_SUFFIXES
+from ..progress import parse as parse_progress
 from ..timeline.exporters import fmt_time
 from .player import FramePlayer
 
@@ -56,17 +58,20 @@ class AnalyzeWorker(QThread):
     """用子进程跑分析流水线。
 
     刻意不在 GUI 进程里 import torch/cv2：opencv 会改写 Qt 插件路径，
-    torch 也会占住显存，分开进程更稳，而且日志可以实时回传。
+    torch 也会占住显存，分开进程更稳，而且日志/进度可以实时回传。
     """
 
     log = pyqtSignal(str)
+    progress = pyqtSignal(dict)
     done = pyqtSignal(bool, str)
 
-    def __init__(self, root: Path, video: Path, force: bool = False):
+    def __init__(self, root: Path, video: Path, force: bool = False,
+                 visual_model: str | None = None):
         super().__init__()
         self.root = root
         self.video = video
         self.force = force
+        self.visual_model = visual_model
         self._proc: subprocess.Popen | None = None
 
     def run(self) -> None:
@@ -76,9 +81,12 @@ class AnalyzeWorker(QThread):
         cmd = [str(python), str(self.root / "run.py"), "run", str(self.video)]
         if self.force:
             cmd.append("--force")
+        if self.visual_model:
+            cmd += ["--visual-model", self.visual_model]
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONUTF8"] = "1"
+        env["VIDSCRIBE_PROGRESS"] = "json"  # 让子进程输出机器可读的进度行
         env.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)
         env.pop("QT_PLUGIN_PATH", None)
 
@@ -91,7 +99,12 @@ class AnalyzeWorker(QThread):
             )
             assert self._proc.stdout is not None
             for line in self._proc.stdout:
-                self.log.emit(line.rstrip())
+                line = line.rstrip()
+                payload = parse_progress(line)
+                if payload is not None:
+                    self.progress.emit(payload)  # 进度行不进日志面板，免得刷屏
+                    continue
+                self.log.emit(line)
             code = self._proc.wait()
         except Exception as exc:
             self.log.emit(f"[错误] {type(exc).__name__}: {exc}")
@@ -135,6 +148,20 @@ class MainWindow(QMainWindow):
         self.cmb_importance = QComboBox()
         self.cmb_importance.addItems(["全部", "normal 以上", "high 以上", "仅 critical"])
         self.cmb_importance.currentIndexChanged.connect(self.refresh_timeline_table)
+
+        # 视觉模型切换：只影响下一次分析，不动已有结果
+        from ..visual.factory import known_models  # noqa: PLC0415
+
+        self.visual_models = known_models(self.cfg.visual)
+        self.cmb_model = QComboBox()
+        for entry in self.visual_models:
+            self.cmb_model.addItem(f"{entry['label']}  [{entry['backend']}]", entry["model_id"])
+        current = str(self.cfg.visual.get("model_id") or "")
+        idx = self.cmb_model.findData(current)
+        if idx >= 0:
+            self.cmb_model.setCurrentIndex(idx)
+        self.cmb_model.setToolTip("切换视觉模型，切换后点“重新分析”生效")
+
         self.spin_conf = QDoubleSpinBox()
         self.spin_conf.setRange(0.0, 1.0)
         self.spin_conf.setSingleStep(0.05)
@@ -145,6 +172,8 @@ class MainWindow(QMainWindow):
         for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_outdir):
             top.addWidget(w)
         top.addStretch(1)
+        top.addWidget(QLabel("视觉模型"))
+        top.addWidget(self.cmb_model)
         top.addWidget(QLabel("重要性"))
         top.addWidget(self.cmb_importance)
         top.addWidget(self.spin_conf)
@@ -207,6 +236,17 @@ class MainWindow(QMainWindow):
         self.log_view.setMaximumBlockCount(2000)
         self.log_view.setFont(QFont("Consolas", 9))
 
+        # 进度：阶段名 + 明细 + 总进度条（数据来自子进程的 @@PROGRESS 行）
+        self.lbl_stage = QLabel("空闲")
+        self.lbl_stage.setMinimumWidth(220)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 1000)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("%p%")
+        progress_row = QHBoxLayout()
+        progress_row.addWidget(self.lbl_stage)
+        progress_row.addWidget(self.progress_bar, 1)
+
         bottom = QSplitter(Qt.Horizontal)
         speech_box = QWidget()
         sb = QVBoxLayout(speech_box)
@@ -217,6 +257,7 @@ class MainWindow(QMainWindow):
         lb = QVBoxLayout(log_box)
         lb.setContentsMargins(0, 0, 0, 0)
         lb.addWidget(QLabel("运行日志"))
+        lb.addLayout(progress_row)
         lb.addWidget(self.log_view)
         bottom.addWidget(speech_box)
         bottom.addWidget(log_box)
@@ -260,6 +301,16 @@ class MainWindow(QMainWindow):
             return
         timeline_file = out / "timeline.json"
         speech_file = out / "speech_events.json"
+        visual_file = out / "visual_events.json"
+        used_model = ""
+        if visual_file.is_file():
+            try:
+                with open(visual_file, "r", encoding="utf-8") as fh:
+                    vmeta = json.load(fh).get("meta") or {}
+                if vmeta.get("model_id"):
+                    used_model = f"，视觉模型 {str(vmeta['model_id']).split('/')[-1]}"
+            except Exception:
+                used_model = ""
         if timeline_file.is_file():
             try:
                 with open(timeline_file, "r", encoding="utf-8") as fh:
@@ -268,7 +319,7 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"{self.video_path.name}：{len(self.timeline)} 条时间轴，"
                     f"音频语言 {doc.get('original_language') or doc.get('language') or '无语音'}"
-                    f" -> 输出语言 {doc.get('output_language') or '-'}"
+                    f" -> 输出语言 {doc.get('output_language') or '-'}{used_model}"
                 )
             except Exception as exc:
                 self.append_log(f"[警告] 读取 timeline.json 失败: {exc}")
@@ -345,21 +396,38 @@ class MainWindow(QMainWindow):
         if self.worker is not None and self.worker.isRunning():
             QMessageBox.information(self, "提示", "已有分析任务在运行")
             return
-        self.append_log(f"开始分析 {self.video_path.name}（force={force}）…")
+        model_id = self.cmb_model.currentData()
+        self.append_log(f"开始分析 {self.video_path.name}（force={force}，视觉模型={model_id}）…")
         self.btn_analyze.setEnabled(False)
         self.btn_reanalyze.setEnabled(False)
-        self.worker = AnalyzeWorker(self.cfg.root, self.video_path, force)
+        self.progress_bar.setValue(0)
+        self.progress_bar.setFormat("0.0%")
+        self.lbl_stage.setText("准备中｜启动子进程")
+        self.worker = AnalyzeWorker(self.cfg.root, self.video_path, force, visual_model=model_id)
         self.worker.log.connect(self.append_log)
+        self.worker.progress.connect(self.on_progress)
         self.worker.done.connect(self.on_analyze_done)
         self.worker.start()
+
+    def on_progress(self, payload: dict) -> None:
+        overall = float(payload.get("overall") or 0.0)
+        self.progress_bar.setValue(int(round(overall * 1000)))
+        stage = payload.get("stage_label") or payload.get("stage") or ""
+        detail = payload.get("detail") or ""
+        self.lbl_stage.setText(f"{stage}｜{detail}" if detail else stage)
+        self.progress_bar.setFormat(f"{overall * 100:.1f}%")
 
     def on_analyze_done(self, ok: bool, message: str) -> None:
         self.btn_analyze.setEnabled(True)
         self.btn_reanalyze.setEnabled(True)
         if ok:
+            self.progress_bar.setValue(1000)
+            self.progress_bar.setFormat("100%")
+            self.lbl_stage.setText("完成")
             self.append_log(f"分析完成（{message}），重新加载结果")
             self.load_results()
         else:
+            self.lbl_stage.setText("失败")
             self.append_log(f"分析失败：{message}")
             QMessageBox.warning(self, "分析失败", f"{message}\n详细日志见 logs/ 目录")
 

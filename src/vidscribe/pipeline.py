@@ -16,12 +16,14 @@ from .config import Config
 from .events import SpeechEvent, SpeechWord, VisualEvent, finalize
 from .language import LanguageRenderer, decide_output_language, labels_for
 from .logging_setup import get_logger
+from .progress import report as report_progress
 from .speech.whisper_asr import WhisperASR
 from .timeline.engine import build_timeline, filter_timeline
 from .timeline.exporters import write_json, write_srt, write_timeline_txt
 from .video_io import VideoInfo, detect_scene_cuts, plan_windows, probe_video
 from .visual import prompts
-from .visual.qwen_vl import QwenVLAnalyzer, VisualOOM, VisualParams
+from .visual.factory import backend_for, create_analyzer
+from .visual.qwen_vl import VisualOOM, VisualParams
 
 logger = get_logger(__name__)
 
@@ -31,9 +33,12 @@ class Pipeline:
         self.cfg = cfg
         cfg.ensure_dirs()
         model_dir = str(cfg.path("model_dir"))
-        self.analyzer = QwenVLAnalyzer(cfg.visual, model_dir, cfg.mirrors)
+        self.model_dir = model_dir
+        self.analyzer = create_analyzer(cfg.visual, model_dir, cfg.mirrors)
         self.asr = WhisperASR(cfg.speech, model_dir, cfg.mirrors)
         self.env = bench.environment_snapshot()
+        logger.info("视觉后端：%s（%s）", self.analyzer.backend, self.analyzer.model_id)
+
 
     # --------------------------------------------------------------- 对外入口
     def run_video(self, video_path: str | Path, force: bool = False,
@@ -55,7 +60,9 @@ class Pipeline:
                 info = VideoInfo(**ckpt.load("probe")["video"])
                 cuts = ckpt.load("probe").get("scene_cuts", [])
                 logger.info("复用已有探测结果")
+                report_progress("probe", 1.0, "复用已有探测结果", video=video_path.name)
             else:
+                report_progress("probe", 0.02, "读取视频元信息", video=video_path.name)
                 info = probe_video(video_path)
                 cuts = []
                 if self.cfg.visual.get("scene_detect", True):
@@ -63,8 +70,13 @@ class Pipeline:
                         info,
                         sample_fps=float(self.cfg.visual.get("scene_sample_fps", 3.0)),
                         threshold=float(self.cfg.visual.get("scene_threshold", 0.35)),
+                        on_progress=lambda f: report_progress(
+                            "probe", 0.05 + 0.95 * f,
+                            f"镜头切点检测 {f * 100:.0f}%", video=info.name,
+                        ),
                     )
                 ckpt.save("probe", {"video": info.to_dict(), "scene_cuts": cuts})
+                report_progress("probe", 1.0, f"镜头切点 {len(cuts)} 个", video=info.name)
         logger.info(
             "视频: %.2fs, %dx%d, %.3f fps, %d 帧, 音轨=%s",
             info.duration, info.width, info.height, info.fps, info.total_frames, info.has_audio,
@@ -75,12 +87,16 @@ class Pipeline:
         if skip_speech:
             speech_payload = {"available": False, "reason": "skipped", "language": None, "segments": []}
             logger.warning("按要求跳过语音识别")
+            report_progress("speech", 1.0, "已跳过语音识别", video=info.name)
         elif ckpt.done("speech"):
             speech_payload = ckpt.load("speech")
             logger.info("复用已有语音识别结果：%d 段", len(speech_payload.get("segments", [])))
+            report_progress("speech", 1.0,
+                            f"复用已有语音结果（{len(speech_payload.get('segments', []))} 段）", video=info.name)
         else:
             with timer.stage("speech_seconds"):
                 try:
+                    report_progress("speech", 0.01, "加载语音模型 / 解码音频", video=info.name)
                     speech_payload = self.asr.transcribe(info)
                 except Exception as exc:
                     logger.error("语音识别失败：%s", exc)
@@ -88,6 +104,8 @@ class Pipeline:
                     speech_payload = {"available": False, "reason": f"error: {exc}"[:300],
                                       "language": None, "segments": []}
             ckpt.save("speech", speech_payload)
+            report_progress("speech", 1.0,
+                            f"语音识别完成（{len(speech_payload.get('segments', []))} 段）", video=info.name)
 
         # 3) 语言判定：程序决定 output_language，不交给视觉模型自己选
         lcfg = self.cfg.language
@@ -110,12 +128,19 @@ class Pipeline:
             logger.info("已有视觉结果是 %s，本次需要 %s，重新分析",
                         cached_visual.get("output_language"), decision.output_language)
             cached_visual = None
+        cached_model = (cached_visual or {}).get("meta", {}).get("model_id")
+        if cached_visual is not None and cached_model and cached_model != self.analyzer.model_id:
+            logger.info("已有视觉结果来自 %s，本次要用 %s，重新分析", cached_model, self.analyzer.model_id)
+            cached_visual = None
+
         if skip_visual:
             logger.warning("按要求跳过视觉分析")
+            report_progress("visual", 1.0, "已跳过画面分析", video=info.name)
         elif cached_visual is not None:
             visual_events = [VisualEvent(**e) for e in cached_visual["events"]]
             visual_meta = cached_visual.get("meta", {})
             logger.info("复用已有视觉分析结果：%d 个事件", len(visual_events))
+            report_progress("visual", 1.0, f"复用已有画面结果（{len(visual_events)} 事件）", video=info.name)
         else:
             with timer.stage("visual_seconds"):
                 visual_events, visual_meta = self._run_visual(
@@ -136,6 +161,7 @@ class Pipeline:
 
         # 5) Timeline 合并 + 导出
         with timer.stage("timeline_seconds"):
+            report_progress("timeline", 0.2, "合并画面事件与语音", video=info.name)
             entries = build_timeline(
                 visual_events, speech_events,
                 min_overlap=float(self.cfg.timeline.get("min_overlap_seconds", 0.2)),
@@ -195,6 +221,7 @@ class Pipeline:
                 [e.to_dict() for e in visual_events],
             )
             ckpt.save("timeline", {"entries": len(filtered), "srt_kind": srt_kind})
+            report_progress("timeline", 1.0, f"导出完成（timeline {len(filtered)} 条）", video=info.name)
 
         # 5) Benchmark
         benchmark = {
@@ -202,6 +229,7 @@ class Pipeline:
             "environment": self.env,
             "visual_model": {
                 "model_id": self.analyzer.model_id,
+                "backend": self.analyzer.backend,
                 "load_seconds": self.analyzer.load_seconds,
                 "frame_source": visual_meta.get("frame_source"),
                 "params": visual_meta.get("params"),
@@ -266,15 +294,33 @@ class Pipeline:
 
         bench.reset_peak_vram()
         cache = ckpt.load_window_cache()
-        # 缓存键带上输出语言：换语言重跑时不能复用另一种语言的描述
+        # 缓存键带上输出语言 + 模型：换语言或换模型重跑时不能复用旧描述
+        model_tag = self.analyzer.model_id.split("/")[-1]
+
         def key_of(idx: int, s: float, e: float) -> str:
-            return f"{output_language}|{idx}:{s:.3f}-{e:.3f}"
+            return f"{model_tag}|{output_language}|{idx}:{s:.3f}-{e:.3f}"
+
 
         all_cached = all(key_of(i, s, e) in cache for i, (s, e) in enumerate(windows))
         if all_cached:
             logger.info("全部 %d 个窗口命中缓存，跳过视觉模型加载", len(windows))
         else:
+            report_progress("visual", 0.01, f"加载视觉模型（共 {len(windows)} 个窗口）", video=info.name,
+                            done=0, total=len(windows))
+            # 语音已经跑完，先把 whisper 的显存还回去再加载视觉模型。
+            # 12GB 卡上实测：不释放会让视觉模型加载 8.6s -> 95.7s、首批推理 11.4s -> 163.6s
+            # （驱动把权重换页到共享内存）。重新加载 whisper 只要 ~20s，明显划算。
+            if self.cfg.runtime.get("unload_speech_before_visual", True):
+                self.asr.unload()
             self._load_visual_model()
+
+        done_windows = 0
+
+        def report_window(detail: str) -> None:
+            # 视觉阶段占总进度的大头，进度按已完成窗口数推进（含缓存命中的窗口）
+            report_progress("visual", done_windows / max(len(windows), 1), detail,
+                            video=info.name, done=done_windows, total=len(windows))
+
 
         all_events: list[VisualEvent] = []
         window_metas: list[dict] = []
@@ -298,6 +344,8 @@ class Pipeline:
                     window_metas.append(cached["meta"])
                     total_frames += int(cached["meta"].get("frames", 0))
                     logger.info("窗口 %d/%d 复用缓存（%d 事件）", idx + 1, len(windows), len(events))
+                    done_windows += 1
+                    report_window(f"窗口 {idx + 1}/{len(windows)} 复用缓存")
                 else:
                     todo.append((idx, start, end))
             if not todo:
@@ -348,6 +396,8 @@ class Pipeline:
                 cache[key_of(idx, start, end)] = {
                     "events": [e.to_dict() for e in events], "meta": meta,
                 }
+                done_windows += 1
+                report_window(f"窗口 {idx + 1}/{len(windows)} [{start:.1f}-{end:.1f}s] -> {len(events)} 事件")
             ckpt.save_window_cache(cache)
             # 若因 OOM 缩小了 batch，剩下的窗口放回队列下一轮处理
             leftover = todo[len(current_batch):]
@@ -363,10 +413,12 @@ class Pipeline:
         logger.info("视觉事件：原始 %d -> 合并去重后 %d", len(all_events), len(events))
 
         # Language Renderer：最终描述统一到 output_language（模型还在显存里，改写最便宜）
+        report_window("统一最终语言描述")
         events = self._render_language(events, renderer)
 
         meta = {
             "model_id": self.analyzer.model_id,
+            "backend": self.analyzer.backend,
             "output_language": output_language,
             "language_render": renderer.stats(),
             "frame_source": window_metas[0].get("frame_source") if window_metas else None,
@@ -397,6 +449,7 @@ class Pipeline:
         return events
 
     def _load_visual_model(self, model_id: str | None = None) -> None:
+        self._ensure_backend(model_id)
         try:
             self.analyzer.load(model_id)
         except Exception as exc:
@@ -406,7 +459,22 @@ class Pipeline:
             if not fallback:
                 raise
             logger.warning("视觉模型加载显存不足，改用 %s", fallback[0])
+            self._ensure_backend(fallback[0])
             self.analyzer.load(fallback[0])
+
+    def _ensure_backend(self, model_id: str | None) -> None:
+        """降级/切换模型时后端可能也要换（Qwen3-VL <-> MiniCPM 接口完全不同）。"""
+        if not model_id:
+            return
+        wanted = backend_for(self.cfg.visual, model_id)
+        if wanted == self.analyzer.backend:
+            return
+        logger.info("视觉后端切换：%s -> %s（%s）", self.analyzer.backend, wanted, model_id)
+        language = self.analyzer.output_language
+        self.analyzer.unload()
+        self.analyzer = create_analyzer(self.cfg.visual, self.model_dir, self.cfg.mirrors, model_id)
+        self.analyzer.set_output_language(language)
+
 
     def close(self) -> None:
         self.analyzer.unload()

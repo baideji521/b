@@ -47,7 +47,28 @@ def _apply_mirror(cfg: Config) -> None:
     os.environ.setdefault("PYTHONUTF8", "1")
 
 
+def _apply_visual_override(cfg: Config, args: argparse.Namespace) -> None:
+    """命令行覆盖视觉模型 / 后端（GUI 切换模型也是走这两个参数）。"""
+    from vidscribe.visual.factory import known_models, resolve_backend  # noqa: PLC0415
+
+    model = getattr(args, "visual_model", None)
+    backend = getattr(args, "backend", None)
+    if model:
+        # 允许只写短名，比如 minicpm / MiniCPM-V-4_5-int4
+        matched = model
+        for entry in known_models(cfg.visual):
+            if entry["model_id"].lower() == model.lower() or entry["model_id"].split("/")[-1].lower() == model.lower():
+                matched = entry["model_id"]
+                break
+        cfg.visual["model_id"] = matched
+        logger.info("视觉模型覆盖为: %s", matched)
+    if backend:
+        cfg.visual["backend"] = resolve_backend(cfg.visual["model_id"], backend)
+        logger.info("视觉后端覆盖为: %s", cfg.visual["backend"])
+
+
 # ------------------------------------------------------------------ 环境检查
+
 def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     snapshot = bench.environment_snapshot()
     print(json.dumps(snapshot, ensure_ascii=False, indent=2))
@@ -81,6 +102,7 @@ def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ 模型下载
 def cmd_download(cfg: Config, args: argparse.Namespace) -> int:
     _apply_mirror(cfg)
+    _apply_visual_override(cfg, args)
     from vidscribe.mirrors import resolve_model, whisper_repo_id  # noqa: PLC0415
 
     model_dir = cfg.path("model_dir")
@@ -114,6 +136,7 @@ def cmd_download(cfg: Config, args: argparse.Namespace) -> int:
 # ------------------------------------------------------------------ 主流程
 def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     _apply_mirror(cfg)
+    _apply_visual_override(cfg, args)
     from vidscribe.pipeline import Pipeline  # noqa: PLC0415
 
     videos: list[Path] = []
@@ -284,7 +307,7 @@ def write_final_report(path: Path, cfg: Config, results: list[dict], total: floa
             f"  语言判定依据: {ld.get('reason')}",
             f"  最终语言渲染: 语种不符={lr.get('mismatched', 0)}  模型改写={lr.get('rewritten_by_model', 0)}  "
             f"模板/保留原文={lr.get('template_or_kept', 0)}",
-            f"  视觉模型:   {vm.get('model_id')}  帧来源={vm.get('frame_source')}  窗口={vm.get('windows')}  分析帧数={vm.get('analyzed_frames')}  降级次数={vm.get('degrade_attempts')}",
+            f"  视觉模型:   {vm.get('model_id')}  后端={vm.get('backend')}  帧来源={vm.get('frame_source')}  窗口={vm.get('windows')}  分析帧数={vm.get('analyzed_frames')}  降级次数={vm.get('degrade_attempts')}",
             f"  视觉参数:   {json.dumps(vm.get('params'), ensure_ascii=False)}",
             f"  语音模型:   {sm.get('size')} / {sm.get('device')} / {sm.get('compute_type')}   语言={r.get('language')}",
             f"  耗时(s):    探测={timings.get('probe_seconds', 0):.1f}  视觉={timings.get('visual_seconds', 0):.1f}  "
@@ -329,6 +352,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl = sub.add_parser("download", help="预下载模型（优先国内镜像：ModelScope -> hf-mirror -> 官方）")
     p_dl.add_argument("--all", action="store_true", help="同时下载降级备用模型")
     p_dl.add_argument("--force", action="store_true", help="忽略本地缓存重新下载")
+    p_dl.add_argument("--visual-model", default=None, help="改下载指定视觉模型，如 openbmb/MiniCPM-V-4_5-int4")
+    p_dl.add_argument("--backend", default=None, choices=["auto", "qwen3vl", "minicpm"], help="视觉后端")
     p_dl.set_defaults(func=cmd_download)
 
     p_run = sub.add_parser("run", help="处理视频（默认处理 input/ 下全部视频）")
@@ -337,6 +362,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--skip-visual", action="store_true")
     p_run.add_argument("--skip-speech", action="store_true")
     p_run.add_argument("--limit", type=int, default=0, help="最多处理几个视频")
+    p_run.add_argument("--visual-model", default=None,
+                       help="覆盖视觉模型，如 openbmb/MiniCPM-V-4_5-int4（可只写 MiniCPM-V-4_5-int4）")
+    p_run.add_argument("--backend", default=None, choices=["auto", "qwen3vl", "minicpm"],
+                       help="视觉后端，默认按模型名自动判断")
     p_run.set_defaults(func=cmd_run)
     p_gui = sub.add_parser("gui", help="启动 PyQt5 图形界面（左视频 / 右时间轴 / 底部语音）")
     p_gui.add_argument("video", nargs="?", default=None, help="启动时直接打开的视频")

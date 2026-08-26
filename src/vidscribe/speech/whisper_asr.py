@@ -15,6 +15,7 @@ from typing import Any
 
 from ..events import SpeechEvent, SpeechWord
 from ..logging_setup import get_logger
+from ..progress import report as report_progress
 from ..video_io import VideoInfo
 
 logger = get_logger(__name__)
@@ -122,7 +123,25 @@ class WhisperASR:
         raise RuntimeError(f"所有 faster-whisper 配置均加载失败: {last_error}")
 
     def unload(self) -> None:
+        """释放语音模型。
+
+        CTranslate2 的显存不走 torch 分配器，只有对象被回收才会还给驱动，
+        所以这里必须显式 gc；12GB 卡上不释放会把视觉模型挤到共享内存里换页。
+        """
+        import gc  # noqa: PLC0415
+
+        if self.model is None:
+            return
         self.model = None
+        gc.collect()
+        try:
+            import torch  # noqa: PLC0415
+
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+        logger.info("已释放语音模型显存")
 
     # ------------------------------------------------------------------ 识别
     def transcribe(self, info: VideoInfo) -> dict[str, Any]:
@@ -146,7 +165,15 @@ class WhisperASR:
 
         try:
             segments_iter, tr_info = self.model.transcribe(info.path, **kwargs)
-            segments = list(segments_iter)  # 生成器是懒执行的，必须迭代才真正推理
+            # 生成器是懒执行的，必须迭代才真正推理；顺便按已识别到的时间点上报进度
+            audio_seconds = float(getattr(tr_info, "duration", 0.0) or info.duration or 0.0)
+            segments = []
+            for seg in segments_iter:
+                segments.append(seg)
+                if audio_seconds > 0:
+                    report_progress("speech", min(1.0, float(seg.end) / audio_seconds),
+                                    f"已识别 {seg.end:.1f}s / {audio_seconds:.1f}s（{len(segments)} 段）",
+                                    video=info.name, done=round(float(seg.end), 2), total=round(audio_seconds, 2))
         except Exception as exc:
             message = str(exc)
             if "does not contain any stream" in message or "Invalid data" in message or "no audio" in message.lower():
