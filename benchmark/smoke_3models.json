@@ -1,0 +1,435 @@
+{
+  "generated_at": "2026-08-27T08:12:52",
+  "environment": {
+    "os": "Windows 11 (10.0.22631)",
+    "machine": "AMD64",
+    "python": "3.12.10",
+    "packages": {
+      "torch": "2.8.0+cu126",
+      "torchvision": "0.23.0+cu126",
+      "transformers": "4.57.6",
+      "accelerate": "1.14.0",
+      "qwen-vl-utils": "0.0.14",
+      "faster-whisper": "1.2.1",
+      "ctranslate2": "4.8.1",
+      "opencv-python": "4.11.0.86",
+      "av": "18.1.0",
+      "numpy": "2.5.2"
+    },
+    "gpu": {
+      "available": true,
+      "torch": "2.8.0+cu126",
+      "torch_cuda": "12.6",
+      "name": "NVIDIA GeForce RTX 3060",
+      "total_vram_mb": 12287,
+      "capability": "8.6",
+      "cudnn": 91002,
+      "driver": "591.86"
+    }
+  },
+  "video": {
+    "path": "F:\\视频音频转文字\\test.mp4",
+    "name": "test.mp4",
+    "duration": 49.167,
+    "fps": 30.0,
+    "width": 810,
+    "height": 1080,
+    "total_frames": 1475,
+    "has_audio": true,
+    "video_codec": "h264",
+    "audio_codec": "aac"
+  },
+  "ground_truth_file": "F:\\视频音频转文字\\benchmark\\ground_truth.json",
+  "scene_detect_seconds": 1.536,
+  "scene_cuts": [],
+  "speech": {
+    "whisper_seconds": 21.961,
+    "whisper_load_seconds": 6.32,
+    "language": "en",
+    "language_confidence": null,
+    "available": true,
+    "model": {
+      "size": "large-v3",
+      "device": "cuda",
+      "compute_type": "float16"
+    },
+    "word_count": 140
+  },
+  "output_language": "en",
+  "language_decision": {
+    "audio_available": true,
+    "detected_language": "en",
+    "language_confidence": null,
+    "dominant_language": "en",
+    "secondary_languages": [],
+    "output_language": "en",
+    "default_used": false,
+    "reason": "dominant=en (时长占比 1.00)"
+  },
+  "windows": [
+    [
+      0.0,
+      15.0
+    ],
+    [
+      12.0,
+      27.0
+    ],
+    [
+      24.0,
+      39.0
+    ],
+    [
+      36.0,
+      49.167
+    ]
+  ],
+  "fixed": {
+    "window_seconds": 15.0,
+    "window_overlap_seconds": 3.0,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "batch_size": 2,
+    "repeats": 3
+  },
+  "configs": {
+    "A": {
+      "fps": 1.5,
+      "max_frames": 16,
+      "max_new_tokens": 512
+    },
+    "B": {
+      "fps": 1.0,
+      "max_frames": 12,
+      "max_new_tokens": 256
+    },
+    "C": {
+      "fps": 0.75,
+      "max_frames": 8,
+      "max_new_tokens": 192
+    },
+    "D": {
+      "fps": 0.5,
+      "max_frames": 8,
+      "max_new_tokens": 128
+    }
+  },
+  "models": [
+    {
+      "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+      "backend": "qwen3vl",
+      "status": "OK",
+      "smoke": {
+        "status": "OK",
+        "error": null,
+        "seconds": 32.31,
+        "events": [
+          {
+            "id": 1,
+            "start": 0.0,
+            "end": 3.0,
+            "event": "holding_chocolate",
+            "description": "woman holds chocolate, man holds bag, both look at camera",
+            "confidence": 0.9,
+            "importance": "normal",
+            "timestamp_source": "hybrid",
+            "source_frames": [
+              0,
+              43,
+              85,
+              128,
+              171,
+              214,
+              256,
+              299
+            ],
+            "ocr_text": "crunchie beans",
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "holding",
+            "scene": "indoor_room",
+            "subjects": [
+              "woman",
+              "man"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          },
+          {
+            "id": 2,
+            "start": 3.0,
+            "end": 6.0,
+            "event": "eating_chocolate",
+            "description": "woman eats chocolate, man reacts with surprise",
+            "confidence": 0.9,
+            "importance": "normal",
+            "timestamp_source": "model_estimated",
+            "source_frames": [],
+            "ocr_text": "crunchie beans",
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "eating",
+            "scene": "indoor_room",
+            "subjects": [
+              "woman",
+              "man"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          }
+        ],
+        "raw_output": "{\"events\":[{\"start\":0.0,\"end\":3.0,\"event\":\"holding_chocolate\",\"description\":\"woman holds chocolate, man holds bag, both look at camera\",\"action\":\"holding\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":\"crunchie beans\"},{\"start\":3.0,\"end\":6.0,\"event\":\"eating_chocolate\",\"description\":\"woman eats chocolate, man reacts with surprise\",\"action\":\"eating\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":\"crunchie beans\"},{\"start\":6.0,\"end\":9.1,\"event\":\"man_reacts\",\"description\":\"man gestures with hand, woman laughs, man looks away\",\"action\":\"gesturing\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0",
+        "frames": 8,
+        "resolution": [
+          288,
+          384
+        ],
+        "quality": {
+          "event_count": 2,
+          "coverage": 0.122,
+          "person_count_mode": 2,
+          "person_count_correct": 1.0,
+          "person_count_per_event_accuracy": 1.0,
+          "person_consistency": 1.0,
+          "hallucination_rate": 1.0,
+          "ocr_hit": 0.0,
+          "ocr_reported": 1.0,
+          "frame_calibrated_ratio": 0.5,
+          "timestamp_sane_ratio": 1.0,
+          "language_match_ratio": 1.0,
+          "duplicate_ratio": 0.0,
+          "mean_confidence": 0.9
+        }
+      },
+      "load_seconds": 21.69,
+      "configs": {},
+      "load_peak_vram": {
+        "allocated_mb": 8464.5,
+        "reserved_mb": 8468.0
+      }
+    },
+    {
+      "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+      "backend": "qwen3vl",
+      "status": "OK",
+      "smoke": {
+        "status": "OK",
+        "error": null,
+        "seconds": 474.18,
+        "events": [
+          {
+            "id": 1,
+            "start": 0.0,
+            "end": 3.5,
+            "event": "woman holds chocolate",
+            "description": "woman holds chocolate in hand",
+            "confidence": 0.5,
+            "importance": "normal",
+            "timestamp_source": "hybrid",
+            "source_frames": [
+              0,
+              43,
+              85,
+              128,
+              171,
+              214,
+              256,
+              299
+            ],
+            "ocr_text": null,
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "holding_chocolate",
+            "scene": "indoor_room",
+            "subjects": [
+              "woman",
+              "chocolate"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          },
+          {
+            "id": 2,
+            "start": 3.5,
+            "end": 6.8,
+            "event": "woman shows chocolate",
+            "description": "woman shows chocolate to camera",
+            "confidence": 0.5,
+            "importance": "normal",
+            "timestamp_source": "model_estimated",
+            "source_frames": [],
+            "ocr_text": null,
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "showing_chocolate",
+            "scene": "indoor_room",
+            "subjects": [
+              "woman",
+              "chocolate"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          },
+          {
+            "id": 3,
+            "start": 6.8,
+            "end": 9.1,
+            "event": "man reacts to chocolate",
+            "description": "man reacts to chocolate",
+            "confidence": 0.5,
+            "importance": "normal",
+            "timestamp_source": "model_estimated",
+            "source_frames": [],
+            "ocr_text": null,
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "reacting_to_chocolate",
+            "scene": "indoor_room",
+            "subjects": [
+              "man",
+              "chocolate"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          }
+        ],
+        "raw_output": "{\"events\":[{\"start\":0.0,\"end\":3.5,\"event\":\"woman holds chocolate\",\"description\":\"woman holds chocolate in hand\",\"action\":\"holding_chocolate\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"chocolate\"]},{\"start\":3.5,\"end\":6.8,\"event\":\"woman shows chocolate\",\"description\":\"woman shows chocolate to camera\",\"action\":\"showing_chocolate\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"chocolate\"]},{\"start\":6.8,\"end\":9.1,\"event\":\"man reacts to chocolate\",\"description\":\"man reacts to chocolate\",\"action\":\"reacting_to_chocolate\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"chocolate\"]}]}",
+        "frames": 8,
+        "resolution": [
+          288,
+          384
+        ],
+        "quality": {
+          "event_count": 3,
+          "coverage": 0.1851,
+          "person_count_mode": 1,
+          "person_count_correct": 0.0,
+          "person_count_per_event_accuracy": 0.0,
+          "person_consistency": 1.0,
+          "hallucination_rate": 1.0,
+          "ocr_hit": 0.0,
+          "ocr_reported": 0.0,
+          "frame_calibrated_ratio": 0.3333,
+          "timestamp_sane_ratio": 1.0,
+          "language_match_ratio": 1.0,
+          "duplicate_ratio": 0.0,
+          "mean_confidence": 0.5
+        }
+      },
+      "load_seconds": 158.71,
+      "configs": {},
+      "load_peak_vram": {
+        "allocated_mb": 4067.2,
+        "reserved_mb": 4070.0
+      }
+    },
+    {
+      "model_id": "openbmb/MiniCPM-V-4_5-int4",
+      "backend": "minicpm",
+      "status": "OK",
+      "smoke": {
+        "status": "OK",
+        "error": null,
+        "seconds": 30.75,
+        "events": [
+          {
+            "id": 1,
+            "start": 0.0,
+            "end": 6.8,
+            "event": "sitting_and_holding",
+            "description": "two people sitting on a couch, one holding chocolate package and showing candy to camera.",
+            "confidence": 1.0,
+            "importance": "normal",
+            "timestamp_source": "hybrid",
+            "source_frames": [
+              0,
+              43,
+              85,
+              128,
+              171,
+              214,
+              256,
+              299
+            ],
+            "ocr_text": null,
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "holding",
+            "scene": "indoor_room",
+            "subjects": [
+              "man",
+              "woman"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          },
+          {
+            "id": 2,
+            "start": 6.8,
+            "end": 9.1,
+            "event": "laughing_and_pointing",
+            "description": "the woman laughs while the man points at her hand with his finger.",
+            "confidence": 1.0,
+            "importance": "low",
+            "timestamp_source": "model_estimated",
+            "source_frames": [],
+            "ocr_text": null,
+            "window": [
+              0.0,
+              10.0
+            ],
+            "action": "pointing",
+            "scene": "indoor_room",
+            "subjects": [
+              "man",
+              "woman"
+            ],
+            "description_language": null,
+            "language_fallback": false
+          }
+        ],
+        "raw_output": "",
+        "frames": 8,
+        "resolution": [
+          288,
+          384
+        ],
+        "quality": {
+          "event_count": 2,
+          "coverage": 0.1851,
+          "person_count_mode": 2,
+          "person_count_correct": 1.0,
+          "person_count_per_event_accuracy": 1.0,
+          "person_consistency": 1.0,
+          "hallucination_rate": 1.0,
+          "ocr_hit": 0.0,
+          "ocr_reported": 0.0,
+          "frame_calibrated_ratio": 0.5,
+          "timestamp_sane_ratio": 1.0,
+          "language_match_ratio": 1.0,
+          "duplicate_ratio": 0.0,
+          "mean_confidence": 1.0
+        }
+      },
+      "load_seconds": 22.45,
+      "configs": {},
+      "load_peak_vram": {
+        "allocated_mb": 7436.8,
+        "reserved_mb": 7468.0
+      }
+    }
+  ],
+  "total_seconds": 741.13
+}

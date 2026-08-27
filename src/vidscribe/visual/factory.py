@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any
 
-BACKENDS = ("qwen3vl", "minicpm")
+BACKENDS = ("qwen3vl", "minicpm", "minicpm46")
 
 
 def resolve_backend(model_id: str, backend: str | None = None) -> str:
@@ -20,6 +20,9 @@ def resolve_backend(model_id: str, backend: str | None = None) -> str:
             raise ValueError(f"未知视觉后端: {backend}（可选 {', '.join(BACKENDS)}）")
         return code
     name = (model_id or "").lower()
+    # 4.6 已原生进 transformers（需要 5.7+），和 4.5 的 trust_remote_code 路线完全不同
+    if "minicpm" in name and ("4.6" in name or "4_6" in name):
+        return "minicpm46"
     if "minicpm" in name:
         return "minicpm"
     return "qwen3vl"
@@ -67,6 +70,10 @@ def create_analyzer(vcfg: dict[str, Any], model_dir: str | None = None,
         from .minicpm import MiniCPMAnalyzer  # noqa: PLC0415
 
         return MiniCPMAnalyzer(cfg, model_dir, mirrors)
+    if backend == "minicpm46":
+        from .minicpm46 import MiniCPM46Analyzer  # noqa: PLC0415
+
+        return MiniCPM46Analyzer(cfg, model_dir, mirrors)
     from .qwen_vl import QwenVLAnalyzer  # noqa: PLC0415
 
     return QwenVLAnalyzer(cfg, model_dir, mirrors)

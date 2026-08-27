@@ -1,0 +1,209 @@
+{
+  "model_id": "openbmb/MiniCPM-V-4_5-int4",
+  "config": "C",
+  "label": "run2",
+  "params": {
+    "fps": 0.75,
+    "max_frames": 8,
+    "min_frames": 6,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "max_new_tokens": 192
+  },
+  "raw_outputs": [
+    "{\"events\":[{\"start\":0.0,\"end\":2.1,\"event\":\"sitting_and_holding\",\"description\":\"two people sitting, one holding chocolate package and piece.\",\"action\":\"holding\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0.9},\n{\"start\":4.3,\"end\":6.7,\"event\":\"eating_chocolate\",\"description\":\"the woman eats the small object in her hand while talking to man with cap.\",\"action\":\"eating\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"chocolate\"],\"importance\":\"low\",\"confidence\":0.85}]}",
+    "{\"events\":[{\"start\":12.0,\"end\":26.9,\"event\":\"sitting_and_holding_chocolate\",\"description\":\"two people sitting, one holding a packet of snickers and eating chocolate.\",\"action\":\"sitting_and_holding\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0.9}]}",
+    "{\"events\":[{\"start\":24.0,\"end\":38.9,\"event\":\"eating chocolate\",\"description\":\"man and woman eating chocolates while sitting on a couch.\",\"action\":\"eating_chocolate\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\", \"man\"], \"importance\":\"normal\", \"confidence\":1.0, \"ocr_text\":\"CENSORED\"}]}",
+    "{\"events\":[{\"start\":36.0,\"end\":41.5,\"event\":\"eating chocolate\",\"description\":\"man and woman eating chocolates from a bag.\",\"action\":\"eating_chocolate\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"normal\",\"confidence\":0.9},{\"start\":41.7,\"end\":42.8,\"event\":\"reaction to taste\",\"description\":\"both react with surprise or disgust at the flavor of one piece, man leans away briefly before returning his gaze forward.\",\"action\":\"reacting_to_taste\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"low\",\"confidence\":0.9}]}"
+  ],
+  "events": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 2.1,
+      "event": "sitting_and_holding",
+      "description": "two people sitting, one holding chocolate package and piece.",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        0,
+        64
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holding",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 2,
+      "start": 4.233,
+      "end": 6.367,
+      "event": "eating_chocolate",
+      "description": "the woman eats the small object in her hand while talking to man with cap.",
+      "confidence": 0.85,
+      "importance": "low",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        128,
+        192
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "eating",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "chocolate"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 3,
+      "start": 11.967,
+      "end": 23.967,
+      "event": "sitting_and_holding_chocolate",
+      "description": "two people sitting, one holding a packet of snickers and eating chocolate.",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        360,
+        424,
+        488,
+        552,
+        617,
+        681,
+        745,
+        809
+      ],
+      "ocr_text": null,
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "sitting_and_holding",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 4,
+      "start": 23.967,
+      "end": 41.6,
+      "event": "eating chocolate",
+      "description": "man and woman eating chocolates while sitting on a couch.",
+      "confidence": 1.0,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        720,
+        784,
+        848,
+        912,
+        977,
+        1041,
+        1080,
+        1105,
+        1136,
+        1169,
+        1193,
+        1249
+      ],
+      "ocr_text": "CENSORED",
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "eating_chocolate",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 5,
+      "start": 41.6,
+      "end": 43.467,
+      "event": "reaction to taste",
+      "description": "both react with surprise or disgust at the flavor of one piece, man leans away briefly before returning his gaze forward.",
+      "confidence": 0.9,
+      "importance": "low",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        1249,
+        1305
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "reacting_to_taste",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    }
+  ],
+  "timing": {
+    "visual_seconds": 104.701,
+    "frame_decode_seconds": 3.895,
+    "chat_template_seconds": 0.0,
+    "processor_seconds": 0.0,
+    "generate_seconds": 100.739,
+    "text_decode_seconds": 0.0,
+    "resolution": [
+      288,
+      384
+    ]
+  },
+  "quality": {
+    "event_count": 5,
+    "coverage": 0.7268,
+    "person_count_mode": 2,
+    "person_count_correct": 1.0,
+    "person_count_per_event_accuracy": 0.8,
+    "person_consistency": 0.8,
+    "hallucination_rate": 0.0,
+    "hallucination_events": 0,
+    "hallucination_by_category": {},
+    "hallucination_evidence": [],
+    "ocr_hit": 0.0,
+    "ocr_reported": 1.0,
+    "ocr_recall": 0.0,
+    "ocr_precision": 0.0,
+    "ocr_invented_samples": [
+      "censored"
+    ],
+    "frame_calibrated_ratio": 1.0,
+    "timestamp_sane_ratio": 1.0,
+    "language_match_ratio": 1.0,
+    "duplicate_ratio": 0.0,
+    "mean_confidence": 0.91,
+    "raw_event_count": 6
+  }
+}

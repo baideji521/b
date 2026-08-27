@@ -235,6 +235,9 @@ class Pipeline:
                 "params": visual_meta.get("params"),
                 "windows": visual_meta.get("window_count"),
                 "analyzed_frames": visual_meta.get("total_frames_analyzed"),
+                "stage_seconds": visual_meta.get("stage_seconds"),
+                "generated_tokens": visual_meta.get("generated_tokens"),
+                "prompt_tokens_max": visual_meta.get("prompt_tokens_max"),
                 "degrade_attempts": visual_meta.get("degrade_attempts", 0),
             },
             "speech_model": speech_payload.get("model"),
@@ -372,7 +375,7 @@ class Pipeline:
                         logger.warning("CUDA OOM，batch %d -> %d 后重试", len(current_batch), half)
                         current_batch = current_batch[:half]
                         continue
-                    if attempt > max_retries:
+                    if attempt > max_retries or not params.can_degrade():
                         if fallback_ids:
                             smaller = fallback_ids.pop(0)
                             logger.warning("多次 OOM，切换到更小的视觉模型：%s", smaller)
@@ -381,8 +384,10 @@ class Pipeline:
                             attempt = 0
                             continue
                         raise RuntimeError(f"窗口显存不足且已无降级空间: {exc}") from exc
-                    params = params.degrade()
-                    logger.warning("CUDA OOM，降级参数后重试(%d/%d)：%s", attempt, max_retries, params.to_dict())
+                    params = params.degrade(reason="cuda_oom")
+                    logger.warning("CUDA OOM，降级参数后重试(%d/%d)：%s | %s",
+                                   attempt, max_retries, params.to_dict(),
+                                   params.degrade_history[-1] if params.degrade_history else "")
 
             for (idx, start, end), (events, meta) in zip(current_batch, results):
                 logger.info(
@@ -424,6 +429,13 @@ class Pipeline:
             "frame_source": window_metas[0].get("frame_source") if window_metas else None,
             "params": params.to_dict(),
             "window_count": len(windows),
+            # 视觉阶段分项耗时：定位瓶颈用，不依赖外部 profiler
+            "stage_seconds": {
+                key: round(sum(float(m.get(f"{key}_seconds") or 0.0) for m in window_metas), 3)
+                for key in ("frame_decode", "chat_template", "processor", "generate", "text_decode")
+            },
+            "generated_tokens": sum(int(m.get("generated_tokens") or 0) for m in window_metas),
+            "prompt_tokens_max": max([int(m.get("prompt_tokens") or 0) for m in window_metas] or [0]),
             "windows": [{k: v for k, v in m.items() if k != "raw_output"} for m in window_metas],
             "total_frames_analyzed": total_frames,
             "raw_event_count": len(all_events),

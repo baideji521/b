@@ -28,6 +28,7 @@ from vidscribe.config import Config  # noqa: E402
 from vidscribe.logging_setup import get_logger, setup_logging  # noqa: E402
 from vidscribe.timeline.exporters import fmt_time  # noqa: E402
 from vidscribe.video_io import list_videos  # noqa: E402
+from vidscribe.visual.factory import BACKENDS  # noqa: E402
 
 logger = get_logger("cli")
 
@@ -353,7 +354,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_dl.add_argument("--all", action="store_true", help="同时下载降级备用模型")
     p_dl.add_argument("--force", action="store_true", help="忽略本地缓存重新下载")
     p_dl.add_argument("--visual-model", default=None, help="改下载指定视觉模型，如 openbmb/MiniCPM-V-4_5-int4")
-    p_dl.add_argument("--backend", default=None, choices=["auto", "qwen3vl", "minicpm"], help="视觉后端")
+    p_dl.add_argument("--backend", default=None, choices=["auto", *BACKENDS], help="视觉后端")
     p_dl.set_defaults(func=cmd_download)
 
     p_run = sub.add_parser("run", help="处理视频（默认处理 input/ 下全部视频）")
@@ -364,7 +365,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--limit", type=int, default=0, help="最多处理几个视频")
     p_run.add_argument("--visual-model", default=None,
                        help="覆盖视觉模型，如 openbmb/MiniCPM-V-4_5-int4（可只写 MiniCPM-V-4_5-int4）")
-    p_run.add_argument("--backend", default=None, choices=["auto", "qwen3vl", "minicpm"],
+    p_run.add_argument("--backend", default=None, choices=["auto", *BACKENDS],
                        help="视觉后端，默认按模型名自动判断")
     p_run.set_defaults(func=cmd_run)
     p_gui = sub.add_parser("gui", help="启动 PyQt5 图形界面（左视频 / 右时间轴 / 底部语音）")

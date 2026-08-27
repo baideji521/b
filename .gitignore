@@ -8,6 +8,10 @@ __pycache__/
 # 模型权重（几个 GB，从 ModelScope/HF 镜像自行下载）
 models/
 
+# MiniCPM-V 4.6 专用的 transformers 5.7 依赖隔离层（几百 MB 第三方包，用脚本重建）
+libs/
+
+
 # 运行产物
 output/
 work/

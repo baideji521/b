@@ -1,0 +1,196 @@
+{
+  "model_id": "openbmb/MiniCPM-V-4_5-int4",
+  "config": "A",
+  "label": "run2",
+  "params": {
+    "fps": 1.5,
+    "max_frames": 16,
+    "min_frames": 6,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "max_new_tokens": 512
+  },
+  "raw_outputs": [
+    "{\"events\":[{\"start\":0.0,\"end\":14.9,\"event\":\"sitting_and_talking\",\"description\":\"two people sitting on a couch, holding and eating chocolate eggs.\",\"action\":\"talking_and_eating\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\",\"chocolate_eggs\"],\"importance\":\"normal\",\"confidence\":0.9}]}",
+    "{\"events\":[{\"start\":12.0,\"end\":19.8,\"event\":\"sitting_and_talking\",\"description\":\"two people sitting, man holding chocolate bag and eating.\",\"action\":\"sitting_and_eating\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0.9},{\"start\":19.9,\"end\":26.7,\"event\":\"showing_chocolate\",\"description\":\"woman shows a piece of candy to the camera; both eat chocolates.\",\"action\":\"holding_and_eating_candy\",\"scene\":\"indoor_room\",\"subjects\":[\"chocolates\",\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0.9}]}",
+    "{\"events\":[{\"start\":24.0,\"end\":31.9,\"event\":\"showing_chocolate\",\"description\":\"man and woman sitting, man holding chocolate bag, showing chocolates to camera.\",\"action\":\"sitting_and_showing\",\"scene\":\"indoor_room_with_window\",\"subjects\":[\"woman\",\"man\",\"chocolates\"],\"importance\":\"normal\",\"confidence\":0.9},{\"start\":31.9,\"end\":38.9,\"event\":\"eating_chocolate\",\"description\":\"man eats a piece of candy while talking; both hold candies at one point.\",\"action\":\"eating_candy\",\"scene\":\"same_room\",\"subjects\":[\"man\",\"woman\",\"candies\"],\"importance\":\"normal\",\"confidence\":0.9}]}",
+    "{\"events\":[{\"start\":36.0,\"end\":41.2,\"event\":\"eating_chocolate\",\"description\":\"man and woman eating chocolate, man shows cross-section of candy.\",\"action\":\"showing_and_eating_candy\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"normal\",\"confidence\":0.9},{\"start\":41.2,\"end\":45.7,\"event\":\"talking_and_gesturing\",\"description\":\"conversation with hand gestures between two people on couch.\",\"action\":\"gesturing_during_talk\",\"scene\":\"living_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"low\",\"confidence\":0.8}]}"
+  ],
+  "events": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 19.933,
+      "event": "sitting_and_talking",
+      "description": "two people sitting on a couch, holding and eating chocolate eggs.",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        0,
+        30,
+        60,
+        90,
+        120,
+        150,
+        180,
+        210,
+        239,
+        269,
+        299,
+        329,
+        359,
+        360,
+        389,
+        390,
+        419,
+        420,
+        449,
+        450,
+        480,
+        510,
+        540,
+        570,
+        599
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "talking_and_eating",
+      "scene": "indoor_room",
+      "subjects": [
+        "chocolate_eggs",
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 2,
+      "start": 19.933,
+      "end": 41.233,
+      "event": "showing_chocolate",
+      "description": "man and woman sitting, man holding chocolate bag, showing chocolates to camera.",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        599,
+        629,
+        659,
+        689,
+        719,
+        720,
+        749,
+        750,
+        779,
+        780,
+        809,
+        810,
+        840,
+        870,
+        900,
+        930,
+        959,
+        989,
+        1019,
+        1049,
+        1079,
+        1080,
+        1106,
+        1109,
+        1133,
+        1139,
+        1159,
+        1169,
+        1185,
+        1211,
+        1238
+      ],
+      "ocr_text": null,
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "holding_and_eating_candy",
+      "scene": "indoor_room",
+      "subjects": [
+        "candies",
+        "chocolates",
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 3,
+      "start": 41.233,
+      "end": 45.6,
+      "event": "talking_and_gesturing",
+      "description": "conversation with hand gestures between two people on couch.",
+      "confidence": 0.8,
+      "importance": "low",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        1238,
+        1264,
+        1290,
+        1316,
+        1343,
+        1369
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "gesturing_during_talk",
+      "scene": "living_room",
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    }
+  ],
+  "timing": {
+    "visual_seconds": 123.561,
+    "frame_decode_seconds": 6.868,
+    "chat_template_seconds": 0.0,
+    "processor_seconds": 0.0,
+    "generate_seconds": 116.558,
+    "text_decode_seconds": 0.0,
+    "resolution": [
+      288,
+      384
+    ]
+  },
+  "quality": {
+    "event_count": 3,
+    "coverage": 0.9275,
+    "person_count_mode": 2,
+    "person_count_correct": 1.0,
+    "person_count_per_event_accuracy": 1.0,
+    "person_consistency": 1.0,
+    "hallucination_rate": 0.0,
+    "hallucination_events": 0,
+    "hallucination_by_category": {},
+    "hallucination_evidence": [],
+    "ocr_hit": 0.0,
+    "ocr_reported": 0.0,
+    "ocr_recall": 0.0,
+    "ocr_precision": null,
+    "ocr_invented_samples": [],
+    "frame_calibrated_ratio": 1.0,
+    "timestamp_sane_ratio": 1.0,
+    "language_match_ratio": 1.0,
+    "duplicate_ratio": 0.0,
+    "mean_confidence": 0.8667,
+    "raw_event_count": 7
+  }
+}

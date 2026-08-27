@@ -1,0 +1,245 @@
+{
+  "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+  "config": "A",
+  "label": "run2",
+  "params": {
+    "fps": 1.5,
+    "max_frames": 16,
+    "min_frames": 6,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "max_new_tokens": 512
+  },
+  "raw_outputs": [
+    "{\"events\":[{\"start\":0.0,\"end\":6.8,\"event\":\"hand_holding_chocolate\",\"description\":\"woman holds chocolate, man reacts with surprise\",\"action\":\"holding\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"high\",\"confidence\":0.9,\"ocr_text\":\"Candy Corn\"},{\"start\":6.8,\"end\":9.1,\"event\":\"man_eats_chocolate\",\"description\":\"man takes chocolate, woman watches\",\"action\":\"eating\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"low\",\"confidence\":0.9,\"ocr_text\":\"Candy Corn\"}]}",
+    "{\"events\":[{\"start\":12.0,\"end\":18.5,\"event\":\"man_eating_chocolate\",\"description\":\"man eats chocolate while woman watches and smiles\",\"action\":\"eating\",\"scene\":\"indoor\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":\"CUNNER'S\"},{\"start\":18.5,\"end\":27.0,\"event\":\"woman_holds_chocolate\",\"description\":\"woman holds chocolate and man reacts to her action\",\"action\":\"holding\",\"scene\":\"indoor\",\"subjects\":[\"woman\",\"man\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":\"CUNNER'S\"}]}",
+    "{\"events\":[{\"start\":24.0,\"end\":39.0,\"event\":\"eating_chocolate\",\"description\":\"man and woman eat chocolate eggs together\",\"action\":\"eating\",\"scene\":\"indoor\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\"}]}",
+    "{\"events\":[{\"start\":36.0,\"end\":49.2,\"event\":\"eating_chocolate\",\"description\":\"man and woman eat chocolate, woman smiles, man reacts with surprise\",\"action\":\"eating\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"woman\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":\"CANDY\"}]}"
+  ],
+  "events": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 6.967,
+      "event": "hand_holding_chocolate",
+      "description": "woman holds chocolate, man reacts with surprise",
+      "confidence": 0.9,
+      "importance": "high",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        0,
+        30,
+        60,
+        90,
+        120,
+        150,
+        180,
+        210
+      ],
+      "ocr_text": "Candy Corn",
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holding",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 2,
+      "start": 6.967,
+      "end": 8.933,
+      "event": "man_eats_chocolate",
+      "description": "man takes chocolate, woman watches",
+      "confidence": 0.9,
+      "importance": "low",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        210,
+        239,
+        269
+      ],
+      "ocr_text": "Candy Corn",
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "eating",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 3,
+      "start": 11.967,
+      "end": 18.967,
+      "event": "man_eating_chocolate",
+      "description": "man eats chocolate while woman watches and smiles",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        360,
+        390,
+        420,
+        450,
+        480,
+        510,
+        540,
+        570
+      ],
+      "ocr_text": "CUNNER'S",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "eating",
+      "scene": "indoor",
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 4,
+      "start": 18.967,
+      "end": 23.967,
+      "event": "woman_holds_chocolate",
+      "description": "woman holds chocolate and man reacts to her action",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        570,
+        599,
+        629,
+        659,
+        689,
+        719,
+        749,
+        779,
+        809
+      ],
+      "ocr_text": "CUNNER'S",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "holding",
+      "scene": "indoor",
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 5,
+      "start": 23.967,
+      "end": 49.1,
+      "event": "eating_chocolate",
+      "description": "man and woman eat chocolate, woman smiles, man reacts with surprise",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        720,
+        750,
+        780,
+        810,
+        840,
+        870,
+        900,
+        930,
+        959,
+        989,
+        1019,
+        1049,
+        1079,
+        1080,
+        1106,
+        1109,
+        1133,
+        1139,
+        1159,
+        1169,
+        1185,
+        1211,
+        1238,
+        1264,
+        1290,
+        1316,
+        1343,
+        1369,
+        1395,
+        1421,
+        1448,
+        1474
+      ],
+      "ocr_text": "CANDY",
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "eating",
+      "scene": "indoor",
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    }
+  ],
+  "timing": {
+    "visual_seconds": 42.827,
+    "frame_decode_seconds": 6.794,
+    "chat_template_seconds": 0.0,
+    "processor_seconds": 0.096,
+    "generate_seconds": 35.888,
+    "text_decode_seconds": 0.0,
+    "resolution": [
+      288,
+      384
+    ]
+  },
+  "quality": {
+    "event_count": 5,
+    "coverage": 0.9369,
+    "person_count_mode": 2,
+    "person_count_correct": 1.0,
+    "person_count_per_event_accuracy": 1.0,
+    "person_consistency": 1.0,
+    "hallucination_rate": 0.0,
+    "hallucination_events": 0,
+    "hallucination_by_category": {},
+    "hallucination_evidence": [],
+    "ocr_hit": 0.0,
+    "ocr_reported": 1.0,
+    "ocr_recall": 0.0,
+    "ocr_precision": 0.0,
+    "ocr_invented_samples": [
+      "candy",
+      "corn",
+      "cunner"
+    ],
+    "frame_calibrated_ratio": 1.0,
+    "timestamp_sane_ratio": 1.0,
+    "language_match_ratio": 1.0,
+    "duplicate_ratio": 0.0,
+    "mean_confidence": 0.9,
+    "raw_event_count": 6
+  }
+}

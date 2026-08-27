@@ -14,6 +14,8 @@ from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+from . import theme
+
 
 class FramePlayer(QWidget):
     positionChanged = pyqtSignal(float)   # 秒
@@ -24,7 +26,10 @@ class FramePlayer(QWidget):
         super().__init__(parent)
         self.view = QLabel("打开视频后在这里预览")
         self.view.setAlignment(Qt.AlignCenter)
-        self.view.setStyleSheet("background:#111; color:#888;")
+        self.view.setStyleSheet(
+            f"background:{theme.VIDEO_BG}; color:{theme.TEXT_DIM};"
+            f"border:1px solid {theme.LINE}; border-radius:6px;"
+        )
         self.view.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.view.setMinimumSize(320, 240)
         layout = QVBoxLayout(self)

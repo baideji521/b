@@ -1,0 +1,678 @@
+{
+  "model_id": "openbmb/MiniCPM-V-4.6",
+  "config": "C",
+  "label": "run1",
+  "params": {
+    "fps": 0.75,
+    "max_frames": 8,
+    "min_frames": 6,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "max_new_tokens": 192
+  },
+  "raw_outputs": [
+    "1|woman|points at a chocolate|NONE\n2|man|holds a bag of candy|CRIMBER\n3|woman|holds a chocolate|NONE\n4|man|points at the candy|NONE\n5|woman|looks at the man|NONE\n6|man|holds the bag|NONE\n7|woman|gestures with hand|NONE\n8|man|looks at the candy|NONE",
+    "1|woman|looking at the man holding a candy|LISBERG\n2|woman|man holds a piece of candy|CUMMER BACCHI\n3|woman|woman's hand near the man|CUMMER BACCHI\n4|man|holds a candy and talks|LISBERG\n5|man|takes a piece of candy|LISBERG\n6|woman|visible, smiling|CANDY\n7|man|holds a small yellow piece|CUMMER BACCHI\n8|woman|partially visible|CANDY",
+    "1|woman, man|holds a bag of candy|IGZER\n2|woman, man|man eats a piece|CENSORD\n3|woman, man|woman holds a small item|NONE\n4|woman, man|woman shows a small item|NONE\n5|woman, man|man holds a snack|IGZER\n6|woman, man|woman looks up|NONE\n7|woman, man|man lifts a piece|NONE\n8|woman, man|woman smiles|NONE",
+    "1|woman|holds a small object|NONE\n2|man|holds a bag of snacks|NONE\n3|woman|holds a small piece|NONE\n4|man|holds a small item|NONE\n5|woman|visible|holds a small item\n6|man|visible|holds a small item\n7|woman|visible|holds a small item\n8|man|visible|holds a small item"
+  ],
+  "events": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 2.1,
+      "event": "points_at_a_chocolate",
+      "description": "points at a chocolate",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        0
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "points_at_a_chocolate",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 2,
+      "start": 2.1,
+      "end": 4.233,
+      "event": "holds_a_bag_of_candy",
+      "description": "holds a bag of candy",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        64
+      ],
+      "ocr_text": "CRIMBER",
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holds_a_bag_of_candy",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 3,
+      "start": 4.233,
+      "end": 6.367,
+      "event": "holds_a_chocolate",
+      "description": "holds a chocolate",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        128
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holds_a_chocolate",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 4,
+      "start": 6.367,
+      "end": 8.533,
+      "event": "points_at_the_candy",
+      "description": "points at the candy",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        192
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "points_at_the_candy",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 5,
+      "start": 8.533,
+      "end": 10.667,
+      "event": "looks_at_the_man",
+      "description": "looks at the man",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        257
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "looks_at_the_man",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 6,
+      "start": 10.667,
+      "end": 11.967,
+      "event": "holds_the_bag",
+      "description": "holds the bag",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        321
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holds_the_bag",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 7,
+      "start": 11.967,
+      "end": 12.8,
+      "event": "looking_at_the_man_holding_a_candy",
+      "description": "looking at the man holding a candy",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        360
+      ],
+      "ocr_text": "LISBERG",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "looking_at_the_man_holding_a_candy",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 8,
+      "start": 12.8,
+      "end": 14.1,
+      "event": "gestures_with_hand",
+      "description": "gestures with hand",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        385
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "gestures_with_hand",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 9,
+      "start": 14.1,
+      "end": 14.933,
+      "event": "man_holds_a_piece_of_candy",
+      "description": "man holds a piece of candy",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        424
+      ],
+      "ocr_text": "CUMMER BACCHI",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "man_holds_a_piece_of_candy",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 10,
+      "start": 16.233,
+      "end": 18.367,
+      "event": "woman_s_hand_near_the_man",
+      "description": "woman's hand near the man",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        488
+      ],
+      "ocr_text": "CUMMER BACCHI",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "woman_s_hand_near_the_man",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 11,
+      "start": 18.367,
+      "end": 20.533,
+      "event": "holds_a_candy_and_talks",
+      "description": "holds a candy and talks",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        552
+      ],
+      "ocr_text": "LISBERG",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "holds_a_candy_and_talks",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 12,
+      "start": 20.533,
+      "end": 22.667,
+      "event": "takes_a_piece_of_candy",
+      "description": "takes a piece of candy",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        617
+      ],
+      "ocr_text": "LISBERG",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "takes_a_piece_of_candy",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 13,
+      "start": 22.667,
+      "end": 23.967,
+      "event": "visible_smiling",
+      "description": "visible, smiling",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        681
+      ],
+      "ocr_text": "CANDY",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "visible_smiling",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 14,
+      "start": 23.967,
+      "end": 24.8,
+      "event": "holds_a_bag_of_candy",
+      "description": "holds a bag of candy",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        720
+      ],
+      "ocr_text": "IGZER",
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "holds_a_bag_of_candy",
+      "scene": null,
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 15,
+      "start": 24.8,
+      "end": 26.1,
+      "event": "holds_a_small_yellow_piece",
+      "description": "holds a small yellow piece",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        745
+      ],
+      "ocr_text": "CUMMER BACCHI",
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "holds_a_small_yellow_piece",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 16,
+      "start": 26.1,
+      "end": 26.933,
+      "event": "man_eats_a_piece",
+      "description": "man eats a piece",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        784
+      ],
+      "ocr_text": "CENSORD",
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "man_eats_a_piece",
+      "scene": null,
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 17,
+      "start": 28.233,
+      "end": 32.533,
+      "event": "woman_holds_a_small_item",
+      "description": "woman holds a small item",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        848,
+        912
+      ],
+      "ocr_text": null,
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "woman_holds_a_small_item",
+      "scene": null,
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 18,
+      "start": 32.533,
+      "end": 34.667,
+      "event": "man_holds_a_snack",
+      "description": "man holds a snack",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        977
+      ],
+      "ocr_text": "IGZER",
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "man_holds_a_snack",
+      "scene": null,
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 19,
+      "start": 34.667,
+      "end": 35.967,
+      "event": "woman_looks_up",
+      "description": "woman looks up",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        1041
+      ],
+      "ocr_text": null,
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "woman_looks_up",
+      "scene": null,
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 20,
+      "start": 35.967,
+      "end": 36.8,
+      "event": "holds_a_small_object",
+      "description": "holds a small object",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        1080
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "holds_a_small_object",
+      "scene": null,
+      "subjects": [
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 21,
+      "start": 36.8,
+      "end": 37.833,
+      "event": "man_lifts_a_piece",
+      "description": "man lifts a piece",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        1105
+      ],
+      "ocr_text": null,
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "man_lifts_a_piece",
+      "scene": null,
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 22,
+      "start": 37.833,
+      "end": 38.933,
+      "event": "holds_a_bag_of_snacks",
+      "description": "holds a bag of snacks",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        1136
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "holds_a_bag_of_snacks",
+      "scene": null,
+      "subjects": [
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 23,
+      "start": 39.733,
+      "end": 43.467,
+      "event": "holds_a_small_piece",
+      "description": "holds a small piece",
+      "confidence": 0.5,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        1193,
+        1249
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "holds_a_small_piece",
+      "scene": null,
+      "subjects": [
+        "man",
+        "woman"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 24,
+      "start": 43.467,
+      "end": 49.167,
+      "event": "visible",
+      "description": "visible",
+      "confidence": 0.6,
+      "importance": "normal",
+      "timestamp_source": "frame_based",
+      "source_frames": [
+        1305,
+        1361,
+        1418,
+        1474
+      ],
+      "ocr_text": "holds a small item",
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "visible",
+      "scene": null,
+      "subjects": [
+        "woman",
+        "man"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    }
+  ],
+  "timing": {
+    "visual_seconds": 57.376,
+    "frame_decode_seconds": 3.929,
+    "chat_template_seconds": 0.0,
+    "processor_seconds": 0.202,
+    "generate_seconds": 53.093,
+    "text_decode_seconds": 0.0,
+    "resolution": [
+      288,
+      384
+    ]
+  },
+  "quality": {
+    "event_count": 24,
+    "coverage": 0.9308,
+    "person_count_mode": 1,
+    "person_count_correct": 0.0,
+    "person_count_per_event_accuracy": 0.3333,
+    "person_consistency": 0.6667,
+    "hallucination_rate": 0.0,
+    "hallucination_events": 0,
+    "hallucination_by_category": {},
+    "hallucination_evidence": [],
+    "ocr_hit": 0.0,
+    "ocr_reported": 1.0,
+    "ocr_recall": 0.0,
+    "ocr_precision": 0.0,
+    "ocr_invented_samples": [
+      "bacchi",
+      "candy",
+      "censord",
+      "crimber",
+      "cummer",
+      "holds",
+      "igzer",
+      "item"
+    ],
+    "frame_calibrated_ratio": 1.0,
+    "timestamp_sane_ratio": 1.0,
+    "language_match_ratio": 1.0,
+    "duplicate_ratio": 0.0417,
+    "mean_confidence": 0.5042,
+    "raw_event_count": 29
+  }
+}

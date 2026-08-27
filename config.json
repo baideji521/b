@@ -27,6 +27,11 @@
         "label": "MiniCPM-V-4.5 int4 (8.7B/4bit)",
         "model_id": "openbmb/MiniCPM-V-4_5-int4",
         "backend": "minicpm"
+      },
+      {
+        "label": "MiniCPM-V-4.6 (1.3B/BF16, 隔离依赖 tf57)",
+        "model_id": "openbmb/MiniCPM-V-4.6",
+        "backend": "minicpm46"
       }
     ],
     "minicpm": {
@@ -35,16 +40,25 @@
       "use_image_id": false,
       "num_beams": 1
     },
+    "minicpm46": {
+      "downsample_mode": "16x",
+      "max_slice_nums": 1,
+      "use_image_id": false,
+      "stack_frames": 1,
+      "dtype": "bfloat16",
+      "attn_implementation": "sdpa",
+      "output_format": "frame_lines"
+    },
     "dtype": "bfloat16",
     "attn_implementation": "sdpa",
     "frame_source": "opencv",
-    "fps": 1.5,
-    "max_frames": 16,
+    "fps": 0.75,
+    "max_frames": 8,
     "min_frames": 6,
     "max_pixels_tokens": 112,
     "total_pixels_tokens": 2048,
-    "max_new_tokens": 512,
-    "batch_size": 2,
+    "max_new_tokens": 192,
+    "batch_size": 4,
     "window_seconds": 15.0,
     "window_overlap_seconds": 3.0,
     "long_video_threshold": 18.0,
@@ -109,7 +123,9 @@
       "Qwen/Qwen3-VL-2B-Instruct": "Qwen/Qwen3-VL-2B-Instruct",
       "Qwen/Qwen3-VL-8B-Instruct": "Qwen/Qwen3-VL-8B-Instruct",
       "openbmb/MiniCPM-V-4_5-int4": "OpenBMB/MiniCPM-V-4_5-int4",
-      "openbmb/MiniCPM-V-4_5": "OpenBMB/MiniCPM-V-4_5"
+      "openbmb/MiniCPM-V-4_5": "OpenBMB/MiniCPM-V-4_5",
+      "openbmb/MiniCPM-V-4.6": "OpenBMB/MiniCPM-V-4.6",
+      "openbmb/MiniCPM-V-4.6-BNB": "OpenBMB/MiniCPM-V-4.6-BNB"
     },
     "whisper_sources": [
       "modelscope",

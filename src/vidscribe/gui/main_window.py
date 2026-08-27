@@ -44,6 +44,7 @@ from ..config import Config
 from ..constants import VIDEO_SUFFIXES
 from ..progress import parse as parse_progress
 from ..timeline.exporters import fmt_time
+from . import theme
 from .player import FramePlayer
 
 IMPORTANCE_COLOR = {
@@ -126,7 +127,8 @@ class MainWindow(QMainWindow):
         self.speech: list[dict[str, Any]] = []
         self.worker: AnalyzeWorker | None = None
 
-        self.setWindowTitle("视频事件 + 语音时间轴")
+        self.setWindowTitle(theme.APP_TITLE)
+        self.setWindowIcon(theme.app_icon())
         self.resize(1500, 900)
         self._build_ui()
 
@@ -134,11 +136,21 @@ class MainWindow(QMainWindow):
             self.load_video(video)
 
     # ------------------------------------------------------------------ UI
+    @staticmethod
+    def _section(text: str) -> QLabel:
+        """面板小标题：统一走 QSS 里的 role=section 样式。"""
+        label = QLabel(text)
+        label.setProperty("role", "section")
+        return label
+
     def _build_ui(self) -> None:
         top = QHBoxLayout()
+        top.setSpacing(8)
+        top.setContentsMargins(2, 2, 2, 6)
         self.btn_open = QPushButton("打开视频")
         self.btn_open.clicked.connect(self.on_open)
         self.btn_analyze = QPushButton("分析当前视频")
+        self.btn_analyze.setProperty("role", "primary")
         self.btn_analyze.clicked.connect(lambda: self.on_analyze(False))
         self.btn_reanalyze = QPushButton("重新分析（忽略缓存）")
         self.btn_reanalyze.clicked.connect(lambda: self.on_analyze(True))
@@ -172,9 +184,9 @@ class MainWindow(QMainWindow):
         for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_outdir):
             top.addWidget(w)
         top.addStretch(1)
-        top.addWidget(QLabel("视觉模型"))
+        top.addWidget(self._section("视觉模型"))
         top.addWidget(self.cmb_model)
-        top.addWidget(QLabel("重要性"))
+        top.addWidget(self._section("重要性"))
         top.addWidget(self.cmb_importance)
         top.addWidget(self.spin_conf)
 
@@ -194,7 +206,7 @@ class MainWindow(QMainWindow):
         self.lbl_time = QLabel("00:00.00 / 00:00.00")
         self.lbl_time.setMinimumWidth(160)
         self.lbl_mute = QLabel("（预览无声音，语音见下方面板）")
-        self.lbl_mute.setStyleSheet("color:#888;")
+        self.lbl_mute.setProperty("role", "hint")
 
         controls = QHBoxLayout()
         controls.addWidget(self.btn_play)
@@ -220,7 +232,7 @@ class MainWindow(QMainWindow):
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(QLabel("事件时间轴（点击跳转）"))
+        right_layout.addWidget(self._section("事件时间轴（点击跳转）"))
         right_layout.addWidget(self.table, 1)
 
         split = QSplitter(Qt.Horizontal)
@@ -251,12 +263,12 @@ class MainWindow(QMainWindow):
         speech_box = QWidget()
         sb = QVBoxLayout(speech_box)
         sb.setContentsMargins(0, 0, 0, 0)
-        sb.addWidget(QLabel("语音（点击跳转）"))
+        sb.addWidget(self._section("语音（点击跳转）"))
         sb.addWidget(self.speech_list)
         log_box = QWidget()
         lb = QVBoxLayout(log_box)
         lb.setContentsMargins(0, 0, 0, 0)
-        lb.addWidget(QLabel("运行日志"))
+        lb.addWidget(self._section("运行日志"))
         lb.addLayout(progress_row)
         lb.addWidget(self.log_view)
         bottom.addWidget(speech_box)
@@ -291,7 +303,7 @@ class MainWindow(QMainWindow):
         self.video_path = Path(video).resolve()
         if not self.player.open(self.video_path):
             self.append_log(f"[播放器] 无法解码 {self.video_path.name}")
-        self.setWindowTitle(f"视频事件 + 语音时间轴 - {self.video_path.name}")
+        self.setWindowTitle(f"{theme.APP_TITLE} — {self.video_path.name}")
         self.load_results()
 
     def load_results(self) -> None:
@@ -502,7 +514,7 @@ class MainWindow(QMainWindow):
 
 def launch(cfg: Config, video: str | Path | None = None) -> int:
     app = QApplication(sys.argv[:1])
-    app.setStyle("Fusion")
+    theme.apply(app)
     window = MainWindow(cfg, Path(video) if video else None)
     window.show()
     return app.exec_()

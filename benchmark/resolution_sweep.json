@@ -1,0 +1,1215 @@
+{
+  "generated_at": "2026-08-27 06:46:27",
+  "video": {
+    "name": "test.mp4",
+    "path": "F:\\视频音频转文字\\test.mp4",
+    "duration": 49.167,
+    "native_resolution": "810x1080",
+    "aspect_ratio": 0.75,
+    "fps": 30.0,
+    "has_audio": true
+  },
+  "fixed_parameters": {
+    "model": "Qwen/Qwen3-VL-4B-Instruct",
+    "dtype": "bfloat16",
+    "attn_implementation": "sdpa",
+    "sampling_fps": 1.5,
+    "max_frames": 16,
+    "min_frames": 6,
+    "max_new_tokens": 512,
+    "do_sample": false,
+    "temperature": "n/a (greedy)",
+    "batch_size": 1,
+    "prompt": "同一提示词模板",
+    "output_language": "en",
+    "windows": [
+      [
+        0.0,
+        15.0
+      ],
+      [
+        12.0,
+        27.0
+      ],
+      [
+        24.0,
+        39.0
+      ],
+      [
+        36.0,
+        49.167
+      ]
+    ],
+    "scene_cuts": []
+  },
+  "environment": {
+    "os": "Windows 11 (10.0.22631)",
+    "machine": "AMD64",
+    "python": "3.12.10",
+    "packages": {
+      "torch": "2.8.0+cu126",
+      "torchvision": "0.23.0+cu126",
+      "transformers": "4.57.6",
+      "accelerate": "1.14.0",
+      "qwen-vl-utils": "0.0.14",
+      "faster-whisper": "1.2.1",
+      "ctranslate2": "4.8.1",
+      "opencv-python": "4.11.0.86",
+      "av": "18.1.0",
+      "numpy": "2.5.2"
+    },
+    "gpu": {
+      "available": true,
+      "torch": "2.8.0+cu126",
+      "torch_cuda": "12.6",
+      "name": "NVIDIA GeForce RTX 3060",
+      "total_vram_mb": 12287,
+      "capability": "8.6",
+      "cudnn": 91002,
+      "driver": "591.86"
+    }
+  },
+  "alignment_note": "Qwen3-VL 要求宽高为 32 的倍数（patch 16 × merge 2），严格 3:4 的合法尺寸只能是 (96k,128k)；810x1080 与 720x960 不满足，已用不放大且最接近的合法尺寸替代，requested/resolution 都已记录。",
+  "quality_score_weights": {
+    "description_agreement": 0.3,
+    "person_count_match": 0.2,
+    "action_diversity": 0.15,
+    "coverage": 0.15,
+    "timestamp_quality": 0.1,
+    "parse_success": 0.1
+  },
+  "quality_score_note": "quality_score 是可复现的启发式指标，全部由本次真实输出计算：与参考分辨率的描述一致度、人物数量是否一致、动作多样性、时间覆盖率、时间戳质量、解析成功率。参考分辨率自身的description_agreement 恒为 1.0，存在自参考偏差，请结合各分项与 events 原文一起看。",
+  "tests": [
+    {
+      "requested": "810x1080",
+      "resolution": "800x1088",
+      "tokens_per_frame": 854,
+      "status": "OK",
+      "error": null,
+      "video_duration": 49.167,
+      "input_frames": 64,
+      "qwen_calls": 4,
+      "preprocess_time": 15.05,
+      "qwen_time": 1143.57,
+      "total_visual_time": 1158.61,
+      "peak_vram_allocated_mb": 25259.3,
+      "peak_vram_reserved_mb": 26868.0,
+      "peak_vram_nvidia_smi_mb": 12002.0,
+      "gpu_utilization_mean": 97.9,
+      "gpu_utilization_max": 100.0,
+      "system_ram_used_mb": 42641.6,
+      "system_ram_peak_mb": 43601.2,
+      "events": [
+        {
+          "id": 1,
+          "start": 0.0,
+          "end": 12.0,
+          "event": "showing_chocolate",
+          "description": "woman holds chocolate, man holds bag, both react with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "hybrid",
+          "source_frames": [
+            0,
+            30,
+            60,
+            90,
+            120,
+            150,
+            180,
+            210,
+            239,
+            269,
+            299,
+            329,
+            359,
+            389,
+            419,
+            449
+          ],
+          "ocr_text": "pascale's crunchers",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "holding",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 2,
+          "start": 12.0,
+          "end": 18.0,
+          "event": "man eating chocolate",
+          "description": "man eats chocolate while woman watches, both smile",
+          "confidence": 0.9,
+          "importance": "low",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "pascale clinkers",
+          "window": [
+            12.0,
+            27.0
+          ],
+          "action": "eating",
+          "scene": "indoor",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 3,
+          "start": 18.0,
+          "end": 24.0,
+          "event": "woman takes chocolate",
+          "description": "woman takes chocolate, both laugh and react to it",
+          "confidence": 0.9,
+          "importance": "low",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "pascale clinkers",
+          "window": [
+            12.0,
+            27.0
+          ],
+          "action": "taking",
+          "scene": "indoor",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 4,
+          "start": 24.0,
+          "end": 40.0,
+          "event": "eating_chocolate",
+          "description": "man and woman eat chocolate, woman laughs, man reacts with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CENSORED",
+          "window": [
+            24.0,
+            39.0
+          ],
+          "action": "eating",
+          "scene": "indoor",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 5,
+          "start": 40.0,
+          "end": 43.0,
+          "event": "gesturing",
+          "description": "man gestures while talking, woman looks away",
+          "confidence": 0.8,
+          "importance": "low",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Clinkers",
+          "window": [
+            36.0,
+            49.167
+          ],
+          "action": "gesturing",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 6,
+          "start": 43.0,
+          "end": 49.167,
+          "event": "man_eats_chocolate",
+          "description": "man eats chocolate, both react with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Clinkers",
+          "window": [
+            36.0,
+            49.167
+          ],
+          "action": "eating",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        }
+      ],
+      "quality": {
+        "event_count": 6,
+        "person_labels": [
+          "man",
+          "woman"
+        ],
+        "distinct_person_labels": 2,
+        "max_persons_in_single_event": 2,
+        "object_labels": [],
+        "distinct_objects": 0,
+        "action_labels": [
+          "eating",
+          "gesturing",
+          "holding",
+          "taking"
+        ],
+        "distinct_actions": 4,
+        "scene_labels": [
+          "indoor",
+          "indoor_room"
+        ],
+        "scene_changes": 2,
+        "interaction_events": 6,
+        "interaction_ratio": 1.0,
+        "ocr_texts": [
+          "CENSORED",
+          "Clinkers",
+          "pascale clinkers",
+          "pascale's crunchers"
+        ],
+        "timestamp_sources": {
+          "hybrid": 1,
+          "model_estimated": 5
+        },
+        "frame_or_hybrid_ratio": 0.167,
+        "coverage_ratio": 1.0,
+        "timestamps_monotonic": true,
+        "timestamps_in_range": true,
+        "parsed_window_ratio": 1.0,
+        "avg_description_chars": 52.7,
+        "description_agreement": 1.0,
+        "score_components": {
+          "description_agreement": 1.0,
+          "person_count_match": 1.0,
+          "action_diversity": 1.0,
+          "coverage": 1.0,
+          "timestamp_quality": 0.167,
+          "parse_success": 1.0
+        },
+        "accept_checks": {
+          "person_count_match": true,
+          "event_count_ok": true,
+          "quality_within_0.05_of_best": true,
+          "description_agreement>=0.55": true
+        }
+      },
+      "quality_score": 0.9167
+    },
+    {
+      "requested": "720x960",
+      "resolution": "704x960",
+      "tokens_per_frame": 675,
+      "status": "OK",
+      "error": null,
+      "video_duration": 49.167,
+      "input_frames": 64,
+      "qwen_calls": 4,
+      "preprocess_time": 11.55,
+      "qwen_time": 642.3,
+      "total_visual_time": 653.85,
+      "peak_vram_allocated_mb": 19311.9,
+      "peak_vram_reserved_mb": 20338.0,
+      "peak_vram_nvidia_smi_mb": 12048.0,
+      "gpu_utilization_mean": 96.8,
+      "gpu_utilization_max": 100.0,
+      "system_ram_used_mb": 36420.7,
+      "system_ram_peak_mb": 36985.4,
+      "events": [
+        {
+          "id": 1,
+          "start": 0.0,
+          "end": 6.8,
+          "event": "woman holds chocolate, man reacts",
+          "description": "woman holds chocolate, man reacts with surprise and laughter",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "hybrid",
+          "source_frames": [
+            0,
+            30,
+            60,
+            90,
+            120,
+            150,
+            180,
+            210,
+            239,
+            269,
+            299,
+            329,
+            359,
+            389,
+            419,
+            449
+          ],
+          "ocr_text": "Corners",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "holding",
+          "scene": "indoor_room",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 2,
+          "start": 6.8,
+          "end": 9.1,
+          "event": "woman leans back, man gestures",
+          "description": "woman leans back, man gestures while holding chocolate bag",
+          "confidence": 0.8,
+          "importance": "low",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Corners",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "gesturing",
+          "scene": "indoor_room",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 3,
+          "start": 24.0,
+          "end": 40.0,
+          "event": "eating_chocolate",
+          "description": "man and woman eat chocolate, woman laughs, man reacts with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CENSORED",
+          "window": [
+            24.0,
+            39.0
+          ],
+          "action": "eating",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 4,
+          "start": 40.0,
+          "end": 45.0,
+          "event": "talking_and_gesturing",
+          "description": "man gestures while talking, woman responds with hand movement",
+          "confidence": 0.8,
+          "importance": "normal",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CANDY",
+          "window": [
+            36.0,
+            49.167
+          ],
+          "action": "talking",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 5,
+          "start": 45.0,
+          "end": 49.167,
+          "event": "man_eats_chocolate",
+          "description": "man eats chocolate, shows surprise reaction",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CANDY",
+          "window": [
+            36.0,
+            49.167
+          ],
+          "action": "eating",
+          "scene": "indoor_room",
+          "subjects": [
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        }
+      ],
+      "quality": {
+        "event_count": 5,
+        "person_labels": [
+          "man",
+          "woman"
+        ],
+        "distinct_person_labels": 2,
+        "max_persons_in_single_event": 2,
+        "object_labels": [],
+        "distinct_objects": 0,
+        "action_labels": [
+          "eating",
+          "gesturing",
+          "holding",
+          "talking"
+        ],
+        "distinct_actions": 4,
+        "scene_labels": [
+          "indoor_room"
+        ],
+        "scene_changes": 0,
+        "interaction_events": 4,
+        "interaction_ratio": 0.8,
+        "ocr_texts": [
+          "CANDY",
+          "CENSORED",
+          "Corners"
+        ],
+        "timestamp_sources": {
+          "hybrid": 1,
+          "model_estimated": 4
+        },
+        "frame_or_hybrid_ratio": 0.2,
+        "coverage_ratio": 0.697,
+        "timestamps_monotonic": true,
+        "timestamps_in_range": true,
+        "parsed_window_ratio": 0.75,
+        "avg_description_chars": 57.8,
+        "description_agreement": 0.5236,
+        "score_components": {
+          "description_agreement": 0.5236,
+          "person_count_match": 1.0,
+          "action_diversity": 1.0,
+          "coverage": 0.697,
+          "timestamp_quality": 0.2,
+          "parse_success": 0.75
+        },
+        "accept_checks": {
+          "person_count_match": true,
+          "event_count_ok": true,
+          "quality_within_0.05_of_best": false,
+          "description_agreement>=0.55": false
+        }
+      },
+      "quality_score": 0.7066
+    },
+    {
+      "requested": "576x768",
+      "resolution": "576x768",
+      "tokens_per_frame": 432,
+      "status": "OK",
+      "error": null,
+      "video_duration": 49.167,
+      "input_frames": 64,
+      "qwen_calls": 4,
+      "preprocess_time": 8.87,
+      "qwen_time": 321.75,
+      "total_visual_time": 330.63,
+      "peak_vram_allocated_mb": 13875.2,
+      "peak_vram_reserved_mb": 14370.0,
+      "peak_vram_nvidia_smi_mb": 12048.0,
+      "gpu_utilization_mean": 88.2,
+      "gpu_utilization_max": 100.0,
+      "system_ram_used_mb": 30670.1,
+      "system_ram_peak_mb": 31089.9,
+      "events": [
+        {
+          "id": 1,
+          "start": 0.0,
+          "end": 6.8,
+          "event": "woman holds chocolate",
+          "description": "woman holds chocolate, man holds bag, both react to it",
+          "confidence": 0.9,
+          "importance": "normal",
+          "timestamp_source": "hybrid",
+          "source_frames": [
+            0,
+            30,
+            60,
+            90,
+            120,
+            150,
+            180,
+            210,
+            239,
+            269,
+            299,
+            329,
+            359,
+            389,
+            419,
+            449
+          ],
+          "ocr_text": "CANDY CHOCOLATE",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "holding",
+          "scene": "indoor_room",
+          "subjects": [
+            "woman",
+            "man",
+            "chocolate_bag"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 2,
+          "start": 6.8,
+          "end": 9.1,
+          "event": "woman falls back",
+          "description": "woman falls back, man points to her, both look at each other",
+          "confidence": 0.8,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CANDY CHOCOLATE",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "falling",
+          "scene": "indoor_room",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 3,
+          "start": 12.0,
+          "end": 18.0,
+          "event": "man eating chocolate",
+          "description": "man eats chocolate while woman watches and smiles",
+          "confidence": 0.9,
+          "importance": "low",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Creme Eggs",
+          "window": [
+            12.0,
+            27.0
+          ],
+          "action": "eating",
+          "scene": "indoor",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 4,
+          "start": 18.0,
+          "end": 24.0,
+          "event": "woman takes chocolate",
+          "description": "woman takes chocolate from man and eats it",
+          "confidence": 0.9,
+          "importance": "low",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Creme Eggs",
+          "window": [
+            12.0,
+            27.0
+          ],
+          "action": "taking",
+          "scene": "indoor",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 5,
+          "start": 24.0,
+          "end": 36.0,
+          "event": "eating_candies",
+          "description": "man and woman eat chocolate candies while looking at camera",
+          "confidence": 0.9,
+          "importance": "normal",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CENSORED",
+          "window": [
+            24.0,
+            39.0
+          ],
+          "action": "eating",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 6,
+          "start": 36.0,
+          "end": 49.167,
+          "event": "eating_chocolate",
+          "description": "woman eats chocolate, man reacts with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "CANDY MAKERS",
+          "window": [
+            36.0,
+            49.167
+          ],
+          "action": "eating",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        }
+      ],
+      "quality": {
+        "event_count": 6,
+        "person_labels": [
+          "man",
+          "woman"
+        ],
+        "distinct_person_labels": 2,
+        "max_persons_in_single_event": 2,
+        "object_labels": [
+          "chocolate_bag"
+        ],
+        "distinct_objects": 1,
+        "action_labels": [
+          "eating",
+          "falling",
+          "holding",
+          "taking"
+        ],
+        "distinct_actions": 4,
+        "scene_labels": [
+          "indoor",
+          "indoor_room"
+        ],
+        "scene_changes": 2,
+        "interaction_events": 6,
+        "interaction_ratio": 1.0,
+        "ocr_texts": [
+          "CANDY CHOCOLATE",
+          "CANDY MAKERS",
+          "CENSORED",
+          "Creme Eggs"
+        ],
+        "timestamp_sources": {
+          "hybrid": 1,
+          "model_estimated": 5
+        },
+        "frame_or_hybrid_ratio": 0.167,
+        "coverage_ratio": 0.941,
+        "timestamps_monotonic": true,
+        "timestamps_in_range": true,
+        "parsed_window_ratio": 1.0,
+        "avg_description_chars": 51.7,
+        "description_agreement": 0.7396,
+        "score_components": {
+          "description_agreement": 0.7396,
+          "person_count_match": 1.0,
+          "action_diversity": 1.0,
+          "coverage": 0.941,
+          "timestamp_quality": 0.167,
+          "parse_success": 1.0
+        },
+        "accept_checks": {
+          "person_count_match": true,
+          "event_count_ok": true,
+          "quality_within_0.05_of_best": false,
+          "description_agreement>=0.55": true
+        }
+      },
+      "quality_score": 0.8297
+    },
+    {
+      "requested": "480x640",
+      "resolution": "480x640",
+      "tokens_per_frame": 300,
+      "status": "OK",
+      "error": null,
+      "video_duration": 49.167,
+      "input_frames": 64,
+      "qwen_calls": 4,
+      "preprocess_time": 7.58,
+      "qwen_time": 83.37,
+      "total_visual_time": 90.94,
+      "peak_vram_allocated_mb": 11573.4,
+      "peak_vram_reserved_mb": 11806.0,
+      "peak_vram_nvidia_smi_mb": 12043.0,
+      "gpu_utilization_mean": 60.9,
+      "gpu_utilization_max": 100.0,
+      "system_ram_used_mb": 28443.8,
+      "system_ram_peak_mb": 28668.9,
+      "events": [
+        {
+          "id": 1,
+          "start": 0.0,
+          "end": 6.8,
+          "event": "initial_interaction",
+          "description": "woman holds chocolate, man reacts with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "hybrid",
+          "source_frames": [
+            0,
+            30,
+            60,
+            90,
+            120,
+            150,
+            180,
+            210,
+            239,
+            269,
+            299,
+            329,
+            359,
+            389,
+            419,
+            449
+          ],
+          "ocr_text": "Creme Egg",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "holding",
+          "scene": "indoor_room",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 2,
+          "start": 6.8,
+          "end": 9.1,
+          "event": "sudden_movement",
+          "description": "woman falls back, man gestures while holding chocolate",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Creme Egg",
+          "window": [
+            0.0,
+            15.0
+          ],
+          "action": "falling",
+          "scene": "indoor_room",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 3,
+          "start": 12.0,
+          "end": 36.0,
+          "event": "eating_chocolate",
+          "description": "man holds chocolate, woman laughs, man reacts with surprise",
+          "confidence": 0.9,
+          "importance": "high",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": "Creme Eggs",
+          "window": [
+            12.0,
+            27.0
+          ],
+          "action": "eating",
+          "scene": "indoor_room",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        },
+        {
+          "id": 4,
+          "start": 36.0,
+          "end": 49.167,
+          "event": "eating_candies",
+          "description": "man and woman eat chocolate eggs while sitting on couch",
+          "confidence": 0.5,
+          "importance": "normal",
+          "timestamp_source": "model_estimated",
+          "source_frames": [],
+          "ocr_text": null,
+          "window": [
+            36.0,
+            49.167
+          ],
+          "action": "eating",
+          "scene": "indoor_couch",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "description_language": null,
+          "language_fallback": false
+        }
+      ],
+      "quality": {
+        "event_count": 4,
+        "person_labels": [
+          "man",
+          "woman"
+        ],
+        "distinct_person_labels": 2,
+        "max_persons_in_single_event": 2,
+        "object_labels": [],
+        "distinct_objects": 0,
+        "action_labels": [
+          "eating",
+          "falling",
+          "holding"
+        ],
+        "distinct_actions": 3,
+        "scene_labels": [
+          "indoor_couch",
+          "indoor_room"
+        ],
+        "scene_changes": 1,
+        "interaction_events": 4,
+        "interaction_ratio": 1.0,
+        "ocr_texts": [
+          "Creme Egg",
+          "Creme Eggs"
+        ],
+        "timestamp_sources": {
+          "hybrid": 1,
+          "model_estimated": 3
+        },
+        "frame_or_hybrid_ratio": 0.25,
+        "coverage_ratio": 0.941,
+        "timestamps_monotonic": true,
+        "timestamps_in_range": true,
+        "parsed_window_ratio": 1.0,
+        "avg_description_chars": 53.8,
+        "description_agreement": 0.6285,
+        "score_components": {
+          "description_agreement": 0.6285,
+          "person_count_match": 1.0,
+          "action_diversity": 0.75,
+          "coverage": 0.941,
+          "timestamp_quality": 0.25,
+          "parse_success": 1.0
+        },
+        "accept_checks": {
+          "person_count_match": true,
+          "event_count_ok": true,
+          "quality_within_0.05_of_best": false,
+          "description_agreement>=0.55": true
+        }
+      },
+      "quality_score": 0.7672
+    }
+  ],
+  "baseline_current_config": {
+    "requested": "BASELINE 288x384",
+    "resolution": "288x384",
+    "tokens_per_frame": 112,
+    "status": "OK",
+    "error": null,
+    "video_duration": 49.167,
+    "input_frames": 64,
+    "qwen_calls": 4,
+    "preprocess_time": 7.09,
+    "qwen_time": 78.81,
+    "total_visual_time": 85.91,
+    "peak_vram_allocated_mb": 9340.0,
+    "peak_vram_reserved_mb": 9448.0,
+    "peak_vram_nvidia_smi_mb": 10002.0,
+    "gpu_utilization_mean": 38.2,
+    "gpu_utilization_max": 100.0,
+    "system_ram_used_mb": 28039.2,
+    "system_ram_peak_mb": 28132.2,
+    "events": [
+      {
+        "id": 1,
+        "start": 0.0,
+        "end": 6.8,
+        "event": "hand_holding_chocolate",
+        "description": "woman holds chocolate, man reacts with surprise",
+        "confidence": 0.9,
+        "importance": "high",
+        "timestamp_source": "hybrid",
+        "source_frames": [
+          0,
+          30,
+          60,
+          90,
+          120,
+          150,
+          180,
+          210,
+          239,
+          269,
+          299,
+          329,
+          359,
+          389,
+          419,
+          449
+        ],
+        "ocr_text": "Candy Corn",
+        "window": [
+          0.0,
+          15.0
+        ],
+        "action": "holding",
+        "scene": "indoor_room",
+        "subjects": [
+          "woman",
+          "man"
+        ],
+        "description_language": null,
+        "language_fallback": false
+      },
+      {
+        "id": 2,
+        "start": 6.8,
+        "end": 9.1,
+        "event": "man_eats_chocolate",
+        "description": "man takes chocolate, woman watches",
+        "confidence": 0.9,
+        "importance": "normal",
+        "timestamp_source": "model_estimated",
+        "source_frames": [],
+        "ocr_text": "Candy Corn",
+        "window": [
+          0.0,
+          15.0
+        ],
+        "action": "eating",
+        "scene": "indoor_room",
+        "subjects": [
+          "man",
+          "woman"
+        ],
+        "description_language": null,
+        "language_fallback": false
+      },
+      {
+        "id": 3,
+        "start": 12.0,
+        "end": 16.5,
+        "event": "man eating chocolate",
+        "description": "man eats chocolate while woman watches",
+        "confidence": 0.9,
+        "importance": "low",
+        "timestamp_source": "model_estimated",
+        "source_frames": [],
+        "ocr_text": "CUNNER'S",
+        "window": [
+          12.0,
+          27.0
+        ],
+        "action": "eating",
+        "scene": "indoor",
+        "subjects": [
+          "man",
+          "woman"
+        ],
+        "description_language": null,
+        "language_fallback": false
+      },
+      {
+        "id": 4,
+        "start": 16.5,
+        "end": 24.0,
+        "event": "woman picks up chocolate",
+        "description": "woman picks up chocolate from man's hand",
+        "confidence": 0.9,
+        "importance": "low",
+        "timestamp_source": "model_estimated",
+        "source_frames": [],
+        "ocr_text": "CUNNER'S",
+        "window": [
+          12.0,
+          27.0
+        ],
+        "action": "picking_up",
+        "scene": "indoor",
+        "subjects": [
+          "chocolate",
+          "woman"
+        ],
+        "description_language": null,
+        "language_fallback": false
+      },
+      {
+        "id": 5,
+        "start": 24.0,
+        "end": 36.0,
+        "event": "eating_eggs",
+        "description": "man and woman eat chocolate eggs while sitting together",
+        "confidence": 0.5,
+        "importance": "normal",
+        "timestamp_source": "model_estimated",
+        "source_frames": [],
+        "ocr_text": null,
+        "window": [
+          24.0,
+          39.0
+        ],
+        "action": "eating",
+        "scene": "indoor",
+        "subjects": [
+          "man",
+          "woman"
+        ],
+        "description_language": null,
+        "language_fallback": false
+      },
+      {
+        "id": 6,
+        "start": 36.0,
+        "end": 49.167,
+        "event": "eating_chocolate",
+        "description": "woman and man eat chocolate, man shows piece, woman reacts",
+        "confidence": 0.9,
+        "importance": "normal",
+        "timestamp_source": "model_estimated",
+        "source_frames": [],
+        "ocr_text": "candies",
+        "window": [
+          36.0,
+          49.167
+        ],
+        "action": "eating",
+        "scene": "indoor_room",
+        "subjects": [
+          "woman",
+          "man"
+        ],
+        "description_language": null,
+        "language_fallback": false
+      }
+    ],
+    "quality": {
+      "event_count": 6,
+      "person_labels": [
+        "man",
+        "woman"
+      ],
+      "distinct_person_labels": 2,
+      "max_persons_in_single_event": 2,
+      "object_labels": [
+        "chocolate"
+      ],
+      "distinct_objects": 1,
+      "action_labels": [
+        "eating",
+        "holding",
+        "picking_up"
+      ],
+      "distinct_actions": 3,
+      "scene_labels": [
+        "indoor",
+        "indoor_room"
+      ],
+      "scene_changes": 2,
+      "interaction_events": 6,
+      "interaction_ratio": 1.0,
+      "ocr_texts": [
+        "CUNNER'S",
+        "Candy Corn",
+        "candies"
+      ],
+      "timestamp_sources": {
+        "hybrid": 1,
+        "model_estimated": 5
+      },
+      "frame_or_hybrid_ratio": 0.167,
+      "coverage_ratio": 0.941,
+      "timestamps_monotonic": true,
+      "timestamps_in_range": true,
+      "parsed_window_ratio": 1.0,
+      "avg_description_chars": 45.3,
+      "description_agreement": 0.6274,
+      "score_components": {
+        "description_agreement": 0.6274,
+        "person_count_match": 1.0,
+        "action_diversity": 0.75,
+        "coverage": 0.941,
+        "timestamp_quality": 0.167,
+        "parse_success": 1.0
+      }
+    },
+    "quality_score": 0.7586
+  },
+  "decision": {
+    "reference_resolution": "800x1088",
+    "best_quality_score": 0.9167,
+    "acceptable": [
+      "800x1088"
+    ],
+    "fallback_used": false,
+    "chosen": "800x1088",
+    "speed_gain_vs_slowest_percent": 0.0,
+    "vram_saving_vs_slowest_percent": 0.0,
+    "quality_delta_vs_best": 0.0
+  }
+}

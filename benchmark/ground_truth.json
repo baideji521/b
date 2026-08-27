@@ -1,0 +1,47 @@
+{
+  "_note": "人工标注：从 test.mp4 抽取 1/5/9/13/17/21/25/29/33/37/41/45/48s 共 13 帧逐帧看图 + 完整 transcript 得到。不是模型生成，也不是从任何 README 抄的。",
+  "video": "test.mp4",
+  "duration": 49.167,
+  "resolution": [810, 1080],
+  "aspect_ratio": "3:4",
+  "fps": 30.0,
+  "audio_language": "en",
+  "shot_cuts": [],
+  "single_continuous_shot": true,
+  "person_count": 2,
+  "persons": [
+    {"id": "left", "gender": "female", "traits": ["long dark hair", "black jacket", "smart watch on left wrist", "ring"]},
+    {"id": "right", "gender": "male", "traits": ["black trucker cap", "clear-frame glasses", "moustache/short beard", "black t-shirt with small light print", "forearm tattoo"]}
+  ],
+  "person_enters_or_leaves_frame": false,
+  "scene": {
+    "setting": "indoor, seated side by side in front of a large window",
+    "background": "daylight, green trees visible through the glass",
+    "changes": "none - same seated two-shot for the whole clip"
+  },
+  "key_objects": ["candy bag (Pascall Clinkers)", "individual candy pieces", "cap", "glasses", "smart watch"],
+  "on_screen_text": {
+    "_note": "画面文字来自包装和衣服印字，因为是前置摄像头所以是镜像的",
+    "expected_tokens": ["pascall", "clinkers"],
+    "secondary_tokens": ["tiktok", "trailblazers"]
+  },
+  "actions_timeline": [
+    {"start": 0.0, "end": 49.167, "action": "two people sit side by side facing the camera, take candies out of a bag, hold them up to the camera, eat them and react while talking"}
+  ],
+  "contradictions": {
+    "_note": "分类幻觉判定：按类别 + 字段 + 例外(unless)判断是否与真值矛盾，不再是关键词命中即判幻觉。默认规则见 tools/model_benchmark.py: HALLUCINATION_RULES，这里只写覆盖项。",
+    "locomotion": {
+      "fields": ["event", "action", "description"],
+      "unless": ["\\b(?:green|tree|autumn)\\s+leaves\\b", "\\bleaves\\s+of\\b", "\\breach(?:es|ing)?\\s+(?:for|into)\\b"],
+      "why": "两人全程并排坐着，没有人进出画面，也没有起身走动"
+    }
+  },
+
+  "expected_visual_language": "en",
+  "notes": [
+    "person_count 必须恒为 2：把 2 个人读成 1 个或 3 个都算错。",
+    "没有任何镜头切换：模型报告 shot cut / scene change 即为幻觉。",
+    "没有人进出画面：报告 enter/leave 即为幻觉。",
+    "OCR 只有包装上的 Pascall / Clinkers 和衣服上的小字，且是镜像的。"
+  ]
+}

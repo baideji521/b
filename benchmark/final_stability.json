@@ -1,0 +1,328 @@
+{
+  "note": "最终配置连续 3 次全流程运行（CLI run test.mp4 --force），对应执行口令 STEP 25 / 验收清单",
+  "video": {
+    "video": {
+      "path": "F:\\视频音频转文字\\test.mp4",
+      "name": "test.mp4",
+      "duration": 49.167,
+      "fps": 30.0,
+      "width": 810,
+      "height": 1080,
+      "total_frames": 1475,
+      "has_audio": true,
+      "video_codec": "h264",
+      "audio_codec": "aac"
+    },
+    "scene_cuts": []
+  },
+  "identical_events_across_runs": true,
+  "visual_seconds": [
+    38.847,
+    38.556,
+    38.559
+  ],
+  "total_seconds": [
+    55.237,
+    54.903,
+    55.317
+  ],
+  "runs": [
+    {
+      "run": 1,
+      "status": "OK",
+      "timings": {
+        "probe_seconds": 1.711,
+        "speech_seconds": 14.659,
+        "visual_seconds": 38.847,
+        "timeline_seconds": 0.003,
+        "total_seconds": 55.237
+      },
+      "peak_vram": {
+        "allocated_mb": 9316.5,
+        "reserved_mb": 9650.0
+      },
+      "visual_model": {
+        "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "backend": "qwen3vl",
+        "load_seconds": 8.21,
+        "frame_source": "opencv",
+        "params": {
+          "fps": 0.75,
+          "max_frames": 8,
+          "min_frames": 6,
+          "max_pixels_tokens": 112,
+          "total_pixels_tokens": 2048,
+          "max_new_tokens": 192
+        },
+        "windows": 4,
+        "analyzed_frames": 32,
+        "stage_seconds": {
+          "frame_decode": 4.32,
+          "chat_template": 0.028,
+          "processor": 0.116,
+          "generate": 23.224,
+          "text_decode": 0.0
+        },
+        "generated_tokens": 616,
+        "prompt_tokens_max": 882,
+        "degrade_attempts": 0
+      },
+      "speech_model": {
+        "size": "large-v3",
+        "device": "cuda",
+        "compute_type": "float16"
+      },
+      "counts": {
+        "visual_events": 4,
+        "speech_segments": 20,
+        "timeline_entries": 4
+      },
+      "srt_kind": "speech",
+      "language": {
+        "detected": "en",
+        "original": "en",
+        "output": "en"
+      },
+      "events": [
+        {
+          "start": 0.0,
+          "end": 11.967,
+          "event": "eating_candy",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 11.967,
+          "end": 16.233,
+          "event": "man eating chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 16.233,
+          "end": 23.967,
+          "event": "woman holds chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 23.967,
+          "end": 49.1,
+          "event": "eating_chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        }
+      ]
+    },
+    {
+      "run": 2,
+      "status": "OK",
+      "timings": {
+        "probe_seconds": 1.643,
+        "speech_seconds": 14.678,
+        "visual_seconds": 38.556,
+        "timeline_seconds": 0.003,
+        "total_seconds": 54.903
+      },
+      "peak_vram": {
+        "allocated_mb": 9316.5,
+        "reserved_mb": 9650.0
+      },
+      "visual_model": {
+        "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "backend": "qwen3vl",
+        "load_seconds": 8.38,
+        "frame_source": "opencv",
+        "params": {
+          "fps": 0.75,
+          "max_frames": 8,
+          "min_frames": 6,
+          "max_pixels_tokens": 112,
+          "total_pixels_tokens": 2048,
+          "max_new_tokens": 192
+        },
+        "windows": 4,
+        "analyzed_frames": 32,
+        "stage_seconds": {
+          "frame_decode": 4.244,
+          "chat_template": 0.04,
+          "processor": 0.1,
+          "generate": 22.948,
+          "text_decode": 0.0
+        },
+        "generated_tokens": 616,
+        "prompt_tokens_max": 882,
+        "degrade_attempts": 0
+      },
+      "speech_model": {
+        "size": "large-v3",
+        "device": "cuda",
+        "compute_type": "float16"
+      },
+      "counts": {
+        "visual_events": 4,
+        "speech_segments": 20,
+        "timeline_entries": 4
+      },
+      "srt_kind": "speech",
+      "language": {
+        "detected": "en",
+        "original": "en",
+        "output": "en"
+      },
+      "events": [
+        {
+          "start": 0.0,
+          "end": 11.967,
+          "event": "eating_candy",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 11.967,
+          "end": 16.233,
+          "event": "man eating chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 16.233,
+          "end": 23.967,
+          "event": "woman holds chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 23.967,
+          "end": 49.1,
+          "event": "eating_chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        }
+      ]
+    },
+    {
+      "run": 3,
+      "status": "OK",
+      "timings": {
+        "probe_seconds": 1.726,
+        "speech_seconds": 15.013,
+        "visual_seconds": 38.559,
+        "timeline_seconds": 0.003,
+        "total_seconds": 55.317
+      },
+      "peak_vram": {
+        "allocated_mb": 9316.5,
+        "reserved_mb": 9650.0
+      },
+      "visual_model": {
+        "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "backend": "qwen3vl",
+        "load_seconds": 8.31,
+        "frame_source": "opencv",
+        "params": {
+          "fps": 0.75,
+          "max_frames": 8,
+          "min_frames": 6,
+          "max_pixels_tokens": 112,
+          "total_pixels_tokens": 2048,
+          "max_new_tokens": 192
+        },
+        "windows": 4,
+        "analyzed_frames": 32,
+        "stage_seconds": {
+          "frame_decode": 4.192,
+          "chat_template": 0.052,
+          "processor": 0.116,
+          "generate": 23.064,
+          "text_decode": 0.0
+        },
+        "generated_tokens": 616,
+        "prompt_tokens_max": 882,
+        "degrade_attempts": 0
+      },
+      "speech_model": {
+        "size": "large-v3",
+        "device": "cuda",
+        "compute_type": "float16"
+      },
+      "counts": {
+        "visual_events": 4,
+        "speech_segments": 20,
+        "timeline_entries": 4
+      },
+      "srt_kind": "speech",
+      "language": {
+        "detected": "en",
+        "original": "en",
+        "output": "en"
+      },
+      "events": [
+        {
+          "start": 0.0,
+          "end": 11.967,
+          "event": "eating_candy",
+          "subjects": [
+            "woman",
+            "man"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 11.967,
+          "end": 16.233,
+          "event": "man eating chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 16.233,
+          "end": 23.967,
+          "event": "woman holds chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        },
+        {
+          "start": 23.967,
+          "end": 49.1,
+          "event": "eating_chocolate",
+          "subjects": [
+            "man",
+            "woman"
+          ],
+          "timestamp_source": "hybrid"
+        }
+      ]
+    }
+  ]
+}

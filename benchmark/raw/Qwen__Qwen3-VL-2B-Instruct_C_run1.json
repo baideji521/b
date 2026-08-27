@@ -1,0 +1,276 @@
+{
+  "model_id": "Qwen/Qwen3-VL-2B-Instruct",
+  "config": "C",
+  "label": "run1",
+  "params": {
+    "fps": 0.75,
+    "max_frames": 8,
+    "min_frames": 6,
+    "max_pixels_tokens": 112,
+    "total_pixels_tokens": 2048,
+    "max_new_tokens": 192
+  },
+  "raw_outputs": [
+    "{\"events\":[{\"start\":0.0,\"end\":1.1,\"event\":\"woman holds a small object\",\"description\":\"woman holds a small object in hand\",\"action\":\"holding_object\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"object\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null},{\"start\":1.1,\"end\":5.3,\"event\":\"woman eats the object\",\"description\":\"woman eats the object\",\"action\":\"eating\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"object\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null},{\"start\":5.3,\"end\":9.1,\"event\":\"man holds a bag of snacks\",\"description\":\"man holds a bag of snacks\",\"action\":\"holding_object\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"bag\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null}]}",
+    "{\"events\":[{\"start\":12.0,\"end\":17.3,\"event\":\"man holds chocolate egg\",\"description\":\"man holds chocolate egg in hand\",\"action\":\"holding_chocolate_egg\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"chocolate_egg\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null}]}",
+    "{\"events\":[{\"start\":24.0,\"end\":28.5,\"event\":\"woman eats chocolate egg\",\"description\":\"woman eats chocolate egg\",\"action\":\"eating_chocolate_egg\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"chocolate_egg\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null},{\"start\":28.5,\"end\":30.0,\"event\":\"man holds censored sign\",\"description\":\"man holds censored sign\",\"action\":\"holding_censored_sign\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"censored_sign\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null},{\"start\":30.0,\"end\":33.0,\"event\":\"man eats chocolate egg\",\"description\":\"man eats chocolate egg\",\"action\":\"eating_chocolate_egg\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"chocolate_egg\"],\"importance\":\"normal",
+    "{\"events\":[{\"start\":36.9,\"end\":40.7,\"event\":\"woman eats chocolate egg\",\"description\":\"woman eats chocolate egg from bag\",\"action\":\"eating_chocolate_egg\",\"scene\":\"indoor_room\",\"subjects\":[\"woman\",\"chocolate_egg\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null},{\"start\":40.7,\"end\":44.4,\"event\":\"man holds bag of snacks\",\"description\":\"man holds bag of snacks\",\"action\":\"holding_bag\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"bag\"],\"importance\":\"normal\",\"confidence\":0.9,\"ocr_text\":null},{\"start\":44.4,\"end\":48.2,\"event\":\"man eats chocolate egg\",\"description\":\"man eats chocolate egg\",\"action\":\"eating_chocolate_egg\",\"scene\":\"indoor_room\",\"subjects\":[\"man\",\"chocolate_egg\"],\"importance\":\"normal\",\"confidence"
+  ],
+  "events": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 2.1,
+      "event": "woman holds a small object",
+      "description": "woman holds a small object in hand",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        0,
+        64
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holding_object",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "object"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 2,
+      "start": 2.1,
+      "end": 5.3,
+      "event": "woman eats the object",
+      "description": "woman eats the object",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        64,
+        128
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "eating",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "object"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 3,
+      "start": 5.3,
+      "end": 8.533,
+      "event": "man holds a bag of snacks",
+      "description": "man holds a bag of snacks",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        192,
+        257
+      ],
+      "ocr_text": null,
+      "window": [
+        0.0,
+        15.0
+      ],
+      "action": "holding_object",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "bag"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 4,
+      "start": 11.967,
+      "end": 17.3,
+      "event": "man holds chocolate egg",
+      "description": "man holds chocolate egg in hand",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        360,
+        424,
+        488
+      ],
+      "ocr_text": null,
+      "window": [
+        12.0,
+        27.0
+      ],
+      "action": "holding_chocolate_egg",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "chocolate_egg"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 5,
+      "start": 23.967,
+      "end": 28.233,
+      "event": "woman eats chocolate egg",
+      "description": "woman eats chocolate egg",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        720,
+        784,
+        848
+      ],
+      "ocr_text": null,
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "eating_chocolate_egg",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "chocolate_egg"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 6,
+      "start": 28.233,
+      "end": 30.367,
+      "event": "man holds censored sign",
+      "description": "man holds censored sign",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        848,
+        912
+      ],
+      "ocr_text": null,
+      "window": [
+        24.0,
+        39.0
+      ],
+      "action": "holding_censored_sign",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "censored_sign"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 7,
+      "start": 35.967,
+      "end": 41.6,
+      "event": "woman eats chocolate egg",
+      "description": "woman eats chocolate egg from bag",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        1080,
+        1136,
+        1193,
+        1249
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "eating_chocolate_egg",
+      "scene": "indoor_room",
+      "subjects": [
+        "woman",
+        "chocolate_egg"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    },
+    {
+      "id": 8,
+      "start": 41.6,
+      "end": 43.467,
+      "event": "man holds bag of snacks",
+      "description": "man holds bag of snacks",
+      "confidence": 0.9,
+      "importance": "normal",
+      "timestamp_source": "hybrid",
+      "source_frames": [
+        1249,
+        1305
+      ],
+      "ocr_text": null,
+      "window": [
+        36.0,
+        49.167
+      ],
+      "action": "holding_bag",
+      "scene": "indoor_room",
+      "subjects": [
+        "man",
+        "bag"
+      ],
+      "description_language": null,
+      "language_fallback": false
+    }
+  ],
+  "timing": {
+    "visual_seconds": 49.697,
+    "frame_decode_seconds": 3.79,
+    "chat_template_seconds": 0.0,
+    "processor_seconds": 0.048,
+    "generate_seconds": 45.836,
+    "text_decode_seconds": 0.0,
+    "resolution": [
+      288,
+      384
+    ]
+  },
+  "quality": {
+    "event_count": 8,
+    "coverage": 0.5647,
+    "person_count_mode": 1,
+    "person_count_correct": 0.0,
+    "person_count_per_event_accuracy": 0.0,
+    "person_consistency": 1.0,
+    "hallucination_rate": 0.0,
+    "hallucination_events": 0,
+    "hallucination_by_category": {},
+    "hallucination_evidence": [],
+    "ocr_hit": 0.0,
+    "ocr_reported": 0.0,
+    "ocr_recall": 0.0,
+    "ocr_precision": null,
+    "ocr_invented_samples": [],
+    "frame_calibrated_ratio": 1.0,
+    "timestamp_sane_ratio": 1.0,
+    "language_match_ratio": 1.0,
+    "duplicate_ratio": 0.125,
+    "mean_confidence": 0.9,
+    "raw_event_count": 8
+  }
+}

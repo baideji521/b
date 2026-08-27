@@ -159,8 +159,12 @@ class MiniCPMAnalyzer:
             raise RuntimeError("视觉模型未加载")
         import torch  # noqa: PLC0415
 
-        indices = plan_frame_indices(info, start, end, params.fps, params.max_frames, params.min_frames)
-        batch = sample_frames(info, indices, params.max_pixels)
+        # 注意参数顺序是 (fps, min_frames, max_frames)，写反会让帧数恒等于 max_frames
+        t0 = time.perf_counter()
+        indices = plan_frame_indices(info, start, end, params.fps, params.min_frames, params.max_frames)
+        per_frame_budget = max(params.total_pixels // max(len(indices), 1), 64 * 32 * 32)
+        batch = sample_frames(info, indices, min(params.max_pixels, per_frame_budget))
+        decode_seconds = time.perf_counter() - t0
         if not batch.images:
             logger.warning("窗口 %.1f-%.1fs 没有取到帧，跳过", start, end)
             return [], {"frames": 0, "window": [start, end]}
@@ -211,12 +215,19 @@ class MiniCPMAnalyzer:
             "resolution": [batch.resized_width, batch.resized_height],
             "sample_fps": batch.sample_fps,
             "infer_seconds": round(infer_seconds, 2),
+            "generate_seconds": round(infer_seconds, 3),
+            "frame_decode_seconds": round(decode_seconds, 3),
             "batch_size": 1,
             "backend": "minicpm",
             "packing_nums": self.packing_nums,
             "num_beams": self.num_beams,
             "temporal_groups": len(temporal_ids),
             "raw_chars": len(text),
+            # chat() 只返回文本，token 数用 tokenizer 反算，才能和 Qwen 的 tok/s 可比
+            "generated_tokens": len(self.tokenizer(text, add_special_tokens=False)["input_ids"])
+            if self.tokenizer is not None else None,
+            # 原始输出必须留下，否则质量对比只能看解析结果，看不到模型到底说了什么
+            "raw_output": text,
         }
         return events, meta
 

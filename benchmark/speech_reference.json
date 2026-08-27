@@ -1,0 +1,1135 @@
+{
+  "whisper_seconds": 21.961,
+  "whisper_load_seconds": 6.32,
+  "language": "en",
+  "language_confidence": null,
+  "segments": [
+    {
+      "id": 1,
+      "start": 0.0,
+      "end": 3.24,
+      "text": "If this is pink, Blake's not allowed to drink beer anymore, only cruises.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "If this is pink, Blake's not allowed to drink beer anymore, only cruises.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " If",
+          "start": 0.0,
+          "end": 0.06,
+          "probability": 0.5117
+        },
+        {
+          "word": " this",
+          "start": 0.06,
+          "end": 0.2,
+          "probability": 0.9844
+        },
+        {
+          "word": " is",
+          "start": 0.2,
+          "end": 0.4,
+          "probability": 0.9897
+        },
+        {
+          "word": " pink,",
+          "start": 0.4,
+          "end": 0.62,
+          "probability": 0.9849
+        },
+        {
+          "word": " Blake's",
+          "start": 0.82,
+          "end": 1.28,
+          "probability": 0.8862
+        },
+        {
+          "word": " not",
+          "start": 1.28,
+          "end": 1.36,
+          "probability": 0.9941
+        },
+        {
+          "word": " allowed",
+          "start": 1.36,
+          "end": 1.56,
+          "probability": 0.9907
+        },
+        {
+          "word": " to",
+          "start": 1.56,
+          "end": 1.72,
+          "probability": 0.9966
+        },
+        {
+          "word": " drink",
+          "start": 1.72,
+          "end": 1.88,
+          "probability": 0.9985
+        },
+        {
+          "word": " beer",
+          "start": 1.88,
+          "end": 2.1,
+          "probability": 0.9878
+        },
+        {
+          "word": " anymore,",
+          "start": 2.1,
+          "end": 2.4,
+          "probability": 0.9521
+        },
+        {
+          "word": " only",
+          "start": 2.58,
+          "end": 2.74,
+          "probability": 0.9888
+        },
+        {
+          "word": " cruises.",
+          "start": 2.74,
+          "end": 3.24,
+          "probability": 0.8296
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "start": 3.34,
+      "end": 3.68,
+      "text": "What?",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "What?",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " What?",
+          "start": 3.34,
+          "end": 3.68,
+          "probability": 0.6265
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "start": 3.82,
+      "end": 5.36,
+      "text": "No way, don't not be pink.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "No way, don't not be pink.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " No",
+          "start": 3.82,
+          "end": 4.18,
+          "probability": 0.9668
+        },
+        {
+          "word": " way,",
+          "start": 4.18,
+          "end": 4.46,
+          "probability": 0.9478
+        },
+        {
+          "word": " don't",
+          "start": 4.52,
+          "end": 4.84,
+          "probability": 0.9812
+        },
+        {
+          "word": " not",
+          "start": 4.84,
+          "end": 4.96,
+          "probability": 0.9351
+        },
+        {
+          "word": " be",
+          "start": 4.96,
+          "end": 5.18,
+          "probability": 0.9834
+        },
+        {
+          "word": " pink.",
+          "start": 5.18,
+          "end": 5.36,
+          "probability": 0.6094
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "start": 5.56,
+      "end": 9.22,
+      "text": "No, cut the film, cut the film.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "No, cut the film, cut the film.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " No,",
+          "start": 5.56,
+          "end": 5.96,
+          "probability": 0.6987
+        },
+        {
+          "word": " cut",
+          "start": 7.7,
+          "end": 7.94,
+          "probability": 0.9785
+        },
+        {
+          "word": " the",
+          "start": 7.94,
+          "end": 8.14,
+          "probability": 0.9932
+        },
+        {
+          "word": " film,",
+          "start": 8.14,
+          "end": 8.5,
+          "probability": 0.999
+        },
+        {
+          "word": " cut",
+          "start": 8.6,
+          "end": 8.76,
+          "probability": 1.0
+        },
+        {
+          "word": " the",
+          "start": 8.76,
+          "end": 8.96,
+          "probability": 1.0
+        },
+        {
+          "word": " film.",
+          "start": 8.96,
+          "end": 9.22,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "start": 9.36,
+      "end": 10.44,
+      "text": "Can you just do that again and fake it?",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "Can you just do that again and fake it?",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " Can",
+          "start": 9.36,
+          "end": 9.38,
+          "probability": 0.6084
+        },
+        {
+          "word": " you",
+          "start": 9.38,
+          "end": 9.38,
+          "probability": 0.8643
+        },
+        {
+          "word": " just",
+          "start": 9.38,
+          "end": 9.52,
+          "probability": 1.0
+        },
+        {
+          "word": " do",
+          "start": 9.52,
+          "end": 9.62,
+          "probability": 1.0
+        },
+        {
+          "word": " that",
+          "start": 9.62,
+          "end": 9.74,
+          "probability": 0.9995
+        },
+        {
+          "word": " again",
+          "start": 9.74,
+          "end": 9.94,
+          "probability": 1.0
+        },
+        {
+          "word": " and",
+          "start": 9.94,
+          "end": 10.08,
+          "probability": 0.998
+        },
+        {
+          "word": " fake",
+          "start": 10.08,
+          "end": 10.3,
+          "probability": 0.9995
+        },
+        {
+          "word": " it?",
+          "start": 10.3,
+          "end": 10.44,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "start": 10.62,
+      "end": 11.02,
+      "text": "No.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "No.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " No.",
+          "start": 10.62,
+          "end": 11.02,
+          "probability": 0.9951
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "start": 11.42,
+      "end": 14.6,
+      "text": "If this is yellow, you have to get a clinkers tattoo.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "If this is yellow, you have to get a clinkers tattoo.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " If",
+          "start": 11.42,
+          "end": 11.74,
+          "probability": 0.9961
+        },
+        {
+          "word": " this",
+          "start": 11.74,
+          "end": 11.92,
+          "probability": 1.0
+        },
+        {
+          "word": " is",
+          "start": 11.92,
+          "end": 12.12,
+          "probability": 1.0
+        },
+        {
+          "word": " yellow,",
+          "start": 12.12,
+          "end": 12.4,
+          "probability": 0.9995
+        },
+        {
+          "word": " you",
+          "start": 12.58,
+          "end": 12.98,
+          "probability": 1.0
+        },
+        {
+          "word": " have",
+          "start": 12.98,
+          "end": 13.18,
+          "probability": 1.0
+        },
+        {
+          "word": " to",
+          "start": 13.18,
+          "end": 13.34,
+          "probability": 1.0
+        },
+        {
+          "word": " get",
+          "start": 13.34,
+          "end": 13.56,
+          "probability": 1.0
+        },
+        {
+          "word": " a",
+          "start": 13.56,
+          "end": 13.92,
+          "probability": 0.999
+        },
+        {
+          "word": " clinkers",
+          "start": 13.92,
+          "end": 14.34,
+          "probability": 0.8677
+        },
+        {
+          "word": " tattoo.",
+          "start": 14.34,
+          "end": 14.6,
+          "probability": 0.9995
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "start": 15.38,
+      "end": 16.54,
+      "text": "Can it be a pink one though?",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "Can it be a pink one though?",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " Can",
+          "start": 15.38,
+          "end": 15.78,
+          "probability": 0.9795
+        },
+        {
+          "word": " it",
+          "start": 15.78,
+          "end": 15.94,
+          "probability": 0.9692
+        },
+        {
+          "word": " be",
+          "start": 15.94,
+          "end": 16.02,
+          "probability": 1.0
+        },
+        {
+          "word": " a",
+          "start": 16.02,
+          "end": 16.08,
+          "probability": 1.0
+        },
+        {
+          "word": " pink",
+          "start": 16.08,
+          "end": 16.24,
+          "probability": 1.0
+        },
+        {
+          "word": " one",
+          "start": 16.24,
+          "end": 16.4,
+          "probability": 0.9971
+        },
+        {
+          "word": " though?",
+          "start": 16.4,
+          "end": 16.54,
+          "probability": 0.8745
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "start": 17.96,
+      "end": 19.64,
+      "text": "Oh, damn, kind of wanted it.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "Oh, damn, kind of wanted it.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " Oh,",
+          "start": 17.96,
+          "end": 18.36,
+          "probability": 0.8667
+        },
+        {
+          "word": " damn,",
+          "start": 18.36,
+          "end": 18.76,
+          "probability": 0.9966
+        },
+        {
+          "word": " kind",
+          "start": 19.04,
+          "end": 19.22,
+          "probability": 0.9458
+        },
+        {
+          "word": " of",
+          "start": 19.22,
+          "end": 19.34,
+          "probability": 1.0
+        },
+        {
+          "word": " wanted",
+          "start": 19.34,
+          "end": 19.48,
+          "probability": 1.0
+        },
+        {
+          "word": " it.",
+          "start": 19.48,
+          "end": 19.64,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "start": 19.86,
+      "end": 23.07,
+      "text": "If this is green, I'm going to sell Blake's car.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "If this is green, I'm going to sell Blake's car.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " If",
+          "start": 19.86,
+          "end": 20.26,
+          "probability": 0.9995
+        },
+        {
+          "word": " this",
+          "start": 20.26,
+          "end": 20.4,
+          "probability": 1.0
+        },
+        {
+          "word": " is",
+          "start": 20.4,
+          "end": 20.62,
+          "probability": 1.0
+        },
+        {
+          "word": " green,",
+          "start": 20.62,
+          "end": 20.94,
+          "probability": 1.0
+        },
+        {
+          "word": " I'm",
+          "start": 21.22,
+          "end": 21.9,
+          "probability": 0.9995
+        },
+        {
+          "word": " going",
+          "start": 22.23,
+          "end": 22.29,
+          "probability": 0.793
+        },
+        {
+          "word": " to",
+          "start": 22.29,
+          "end": 22.35,
+          "probability": 1.0
+        },
+        {
+          "word": " sell",
+          "start": 22.35,
+          "end": 22.53,
+          "probability": 1.0
+        },
+        {
+          "word": " Blake's",
+          "start": 22.53,
+          "end": 22.87,
+          "probability": 1.0
+        },
+        {
+          "word": " car.",
+          "start": 22.87,
+          "end": 23.07,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "start": 23.45,
+      "end": 24.11,
+      "text": "No, you're not.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "No, you're not.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " No,",
+          "start": 23.45,
+          "end": 23.71,
+          "probability": 0.9995
+        },
+        {
+          "word": " you're",
+          "start": 23.71,
+          "end": 23.83,
+          "probability": 1.0
+        },
+        {
+          "word": " not.",
+          "start": 23.83,
+          "end": 24.11,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "start": 24.77,
+      "end": 26.57,
+      "text": "Thank God, I love my car.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "Thank God, I love my car.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " Thank",
+          "start": 24.77,
+          "end": 25.17,
+          "probability": 0.8853
+        },
+        {
+          "word": " God,",
+          "start": 25.17,
+          "end": 25.53,
+          "probability": 0.7842
+        },
+        {
+          "word": " I",
+          "start": 25.65,
+          "end": 25.81,
+          "probability": 1.0
+        },
+        {
+          "word": " love",
+          "start": 25.81,
+          "end": 26.01,
+          "probability": 0.999
+        },
+        {
+          "word": " my",
+          "start": 26.01,
+          "end": 26.29,
+          "probability": 1.0
+        },
+        {
+          "word": " car.",
+          "start": 26.29,
+          "end": 26.57,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "start": 26.81,
+      "end": 28.13,
+      "text": "If this is pink, I get...",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "If this is pink, I get...",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " If",
+          "start": 26.81,
+          "end": 26.93,
+          "probability": 0.9775
+        },
+        {
+          "word": " this",
+          "start": 26.93,
+          "end": 27.09,
+          "probability": 1.0
+        },
+        {
+          "word": " is",
+          "start": 27.09,
+          "end": 27.23,
+          "probability": 1.0
+        },
+        {
+          "word": " pink,",
+          "start": 27.23,
+          "end": 27.59,
+          "probability": 1.0
+        },
+        {
+          "word": " I",
+          "start": 27.65,
+          "end": 27.75,
+          "probability": 0.9995
+        },
+        {
+          "word": " get...",
+          "start": 27.75,
+          "end": 28.13,
+          "probability": 0.804
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "start": 29.56,
+      "end": 31.71,
+      "text": "Please don't be pink.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "Please don't be pink.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " Please",
+          "start": 29.56,
+          "end": 30.04,
+          "probability": 0.9844
+        },
+        {
+          "word": " don't",
+          "start": 31.01,
+          "end": 31.43,
+          "probability": 0.9995
+        },
+        {
+          "word": " be",
+          "start": 31.43,
+          "end": 31.45,
+          "probability": 1.0
+        },
+        {
+          "word": " pink.",
+          "start": 31.45,
+          "end": 31.71,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 15,
+      "start": 31.85,
+      "end": 32.55,
+      "text": "Oh, thank God.",
+      "confidence": 0.763,
+      "language": "en",
+      "original_text": "Oh, thank God.",
+      "original_language": "en",
+      "no_speech_prob": 0.0573,
+      "avg_logprob": -0.2116,
+      "words": [
+        {
+          "word": " Oh,",
+          "start": 31.85,
+          "end": 32.11,
+          "probability": 0.9995
+        },
+        {
+          "word": " thank",
+          "start": 32.11,
+          "end": 32.27,
+          "probability": 1.0
+        },
+        {
+          "word": " God.",
+          "start": 32.27,
+          "end": 32.55,
+          "probability": 0.9995
+        }
+      ]
+    },
+    {
+      "id": 16,
+      "start": 32.55,
+      "end": 37.07,
+      "text": "If this is yellow, you have to change your NRL team from the Titans.",
+      "confidence": 0.658,
+      "language": "en",
+      "original_text": "If this is yellow, you have to change your NRL team from the Titans.",
+      "original_language": "en",
+      "no_speech_prob": 0.1344,
+      "avg_logprob": -0.2736,
+      "words": [
+        {
+          "word": " If",
+          "start": 32.55,
+          "end": 33.39,
+          "probability": 0.5767
+        },
+        {
+          "word": " this",
+          "start": 33.39,
+          "end": 33.67,
+          "probability": 0.9927
+        },
+        {
+          "word": " is",
+          "start": 33.67,
+          "end": 34.01,
+          "probability": 0.9961
+        },
+        {
+          "word": " yellow,",
+          "start": 34.01,
+          "end": 34.35,
+          "probability": 0.938
+        },
+        {
+          "word": " you",
+          "start": 34.59,
+          "end": 35.07,
+          "probability": 0.9868
+        },
+        {
+          "word": " have",
+          "start": 35.07,
+          "end": 35.23,
+          "probability": 0.9902
+        },
+        {
+          "word": " to",
+          "start": 35.23,
+          "end": 35.37,
+          "probability": 0.999
+        },
+        {
+          "word": " change",
+          "start": 35.37,
+          "end": 35.61,
+          "probability": 0.9976
+        },
+        {
+          "word": " your",
+          "start": 35.61,
+          "end": 35.89,
+          "probability": 0.9932
+        },
+        {
+          "word": " NRL",
+          "start": 35.89,
+          "end": 36.31,
+          "probability": 0.9924
+        },
+        {
+          "word": " team",
+          "start": 36.31,
+          "end": 36.53,
+          "probability": 0.9707
+        },
+        {
+          "word": " from",
+          "start": 36.53,
+          "end": 36.75,
+          "probability": 0.9805
+        },
+        {
+          "word": " the",
+          "start": 36.75,
+          "end": 36.85,
+          "probability": 0.937
+        },
+        {
+          "word": " Titans.",
+          "start": 36.85,
+          "end": 37.07,
+          "probability": 0.4709
+        }
+      ]
+    },
+    {
+      "id": 17,
+      "start": 38.67,
+      "end": 39.95,
+      "text": "Oh, thank God.",
+      "confidence": 0.658,
+      "language": "en",
+      "original_text": "Oh, thank God.",
+      "original_language": "en",
+      "no_speech_prob": 0.1344,
+      "avg_logprob": -0.2736,
+      "words": [
+        {
+          "word": " Oh,",
+          "start": 38.67,
+          "end": 39.15,
+          "probability": 0.4595
+        },
+        {
+          "word": " thank",
+          "start": 39.15,
+          "end": 39.59,
+          "probability": 0.915
+        },
+        {
+          "word": " God.",
+          "start": 39.59,
+          "end": 39.95,
+          "probability": 0.7358
+        }
+      ]
+    },
+    {
+      "id": 18,
+      "start": 40.86,
+      "end": 43.28,
+      "text": "Why are you being so mean to me?",
+      "confidence": 0.658,
+      "language": "en",
+      "original_text": "Why are you being so mean to me?",
+      "original_language": "en",
+      "no_speech_prob": 0.1344,
+      "avg_logprob": -0.2736,
+      "words": [
+        {
+          "word": " Why",
+          "start": 40.86,
+          "end": 41.34,
+          "probability": 0.6348
+        },
+        {
+          "word": " are",
+          "start": 41.34,
+          "end": 41.94,
+          "probability": 0.98
+        },
+        {
+          "word": " you",
+          "start": 41.94,
+          "end": 42.08,
+          "probability": 1.0
+        },
+        {
+          "word": " being",
+          "start": 42.08,
+          "end": 42.22,
+          "probability": 1.0
+        },
+        {
+          "word": " so",
+          "start": 42.22,
+          "end": 42.5,
+          "probability": 1.0
+        },
+        {
+          "word": " mean",
+          "start": 42.5,
+          "end": 42.92,
+          "probability": 1.0
+        },
+        {
+          "word": " to",
+          "start": 42.92,
+          "end": 43.1,
+          "probability": 0.9995
+        },
+        {
+          "word": " me?",
+          "start": 43.1,
+          "end": 43.28,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 19,
+      "start": 43.44,
+      "end": 46.66,
+      "text": "If this is yellow, I get to go on a boys trip to New Zealand this weekend.",
+      "confidence": 0.658,
+      "language": "en",
+      "original_text": "If this is yellow, I get to go on a boys trip to New Zealand this weekend.",
+      "original_language": "en",
+      "no_speech_prob": 0.1344,
+      "avg_logprob": -0.2736,
+      "words": [
+        {
+          "word": " If",
+          "start": 43.44,
+          "end": 43.78,
+          "probability": 0.9976
+        },
+        {
+          "word": " this",
+          "start": 43.78,
+          "end": 43.98,
+          "probability": 0.9995
+        },
+        {
+          "word": " is",
+          "start": 43.98,
+          "end": 44.1,
+          "probability": 0.9985
+        },
+        {
+          "word": " yellow,",
+          "start": 44.1,
+          "end": 44.34,
+          "probability": 0.9995
+        },
+        {
+          "word": " I",
+          "start": 44.46,
+          "end": 44.58,
+          "probability": 0.9995
+        },
+        {
+          "word": " get",
+          "start": 44.58,
+          "end": 44.72,
+          "probability": 0.9922
+        },
+        {
+          "word": " to",
+          "start": 44.72,
+          "end": 44.8,
+          "probability": 1.0
+        },
+        {
+          "word": " go",
+          "start": 44.8,
+          "end": 44.9,
+          "probability": 1.0
+        },
+        {
+          "word": " on",
+          "start": 44.9,
+          "end": 45.0,
+          "probability": 1.0
+        },
+        {
+          "word": " a",
+          "start": 45.0,
+          "end": 45.04,
+          "probability": 0.9995
+        },
+        {
+          "word": " boys",
+          "start": 45.04,
+          "end": 45.34,
+          "probability": 0.875
+        },
+        {
+          "word": " trip",
+          "start": 45.34,
+          "end": 45.58,
+          "probability": 0.5884
+        },
+        {
+          "word": " to",
+          "start": 45.58,
+          "end": 45.72,
+          "probability": 0.9995
+        },
+        {
+          "word": " New",
+          "start": 45.72,
+          "end": 45.84,
+          "probability": 0.9995
+        },
+        {
+          "word": " Zealand",
+          "start": 45.84,
+          "end": 46.16,
+          "probability": 1.0
+        },
+        {
+          "word": " this",
+          "start": 46.16,
+          "end": 46.36,
+          "probability": 0.999
+        },
+        {
+          "word": " weekend.",
+          "start": 46.36,
+          "end": 46.66,
+          "probability": 1.0
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "start": 47.04,
+      "end": 48.5,
+      "text": "Uh, like, shall you do?",
+      "confidence": 0.658,
+      "language": "en",
+      "original_text": "Uh, like, shall you do?",
+      "original_language": "en",
+      "no_speech_prob": 0.1344,
+      "avg_logprob": -0.2736,
+      "words": [
+        {
+          "word": " Uh,",
+          "start": 47.04,
+          "end": 47.14,
+          "probability": 0.3269
+        },
+        {
+          "word": " like,",
+          "start": 47.4,
+          "end": 47.74,
+          "probability": 0.6377
+        },
+        {
+          "word": " shall",
+          "start": 47.8,
+          "end": 48.06,
+          "probability": 0.4783
+        },
+        {
+          "word": " you",
+          "start": 48.06,
+          "end": 48.38,
+          "probability": 0.9995
+        },
+        {
+          "word": " do?",
+          "start": 48.38,
+          "end": 48.5,
+          "probability": 0.8223
+        }
+      ]
+    }
+  ],
+  "available": true,
+  "model": {
+    "size": "large-v3",
+    "device": "cuda",
+    "compute_type": "float16"
+  },
+  "word_count": 140
+}

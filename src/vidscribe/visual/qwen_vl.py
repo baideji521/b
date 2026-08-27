@@ -35,6 +35,8 @@ class VisualParams:
     max_pixels_tokens: int
     total_pixels_tokens: int
     max_new_tokens: int
+    degrade_level: int = 0
+    degrade_history: tuple[str, ...] = ()
 
     @property
     def max_pixels(self) -> int:
@@ -44,18 +46,63 @@ class VisualParams:
     def total_pixels(self) -> int:
         return int(self.total_pixels_tokens) * PIXEL_FACTOR * PIXEL_FACTOR
 
-    def degrade(self) -> "VisualParams":
+    # OOM 降级顺序（spec §34）：batch 由调用方先砍，然后 frames -> resolution -> max_new_tokens
+    _AXES = ("max_frames", "resolution", "max_new_tokens")
+    # 生成长度阶梯：必须真的能降到 128，旧实现的 max(384, x*0.75) 让 512 只能降到 384
+    _TOKEN_LADDER = (512, 384, 256, 192, 128)
+    _MIN_FRAMES_FLOOR = 6
+    _MIN_PIXELS_TOKENS = 64
+    _MIN_NEW_TOKENS = 128
+
+    def _lower_tokens(self) -> int:
+        lower = [t for t in self._TOKEN_LADDER if t < self.max_new_tokens]
+        return max(lower) if lower else self._MIN_NEW_TOKENS
+
+    def can_degrade(self) -> bool:
+        """三条轴是否还有下降空间；没有就别再重试，直接换更小的模型或报错。"""
+        return (self.max_frames > self._MIN_FRAMES_FLOOR
+                or self.max_pixels_tokens > self._MIN_PIXELS_TOKENS
+                or self.max_new_tokens > self._MIN_NEW_TOKENS)
+
+    def degrade(self, reason: str = "cuda_oom") -> "VisualParams":
+        """返回降一级的新参数（原对象不变，用户配置不被静默修改）。
+
+        每次只动一条轴，按 frames -> resolution -> max_new_tokens 轮转，
+        并把动作写进 degrade_history，meta/报告里能追溯到每一步。
+        """
+        fps, frames, min_frames = self.fps, self.max_frames, self.min_frames
+        pixels, total, tokens = self.max_pixels_tokens, self.total_pixels_tokens, self.max_new_tokens
+        note = "no_room"
+        for offset in range(len(self._AXES)):
+            axis = self._AXES[(self.degrade_level + offset) % len(self._AXES)]
+            if axis == "max_frames" and frames > self._MIN_FRAMES_FLOOR:
+                frames = max(self._MIN_FRAMES_FLOOR, int(frames * 0.75) // 2 * 2)
+                min_frames = min(min_frames, frames)
+                fps = max(0.5, round(fps * 0.75, 3))
+                note = f"max_frames {self.max_frames}->{frames}, fps {self.fps}->{fps}"
+                break
+            if axis == "resolution" and pixels > self._MIN_PIXELS_TOKENS:
+                pixels = max(self._MIN_PIXELS_TOKENS, int(pixels * 0.7))
+                total = max(pixels * max(frames, 1), int(total * 0.7))
+                note = f"max_pixels_tokens {self.max_pixels_tokens}->{pixels}"
+                break
+            if axis == "max_new_tokens" and tokens > self._MIN_NEW_TOKENS:
+                tokens = self._lower_tokens()
+                note = f"max_new_tokens {self.max_new_tokens}->{tokens}"
+                break
         return VisualParams(
-            fps=max(0.5, round(self.fps * 0.6, 3)),
-            max_frames=max(8, int(self.max_frames * 0.6) // 2 * 2),
-            min_frames=max(4, min(self.min_frames, int(self.max_frames * 0.6) // 2 * 2)),
-            max_pixels_tokens=max(64, int(self.max_pixels_tokens * 0.6)),
-            total_pixels_tokens=max(2048, int(self.total_pixels_tokens * 0.6)),
-            max_new_tokens=max(384, int(self.max_new_tokens * 0.75)),
+            fps=fps,
+            max_frames=frames,
+            min_frames=max(2, min_frames),
+            max_pixels_tokens=pixels,
+            total_pixels_tokens=total,
+            max_new_tokens=tokens,
+            degrade_level=self.degrade_level + 1,
+            degrade_history=self.degrade_history + (f"L{self.degrade_level + 1} {reason}: {note}",),
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "fps": self.fps,
             "max_frames": self.max_frames,
             "min_frames": self.min_frames,
@@ -63,6 +110,11 @@ class VisualParams:
             "total_pixels_tokens": self.total_pixels_tokens,
             "max_new_tokens": self.max_new_tokens,
         }
+        if self.degrade_level:
+            data["degrade_level"] = self.degrade_level
+            data["degrade_history"] = list(self.degrade_history)
+        return data
+
 
 
 def _is_oom(exc: BaseException) -> bool:
@@ -179,10 +231,13 @@ class QwenVLAnalyzer:
         batch: FrameBatch | None = None
         raw_text = ""
         meta: dict[str, Any] = {"window": [start, end], "params": params.to_dict()}
+        stage_timing: dict[str, float] = {}
 
         if source in ("auto", "official"):
             try:
+                t0 = time.perf_counter()
                 inputs, batch = self._build_inputs_official(info, start, end, params, previous_summary)
+                stage_timing["prepare_seconds"] = round(time.perf_counter() - t0, 3)
                 meta["frame_source"] = "official"
             except Exception as exc:
                 if _is_oom(exc):
@@ -193,13 +248,15 @@ class QwenVLAnalyzer:
                 self._frame_source = "opencv"
                 inputs = batch = None
         if batch is None:
-            inputs, batch = self._build_inputs_opencv(info, start, end, params, previous_summary)
+            inputs, batch, stage_timing = self._build_inputs_opencv(info, start, end, params, previous_summary)
             meta["frame_source"] = "opencv"
 
         meta["frames"] = len(batch)
         meta["frame_timestamps"] = batch.timestamps
         meta["frame_indices"] = batch.frame_indices
         meta["resolution"] = [batch.resized_width, batch.resized_height]
+        meta.update(stage_timing)
+        prompt_len = int(inputs["input_ids"].shape[1])
 
         started = time.perf_counter()
         try:
@@ -214,10 +271,18 @@ class QwenVLAnalyzer:
                 self._free()
                 raise VisualOOM(str(exc)) from exc
             raise
+        generate_seconds = time.perf_counter() - started
+        t1 = time.perf_counter()
         trimmed = [out[len(inp):] for inp, out in zip(inputs["input_ids"], generated)]
         raw_text = self.processor.batch_decode(trimmed, skip_special_tokens=True)[0]
-        meta["infer_seconds"] = round(time.perf_counter() - started, 3)
+        meta["text_decode_seconds"] = round(time.perf_counter() - t1, 3)
+        meta["generate_seconds"] = round(generate_seconds, 3)
+        meta["infer_seconds"] = round(generate_seconds, 3)
+        meta["batch_size"] = 1
+        meta["prompt_tokens"] = prompt_len
+        meta["generated_tokens"] = int(len(trimmed[0])) if trimmed else 0
         meta["raw_output"] = raw_text
+
 
         events = parse_events(raw_text)
         events = calibrate_events(events, batch, scene_cuts, start, end,
@@ -300,17 +365,23 @@ class QwenVLAnalyzer:
 
     def _prepare_opencv_window(self, info: VideoInfo, start: float, end: float,
                                params: VisualParams, previous_summary: str | None):
-        """OpenCV 内存采样 -> (提示词文本, 帧列表, video_metadata, FrameBatch)。"""
+        """OpenCV 内存采样 -> (提示词文本, 帧列表, video_metadata, FrameBatch, 分阶段耗时)。"""
+        t0 = time.perf_counter()
         indices = plan_frame_indices(info, start, end, params.fps, params.min_frames, params.max_frames)
         per_frame_budget = max(params.total_pixels // max(len(indices), 1), 64 * PIXEL_FACTOR * PIXEL_FACTOR)
         max_pixels = min(params.max_pixels, per_frame_budget)
         batch = sample_frames(info, indices, max_pixels)
+        decode_seconds = time.perf_counter() - t0
         if len(batch) == 0:
             raise RuntimeError(f"窗口 {start:.2f}-{end:.2f}s 未能采到任何帧")
 
+        t1 = time.perf_counter()
         video_content = {"type": "video", "video": batch.images}
         messages = self._messages(video_content, start, end, batch.timestamps, previous_summary)
         text = self.processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        template_seconds = time.perf_counter() - t1
+
+
 
         metadata = {
             # 关键：fps 必须是原视频 fps、frames_indices 必须是原视频绝对帧号，
@@ -324,7 +395,12 @@ class QwenVLAnalyzer:
             "height": batch.resized_height,
             "video_backend": "opencv",
         }
-        return text, batch.images, metadata, batch
+        timing = {
+            "frame_decode_seconds": round(decode_seconds, 3),
+            "chat_template_seconds": round(template_seconds, 3),
+        }
+        return text, batch.images, metadata, batch, timing
+
 
     def _processor_call(self, texts: list[str], videos: list[list], metadatas: list[dict]):
         base_kwargs: dict[str, Any] = {
@@ -345,8 +421,13 @@ class QwenVLAnalyzer:
 
     def _build_inputs_opencv(self, info: VideoInfo, start: float, end: float,
                              params: VisualParams, previous_summary: str | None):
-        text, images, metadata, batch = self._prepare_opencv_window(info, start, end, params, previous_summary)
-        return self._processor_call([text], [images], [metadata]), batch
+        text, images, metadata, batch, timing = self._prepare_opencv_window(
+            info, start, end, params, previous_summary
+        )
+        t0 = time.perf_counter()
+        inputs = self._processor_call([text], [images], [metadata])
+        timing["processor_seconds"] = round(time.perf_counter() - t0, 3)
+        return inputs, batch, timing
 
     # ------------------------------------------------------------ 批量窗口推理
     def analyze_windows(self, info: VideoInfo, windows: list[tuple[float, float]], params: VisualParams,
@@ -365,8 +446,12 @@ class QwenVLAnalyzer:
         videos = [p[1] for p in prepared]
         metadatas = [p[2] for p in prepared]
         batches = [p[3] for p in prepared]
+        decode_seconds = sum(p[4]["frame_decode_seconds"] for p in prepared)
+        template_seconds = sum(p[4]["chat_template_seconds"] for p in prepared)
 
+        t0 = time.perf_counter()
         inputs = self._processor_call(texts, videos, metadatas)
+        processor_seconds = time.perf_counter() - t0
         prompt_len = inputs["input_ids"].shape[1]
 
         started = time.perf_counter()
@@ -383,10 +468,14 @@ class QwenVLAnalyzer:
                 raise VisualOOM(str(exc)) from exc
             raise
         elapsed = time.perf_counter() - started
+        t1 = time.perf_counter()
+        new_tokens = int(generated[:, prompt_len:].shape[1])
         raw_texts = self.processor.batch_decode(generated[:, prompt_len:], skip_special_tokens=True)
+        decode_text_seconds = time.perf_counter() - t1
         del inputs, generated
         self._free()
 
+        n = max(len(windows), 1)
         tolerance = float(self.cfg.get("snap_tolerance_seconds", 1.0))
         results: list[tuple[list[VisualEvent], dict]] = []
         for (start, end), batch, raw in zip(windows, batches, raw_texts):
@@ -401,12 +490,21 @@ class QwenVLAnalyzer:
                 "frame_indices": batch.frame_indices,
                 "resolution": [batch.resized_width, batch.resized_height],
                 "batch_size": len(windows),
-                "infer_seconds": round(elapsed / len(windows), 3),
+                "infer_seconds": round(elapsed / n, 3),
+                # 分阶段耗时（batch 内按窗口数均摊），用来定位真实瓶颈
+                "frame_decode_seconds": round(decode_seconds / n, 3),
+                "chat_template_seconds": round(template_seconds / n, 3),
+                "processor_seconds": round(processor_seconds / n, 3),
+                "generate_seconds": round(elapsed / n, 3),
+                "text_decode_seconds": round(decode_text_seconds / n, 3),
+                "prompt_tokens": int(prompt_len),
+                "generated_tokens": new_tokens,
                 "raw_output": raw,
                 "event_count": len(events),
             }
             results.append((events, meta))
         return results
+
 
     # ------------------------------------------------------ 语言改写（纯文本）
     def rewrite_texts(self, texts: list[str], output_language: str,

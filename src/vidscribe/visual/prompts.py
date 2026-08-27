@@ -61,6 +61,7 @@ def build_user_prompt(window_start: float, window_end: float, timestamps: list[f
     return _prompt_en(window_start, window_end, timestamps, previous_summary, lang, timestamp_mode)
 
 
+
 def _ts_list(timestamps: list[float], limit: int = 24) -> str:
     items = [f"{t:.1f}" for t in timestamps[:limit]]
     tail = " ..." if len(timestamps) > limit else ""
