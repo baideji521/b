@@ -658,9 +658,10 @@ class Pipeline:
         if not self.face.enabled or not events:
             return
         cached = visual_meta.get("face")
-        if isinstance(cached, dict) and cached.get("available"):
-            logger.info("复用已有画面表情结果：%s 个事件来自人脸模型",
-                        cached.get("events_from_face"))
+        # 缺 segments 的是加表情轨之前存下来的旧缓存：重算一遍（21s 上下），否则表情轨永远是空的
+        if isinstance(cached, dict) and cached.get("available") and cached.get("segments"):
+            logger.info("复用已有画面表情结果：%s 个事件来自人脸模型，表情段 %d",
+                        cached.get("events_from_face"), len(cached.get("segments") or []))
             return
 
         fcfg = self.cfg.visual.get("face_emotion", {}) or {}

@@ -1847,6 +1847,10 @@ class MainWindow(QMainWindow):
                 "description_translated": e.get("visual_translated"),
                 "event": "", "importance": e.get("importance") or "",
                 "ocr_text": e.get("ocr_text"),
+                # 结构化事实：动作轨要靠 action 归并（老结果里 timeline.json 没有轨时的兜底）
+                "action": e.get("action"),
+                "scene": e.get("scene"),
+                "subjects": e.get("subjects") or [],
                 # 画面事件只带画面情绪，语音情绪由语音段自己带，导出时不会串行
                 "emotion": e.get("visual_emotion"),
                 "emotion_en": e.get("visual_emotion_en"),
@@ -1899,8 +1903,11 @@ class MainWindow(QMainWindow):
                 count = write_events_txt(path, self.video_path.name, self._events_for_export(),
                                         self.show_translated, lang)
             else:
+                # 动作轨/表情轨来自 timeline.json；老结果里没有就让导出层从事件现算动作轨
                 count = write_merged_txt(path, self.video_path.name, self.speech,
-                                        self._events_for_export(), self.show_translated, lang)
+                                        self._events_for_export(), self.show_translated, lang,
+                                        actions=self.timeline_doc.get("action_track"),
+                                        emotions=self.timeline_doc.get("expression_track"))
         except Exception as exc:
             QMessageBox.warning(self, "导出失败", f"{type(exc).__name__}: {exc}")
             return

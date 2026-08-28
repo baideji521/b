@@ -157,6 +157,8 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "speech_file": "语音", "events_file": "事件", "merged_file": "合并",
            "words_file": "逐词", "word_count": "词数",
            "words_section": "逐词时间轴（一个词一个时间戳，原文，不含译文）",
+           "action_section": "动作轨（逐动作时间戳，事件粒度归并）",
+           "expression_section": "表情轨（逐表情时间戳，人脸模型 2fps 归并）",
 
            "translated_file": "译文"},
     "en": {"video": "Video", "speech_count": "Speech segments", "event_count": "Visual events",
@@ -165,6 +167,8 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "speech_file": "speech", "events_file": "events", "merged_file": "merged",
            "words_file": "words", "word_count": "Words",
            "words_section": "Word-by-word timeline (one timestamp per word, source language)",
+           "action_section": "Action track (one timestamp per action, event granularity)",
+           "expression_section": "Expression track (one timestamp per expression, face model @2fps)",
 
            "translated_file": "translated"},
 
@@ -377,11 +381,15 @@ def write_events_txt(path: Path, video_name: str, events: list[dict[str, Any]],
 
 def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]],
                      events: list[dict[str, Any]], translated: bool = False,
-                     language: str = "zh") -> int:
+                     language: str = "zh",
+                     actions: list[dict[str, Any]] | None = None,
+                     emotions: list[dict[str, Any]] | None = None) -> int:
     """合并导出：按时间把画面事件和语音段穿插在一条时间线上。
 
     每行带各自来源的情绪：画面行跟画面情绪，语音行跟语音情绪，两者不混。
+    末尾依次附动作轨、表情轨、逐词时间轴，供高光筛选时按时间对齐三路证据。
     """
+    from ..emotions import display_name  # noqa: PLC0415
     from ..language import labels_for  # noqa: PLC0415
 
     w = txt_words(language)
@@ -414,6 +422,24 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
     ]
     for start, end, kind, text in rows:
         lines.append(f"[{fmt_time(start)} - {fmt_time(end)}] {kind}{w['sep']}{text}")
+
+    # 两条独立时间戳轨：动作（事件粒度归并）和表情（人脸模型 2fps 归并）。
+    # actions 没传就从事件里现算；表情段只能由调用方给（来自 visual meta 的 face.segments）。
+    from .engine import action_track  # noqa: PLC0415
+
+    spans = actions if actions is not None else action_track(events)
+    if spans:
+        lines += ["", "=" * 60, w["action_section"], "=" * 60, ""]
+        for span in spans:
+            scene = f" @ {span['scene']}" if span.get("scene") else ""
+            lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
+                         f"{w['sep']}{span['action']}{scene}")
+    if emotions:
+        lines += ["", "=" * 60, w["expression_section"], "=" * 60, ""]
+        for span in emotions:
+            name = display_name(span.get("emotion_en"), None, language) or span.get("emotion_en")
+            lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
+                         f"{w['sep']}{name} {span.get('intensity', 0):.2f}")
 
     # 末尾附一段逐词时间轴：一个词一个时间戳。说明文字跟着内容语言走（英文内容出英文表头），
     # 逐词只出原文——逐词翻译是词表不是句子。

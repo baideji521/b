@@ -112,7 +112,12 @@ def _entry(ev: VisualEvent | None, speech: list[SpeechEvent]) -> dict[str, Any]:
     }
 
 
-def action_track(events: list[VisualEvent], max_gap: float = 0.5) -> list[dict[str, Any]]:
+def _field(ev: Any, name: str) -> Any:
+    """事件既可能是 VisualEvent 也可能是导出用的 dict（GUI 那条路读的是 json）。"""
+    return ev.get(name) if isinstance(ev, dict) else getattr(ev, name, None)
+
+
+def action_track(events: list[Any], max_gap: float = 0.5) -> list[dict[str, Any]]:
     """逐动作时间戳：相邻事件的 action 标签相同就并成一段。
 
     纯归并，不额外推理——动作标签是视觉模型这一趟已经给出的。粒度就是事件粒度
@@ -120,16 +125,18 @@ def action_track(events: list[VisualEvent], max_gap: float = 0.5) -> list[dict[s
     """
     track: list[dict[str, Any]] = []
     for ev in events:
-        label = ev.action or None
+        label = _field(ev, "action") or None
         if not label:
             continue
+        start, end = float(_field(ev, "start") or 0.0), float(_field(ev, "end") or 0.0)
         last = track[-1] if track else None
-        if last and last["action"] == label and ev.start - last["end"] <= max_gap:
-            last["end"] = round(max(last["end"], ev.end), 3)
-            last["event_ids"].append(ev.id)
+        if last and last["action"] == label and start - last["end"] <= max_gap:
+            last["end"] = round(max(last["end"], end), 3)
+            last["event_ids"].append(_field(ev, "id"))
             continue
-        track.append({"start": round(ev.start, 3), "end": round(ev.end, 3),
-                      "action": label, "scene": ev.scene or None, "event_ids": [ev.id]})
+        track.append({"start": round(start, 3), "end": round(end, 3),
+                      "action": label, "scene": _field(ev, "scene") or None,
+                      "event_ids": [_field(ev, "id")]})
     return track
 
 
