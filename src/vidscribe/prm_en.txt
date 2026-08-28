@@ -117,10 +117,12 @@ Never read neutral into it and never fill it from the Visual line's emotion.
 SECTION 4 — WORD-BY-WORD TIMELINE
 `[start - end] word`
 One timestamp per word. THIS SECTION IS THE FINAL TIMESTAMP AUTHORITY.
-A line like `--- 8.56s with no speech ---` marks silence between two words. The
-alignment across such a marker is unreliable: NEVER let a clip span one, and never
-treat the words on both sides of it as one continuous sentence, even when the Speech
-line in Section 1 shows them as one. Pick boundaries on the same side of the marker.
+A line like `--- 8.56s with no speech ---` marks silence between two words. It means
+NOBODY IS TALKING there — it does NOT mean nothing is happening. Judge such a stretch on
+Sections 2 and 3: an action change or an expression transition inside it makes it a real
+beat (a reaction, a look, a physical gag) and the clip MAY span it. Only when the action
+track and the expression track are both flat across the stretch is it dead air to be
+trimmed. Never treat the words on either side of a marker as one continuous sentence.
 
 There is NO separate second file. Wherever this prompt refers to "the word-level
 timestamp file", it means SECTION 4 of this same file.
@@ -2213,7 +2215,10 @@ FINAL CLIP
 48. clip.start and clip.end are decimal seconds copied verbatim from SECTION 4.
 49. clip.end <= the `Duration` value in the file header. A value above it means a
     misread timestamp, not a real time.
-50. No `--- Xs with no speech ---` marker lies between clip.start and clip.end.
+50. Any `--- Xs with no speech ---` stretch inside the clip is justified by an action
+    change or an expression transition in that same window. Silence with visual content
+    is a beat and stays; silence with a flat action track AND a flat expression track is
+    dead air and gets trimmed.
 47. Minimum necessary context retained.
 48. Unnecessary setup removed.
 49. Dead time removed.
