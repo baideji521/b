@@ -1590,8 +1590,10 @@ class MainWindow(QMainWindow):
                                 "找不到高光筛选提示词。放一份 prm_en.txt 到 prm/ 或项目根目录")
             return
 
-        # 合并导出写到运行目录，文件名跟「合并导出」按钮一致
-        merged_path = self.cfg.root / f"{self.video_path.stem}_merged.txt"
+        # 合并导出是临时文件，放 cache/ 里，运行目录不留东西；任务结束就删
+        cache = self.cfg.path("cache_dir")
+        cache.mkdir(parents=True, exist_ok=True)
+        merged_path = cache / f"{self.video_path.stem}_merged.txt"
         count = write_merged_txt(
             merged_path, self.video_path.name, self.speech, self._events_for_export(),
             self.show_translated, self.export_language(),
