@@ -202,6 +202,54 @@ description of the same span. On-screen text comes from OCR and is often wrong; 
 disagrees with the Visual line, ignore it rather than inventing a premise from it.
 
 ==================================================
+2C. ADAPTIVE CLIP BOUNDARIES
+============================
+
+Decide the START by asking ONE question: does the payoff make sense on its own?
+
+CASE A — CONTEXT-DEPENDENT (a rule, bet, promise or expectation was spoken first):
+Set clip.start at the FIRST WORD of the premise sentence, not at the reaction.
+Adding the premise is REQUIRED whenever total duration stays <= 15.00.
+Real example from this data set:
+  premise   53.82  "If this is yellow, I get to go shopping today."
+  payoff 1  57.67  "No way, it was yellow."
+  payoff 2  63.71  "Green."          (a second, bigger payoff)
+  correct clip: 53.82 - 63.71 = 9.89s
+Starting at 57.67 instead is WRONG: the viewer never learns why shopping is at
+stake. A clip that is shorter but unintelligible is a defect, not a tighter edit.
+Cutting the premise to save seconds is only allowed when the 15.00 cap forces it.
+
+CASE B — SELF-EXPLANATORY (a fall, a reveal, a physical gag, a pure reaction, with no
+spoken prerequisite):
+Set clip.start 1.0-2.0s before the trigger, on the nearest real boundary: a word start
+in SECTION 4, or an action/expression-track boundary in SECTION 2/3.
+
+IF PREMISE + PAYOFF > 15.00:
+Drop the premise, keep action + peak reaction, and carry the rule in the `comment`
+overlay instead (for the example above: "Yellow = shopping spree").
+
+END BOUNDARY:
+* Never end mid-word or mid-sentence. End at the END of the last word you keep.
+* A silent tail is allowed only if the expression track still has an entry there
+  (something is still readable on the face) and only up to 1.0s. Otherwise end exactly
+  at the last word.
+* clip.end never exceeds the `Duration` in the file header.
+
+NO ARITHMETIC PADDING:
+Do NOT apply -0.3s / +0.5s style padding to make the cut "safer". Every number you
+output must be a value that appears in SECTION 4 (or in SECTION 2/3 for a Case-B start).
+Invented values are the single most common failure mode of this task.
+
+TWO PAYOFFS IN ONE WINDOW:
+If two payoffs land within 15.00s of each other, keep BOTH in one continuous clip — a
+double payoff outscores either half alone. Pick the highest-scoring candidate in the
+video, not the earliest one.
+
+IN THE `reason` FIELD:
+State explicitly whether the premise is inside the clip. If it is not, say which overlay
+carries the rule instead.
+
+==================================================
 3. ABSOLUTE TIMESTAMP AUTHORITY RULE
 ====================================
 
@@ -2219,6 +2267,9 @@ FINAL CLIP
     change or an expression transition in that same window. Silence with visual content
     is a beat and stays; silence with a flat action track AND a flat expression track is
     dead air and gets trimmed.
+51. If the payoff depends on a spoken rule / bet / promise, the premise sentence starts
+    inside the clip (Section 2C, Case A) — or, when the 15.00 cap made that impossible,
+    the `comment` overlay states the rule.
 47. Minimum necessary context retained.
 48. Unnecessary setup removed.
 49. Dead time removed.
