@@ -1431,7 +1431,8 @@ class MainWindow(QMainWindow):
     def run_highlight(self, text: str, ai: bool = False) -> None:
         """按 JSON 直接起渲染。手动走对话框和 AI 自动回填都汇到这里。
 
-        AI 自动那条只出一个成品：<视频名>_高光时刻.mp4，落在运行目录。
+        用的是界面上「剪辑高光」那套配置（加减秒数、音效类别/增益）。
+        AI 自动那条只出一个成品：<视频名>_高光时刻.mp4，落在「导出目录」选的位置。
         """
         self._last_highlight_json = text
         self.btn_highlight.setEnabled(False)
@@ -1439,10 +1440,13 @@ class MainWindow(QMainWindow):
         self.lbl_stage.setText("剪辑高光｜准备中")
 
         self.statusBar().showMessage("正在渲染高光片段…")
-        directory = self.cfg.root if ai else self.export_dir
+        directory = self.export_dir
         self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, directory,
                                            self._highlight_offsets, self._highlight_sfx,
                                            video_only=ai)
+        if ai:
+            self.append_log(f"[剪辑高光] 输出到导出目录：{self.export_root()}"
+                            f"（加减秒数 {self._highlight_offsets}，音效 {self._highlight_sfx[0] or '自动'}）")
 
         self.clip_worker.log.connect(self.append_log)
         self.clip_worker.progress.connect(self.on_highlight_progress)
