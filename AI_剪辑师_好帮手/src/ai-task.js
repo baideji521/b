@@ -434,23 +434,29 @@ async function runInTab(tabId, fn, args = []) {
 /**
  * 先看 gemini.google.com 是不是已经开着：开着就直接用那个窗口，绝不动它的 URL，
  * 也不等页面加载（省掉重新加载那几秒）。没开才新建一个。
+ *
+ * 默认全程不抢焦点：拖放、回车、读回答都是注入脚本干的，标签页在后台也照跑，
+ * 所以不会打断你手上的活。只有半自动（要你亲手选文件）才把窗口拉到前台。
  * 返回 { tabId, created, ready }，created=false 的标签页是用户自己的，事后不许关。
  */
-async function ensureGeminiTab(url) {
+async function ensureGeminiTab(url, { focus = false } = {}) {
   const opened = await chrome.tabs.query({ url: "*://gemini.google.com/*" }).catch(() => []);
   const existing = Array.isArray(opened) ? opened.find((tab) => typeof tab.id === "number") : null;
   if (existing) {
     log("Gemini 已经开着，直接用", existing.id, existing.status || "");
-    await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
-    if (typeof existing.windowId === "number") {
-      await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+    if (focus) {
+      await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
+      if (typeof existing.windowId === "number") {
+        await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+      }
     }
     return { tabId: existing.id, created: false, ready: existing.status === "complete" };
   }
-  log("Gemini 没打开，新建标签页", url);
-  const tab = await chrome.tabs.create({ url, active: true });
+  log("Gemini 没打开，新建标签页", url, focus ? "" : "（后台打开）");
+  const tab = await chrome.tabs.create({ url, active: focus });
   return { tabId: tab.id, created: true, ready: false };
 }
+
 
 
 async function waitForTabComplete(tabId, timeoutMs) {
@@ -550,7 +556,8 @@ async function handleAiTask(task) {
 
 
     if (await cancelled("opening", `打开 ${url}`)) return;
-    const target = await ensureGeminiTab(url);
+    const target = await ensureGeminiTab(url, { focus: uploadMode !== "auto" });
+
     tabId = target.tabId;
     createdTab = target.created;
     // 已经开着而且加载完的，直接干，不等；只有新开的或还在转的才等页面 complete
