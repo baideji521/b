@@ -255,8 +255,9 @@ function pageAttachFiles(payloads, mode) {
 
 /** 点一下「+ / 上传文件」把上传控件催出来。返回点了什么、现在有几个 file input。 */
 function pageOpenUploadMenu() {
-  const wanted = /上传|添加文件|添加图片|上传文件|attach|upload|add files/i;
-  const skip = /发送|send|停止|stop|麦克风|mic|语音|录音/i;
+  const wanted = /添加照片和文件|上传文件|添加文件|attach|upload|add files/i;
+  // 云端硬盘那条会弹 Google Drive 选择器，纯挡路；发送/录音也别碰
+  const skip = /云端|硬盘|drive|发送|send|停止|stop|麦克风|mic|语音|录音|图片生成|制作/i;
   const clicked = [];
   const nodes = Array.from(
     document.querySelectorAll("button, [role='button'], [role='menuitem']")
@@ -273,6 +274,32 @@ function pageOpenUploadMenu() {
   }
   return { clicked, inputs: document.querySelectorAll("input[type='file']").length };
 }
+
+
+/**
+ * 关掉挡在前面的浮层：那个「+」菜单开着会盖住输入框，回车也发不出去。
+ * 按 Esc + 点一下遮罩，都是手动关它的办法。
+ */
+function pageCloseOverlays() {
+  const key = {
+    key: "Escape", code: "Escape", keyCode: 27, which: 27,
+    bubbles: true, cancelable: true, composed: true,
+  };
+  document.dispatchEvent(new KeyboardEvent("keydown", key));
+  document.dispatchEvent(new KeyboardEvent("keyup", key));
+  let backdrops = 0;
+  for (const el of document.querySelectorAll(
+    ".cdk-overlay-backdrop, .mat-mdc-menu-backdrop, [class*='overlay-backdrop']"
+  )) {
+    try {
+      el.click();
+      backdrops += 1;
+    } catch {}
+  }
+  const menus = document.querySelectorAll("[role='menu'], .mat-mdc-menu-panel").length;
+  return { backdrops, menus };
+}
+
 
 
 /**
@@ -574,8 +601,15 @@ async function handleAiTask(task) {
         { mode: "paste", batch: true },
         { mode: "input", batch: true },
       ];
-      for (const plan of plans) {
+      for (let p = 0; p < plans.length; p += 1) {
+        const plan = plans[p];
+        // 卡片可能晚一点才冒出来，升级到下一种方式之前先复查一遍，别白折腾
+        if (p > 0 && await waitCards(names, 600)) {
+          autoDone = true;
+          break;
+        }
         if (plan.mode === "input") {
+
           const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
           log("催上传控件", JSON.stringify(menu || {}));
           await sleep(300);
@@ -649,6 +683,11 @@ async function handleAiTask(task) {
     }
 
     if (await cancelled("sending", "等附件加载完")) return;
+    // 「+」菜单这类浮层会盖住输入框，回车也发不出去，先关掉
+    const closed = await runInTab(tabId, pageCloseOverlays).catch(() => null);
+    if (closed?.backdrops || closed?.menus) log("关掉浮层", JSON.stringify(closed));
+    await sleep(300);
+
 
     // 附件还在转圈就按回车会白发一条，等页面彻底安静下来
     const settleDeadline = Date.now() + SETTLE_TIMEOUT_MS;
