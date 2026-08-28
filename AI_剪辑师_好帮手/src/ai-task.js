@@ -30,10 +30,11 @@ const BRIDGE_TIMEOUT_MS = 30000;
 const READY_TIMEOUT_MS = 60000;
 // 塞文件的方式，按顺序试：模仿手动拖放 -> 粘贴 -> 塞 file 控件
 const ATTACH_MODES = ["drop", "paste", "input"];
-// 每种方式塞完之后等页面认账的时间，超了就换下一种
-const ATTACH_VERIFY_MS = 40000;
+// 一次把所有文件拖进去之后，等页面出卡片的时间；手动也就一两秒，超了就换下一种方式
+const ATTACH_VERIFY_MS = 8000;
 // 附件挂上之后等它加载完（转圈停掉）的上限，之后才按回车
-const SETTLE_TIMEOUT_MS = 60000;
+const SETTLE_TIMEOUT_MS = 15000;
+
 // 半自动模式等你手动把文件选进去的上限
 const MANUAL_TIMEOUT_MS = 600000;
 
@@ -537,64 +538,53 @@ async function handleAiTask(task) {
 
     let autoDone = false;
     if (uploadMode === "auto") {
-      autoDone = true;
-      // 两个 txt 依次塞：先模仿手动拖，拖不成退到粘贴，最后才去塞 file 控件
-      for (let i = 0; i < payloads.length && autoDone; i += 1) {
-        const item = payloads[i];
-        const label = `${i + 1}/${payloads.length} ${item.name}`;
-        if (await cancelled("uploading", `上传 ${label}`)) return;
-        const baseline = baselines[item.name];
+      // 手动就是一次把两个文件拖进去，这里照做：一个 DataTransfer 塞两份，一次 drop
+      for (const mode of ATTACH_MODES) {
+        if (mode === "input") {
+          // 控件平时不在 DOM 里，先点一下「+ / 上传文件」把它催出来
+          const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
+          log("催上传控件", JSON.stringify(menu || {}));
+          await sleep(500);
+        }
+        const attached = await runInTab(tabId, pageAttachFiles, [payloads, mode]).catch(() => null);
+        if (!attached?.ok) {
+          log("塞入失败", mode, attached?.error || "未知原因");
+          continue;
+        }
+        if (await cancelled("uploading", `${mode} 拖入 ${names.length} 个文件`)) return;
 
-        let attachedOk = false;
-        let usedVia = "";
-        let lastError = "";
-        for (const mode of ATTACH_MODES) {
-          if (mode === "input") {
-            // 控件平时不在 DOM 里，先点一下「+ / 上传文件」把它催出来
-            const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
-            log("催上传控件", JSON.stringify(menu || {}));
-            await sleep(800);
-          }
-          const attached = await runInTab(tabId, pageAttachFiles, [[item], mode]).catch(() => null);
-          if (!attached?.ok) {
-            lastError = `${mode}：${attached?.error || "未知原因"}`;
-            log("塞入失败", label, lastError);
-            continue;
-          }
-          log("已塞入，等页面认账", label, `方式=${mode}`);
 
-          const modeDeadline = Date.now() + ATTACH_VERIFY_MS;
-          while (Date.now() < modeDeadline) {
-            const check = await runInTab(tabId, pageCountAttachment, [item.name]).catch(() => null);
+        // 页面上每个文件名都比塞之前多一次才算挂上；正常一两秒就出卡片
+        const deadline = Date.now() + ATTACH_VERIFY_MS;
+        let missing = names.slice();
+        while (Date.now() < deadline) {
+          const left = [];
+          let hit = "";
+          for (const name of missing) {
+            const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
             if (check?.failed) {
               return finish({ status: "failed",
-                              error: `页面提示上传失败（${label}，可能不收 txt 或文件太大）` });
+                              error: "页面提示上传失败（可能不收 txt 或文件太大）" });
             }
-            if (Number(check?.count || 0) > baseline) {
-              attachedOk = true;
-              usedVia = mode;
-              log("页面认账", label, `匹配=${check?.used || ""}`);
-              break;
-            }
-            if (await cancelled("uploading", `等 ${label} 挂上（${mode}）`)) return;
-            await sleep(1000);
-
+            if (Number(check?.count || 0) > baselines[name]) hit = check?.used || name;
+            else left.push(name);
           }
-          if (attachedOk) break;
-          lastError = `${mode}：塞进去了但页面没挂上`;
-          log("没挂上，换下一种方式", label, mode);
+          missing = left;
+          if (!missing.length) break;
+          if (hit) log("已认账", hit, `还差 ${missing.length}`);
+          await sleep(400);
         }
-        if (attachedOk) {
-          log("附件已挂上", label, `方式=${usedVia}`);
-        } else {
-          // 自动塞不进去不算失败，改成等你手动选
-          log("自动上传没成，转半自动", label, lastError);
-          autoDone = false;
+        if (!missing.length) {
+          autoDone = true;
+          log(`两个文件都挂上了（方式=${mode}）`);
+          break;
         }
+        log("没挂上，换下一种方式", mode, `还差 ${missing.join("、")}`);
       }
     }
 
     if (!autoDone) {
+
       // 半自动：把 Gemini 窗口拉到前台、顺手点开上传菜单，等你自己把文件选进去
       await chrome.tabs.update(tabId, { active: true }).catch(() => {});
       const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -639,8 +629,9 @@ async function handleAiTask(task) {
         break;
       }
       if (await cancelled("sending", "附件还在加载")) return;
-      await sleep(1000);
+      await sleep(500);
     }
+
 
     // 复用的窗口里可能已经有旧回答，先记下条数，别把旧的当成这次的结果
     const before = await runInTab(tabId, pageReadAnswer).catch(() => null);
