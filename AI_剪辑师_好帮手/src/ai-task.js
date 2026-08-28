@@ -4,7 +4,9 @@
 //   GET  /v1/ai/next?types=gemini_json   领任务（文件清单 + 要说的那句话）
 //   GET  /v1/ai/file?task_id=..&index=N  取 txt 本体（prm_en.txt / *_merged.txt）
 //     → gemini.google.com 已经开着就用那个窗口，没开才新建，等输入框出现
-//     → 把两个 txt 依次塞进页面的文件上传控件，每个都等挂稳
+//     → 把两个 txt 依次「拖」进页面（模仿手动拖放，拖不成再退到粘贴 / file 控件），
+//       每个都等页面认账
+
 
 //     → 输入那句话并发送
 //     → 等回答停止增长
@@ -26,8 +28,12 @@ const POLL_BACKOFF_MS = 10000;
 const BRIDGE_TIMEOUT_MS = 30000;
 // 页面就绪 / 附件挂上 / 回答完成的等待上限
 const READY_TIMEOUT_MS = 60000;
-const UPLOAD_TIMEOUT_MS = 120000;
+// 塞文件的方式，按顺序试：模仿手动拖放 -> 粘贴 -> 塞 file 控件
+const ATTACH_MODES = ["drop", "paste", "input"];
+// 每种方式塞完之后等页面认账的时间，超了就换下一种
+const ATTACH_VERIFY_MS = 40000;
 const ANSWER_TIMEOUT_MS = 600000;
+
 // 回答连续这么久没有变化就算写完了
 const STABLE_MS = 3000;
 const POLL_ANSWER_MS = 1500;
@@ -144,17 +150,11 @@ function pageProbeEditor() {
   return { ok: false, selector: null };
 }
 
-/** 把 txt 塞进页面的文件上传控件。 */
-function pageAttachFiles(payloads) {
-  const inputs = Array.from(document.querySelectorAll("input[type='file']"));
-  if (!inputs.length) return { ok: false, error: "页面上找不到文件上传控件" };
-  // 优先挑没限制 accept 或明确收 text 的那个
-  const input =
-    inputs.find((el) => {
-      const accept = (el.getAttribute("accept") || "").toLowerCase();
-      return !accept || accept.includes("text") || accept.includes("*/*") || accept.includes(".txt");
-    }) || inputs[0];
-
+/**
+ * 把 txt 塞进页面，默认走「模仿手动拖进去」——页面里能手动拖，就用同一条路。
+ * mode: drop（拖放，默认）/ paste（粘贴）/ input（塞 file 控件，兜底）。
+ */
+function pageAttachFiles(payloads, mode) {
   const transfer = new DataTransfer();
   for (const item of payloads) {
     const binary = atob(item.b64);
@@ -162,11 +162,103 @@ function pageAttachFiles(payloads) {
     for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
     transfer.items.add(new File([bytes], item.name, { type: item.mime || "text/plain" }));
   }
+  try {
+    transfer.dropEffect = "copy";
+    transfer.effectAllowed = "all";
+  } catch {}
+
+  const editor = document.querySelector(
+    "div.ql-editor[contenteditable='true'], rich-textarea div[contenteditable='true'], "
+    + "[contenteditable='true'], textarea"
+  );
+
+  if (mode === "drop" || !mode) {
+    if (!editor && !document.body) return { ok: false, error: "页面还没渲染出可拖放的区域" };
+    // 手动拖文件时事件落在输入框那一片，从输入框往上逐层派发，谁监听谁收
+    const targets = [];
+    for (let node = editor; node && targets.length < 4; node = node.parentElement) {
+      targets.push(node);
+    }
+    if (document.body) targets.push(document.body);
+    if (!targets.length) return { ok: false, error: "找不到拖放目标" };
+
+    const rect = (editor || document.body).getBoundingClientRect();
+    const point = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    let fired = 0;
+    for (const target of targets) {
+      for (const type of ["dragenter", "dragover", "drop"]) {
+        try {
+          target.dispatchEvent(new DragEvent(type, {
+            bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...point,
+          }));
+          fired += 1;
+        } catch {}
+      }
+    }
+    return fired
+      ? { ok: true, via: "drop", targets: targets.length, count: transfer.files.length }
+      : { ok: false, error: "拖放事件派发失败" };
+  }
+
+  if (mode === "paste") {
+    if (!editor) return { ok: false, error: "找不到输入框，没法模拟粘贴" };
+    editor.focus();
+    try {
+      editor.dispatchEvent(new ClipboardEvent("paste", {
+        bubbles: true, cancelable: true, composed: true, clipboardData: transfer,
+      }));
+      return { ok: true, via: "paste", count: transfer.files.length };
+    } catch (error) {
+      return { ok: false, error: `模拟粘贴失败：${error?.message || error}` };
+    }
+  }
+
+  // input 兜底：连 shadow root 一起翻，Angular Material 常把控件藏在里面
+  const inputs = [];
+  const walk = (root) => {
+    if (!root?.querySelectorAll) return;
+    inputs.push(...root.querySelectorAll("input[type='file']"));
+    for (const el of root.querySelectorAll("*")) {
+      if (el.shadowRoot) walk(el.shadowRoot);
+    }
+  };
+  walk(document);
+  // 优先挑没限制 accept 或明确收 text 的那个
+  const input =
+    inputs.find((el) => {
+      const accept = (el.getAttribute("accept") || "").toLowerCase();
+      return !accept || accept.includes("text") || accept.includes("*/*") || accept.includes(".txt");
+    }) || inputs[0];
+  if (!input) return { ok: false, error: "页面上找不到文件上传控件" };
   input.files = transfer.files;
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
-  return { ok: true, count: input.files.length, accept: input.getAttribute("accept") || "" };
+  return { ok: true, via: "input", count: input.files.length,
+           accept: input.getAttribute("accept") || "" };
 }
+
+
+/** 点一下「+ / 上传文件」把上传控件催出来。返回点了什么、现在有几个 file input。 */
+function pageOpenUploadMenu() {
+  const wanted = /上传|添加文件|添加图片|上传文件|attach|upload|add files/i;
+  const skip = /发送|send|停止|stop|麦克风|mic|语音|录音/i;
+  const clicked = [];
+  const nodes = Array.from(
+    document.querySelectorAll("button, [role='button'], [role='menuitem']")
+  );
+  for (const node of nodes) {
+    const label = `${node.getAttribute("aria-label") || ""} `
+      + `${node.getAttribute("mattooltip") || ""} ${node.textContent || ""}`;
+    if (!wanted.test(label) || skip.test(label) || node.disabled) continue;
+    try {
+      node.click();
+      clicked.push(label.trim().replace(/\s+/g, " ").slice(0, 24));
+    } catch {}
+    if (clicked.length >= 2) break;
+  }
+  return { clicked, inputs: document.querySelectorAll("input[type='file']").length };
+}
+
 
 /**
  * 数页面上这个文件名出现了几次。复用的窗口里可能有上一轮的同名附件，
@@ -376,32 +468,52 @@ async function handleAiTask(task) {
       if (await cancelled("uploading", `上传 ${label}`)) return;
       const seen = await runInTab(tabId, pageCountAttachment, [item.name]).catch(() => null);
       const baseline = Number(seen?.count || 0);
-      const attached = await runInTab(tabId, pageAttachFiles, [[item]]);
-      if (!attached?.ok) {
-        return finish({ status: "failed", error: `上传失败（${label}）：${attached?.error || "未知原因"}` });
-      }
 
-      // 等这一个附件真的挂上（页面上这个文件名比上传前多了一次）
+      // 先模仿手动拖进去；拖不成再退到粘贴，最后才去塞 file 控件
       let attachedOk = false;
-      const uploadDeadline = Date.now() + UPLOAD_TIMEOUT_MS;
-      while (Date.now() < uploadDeadline) {
-        const check = await runInTab(tabId, pageCountAttachment, [item.name]).catch(() => null);
-        if (check?.failed) {
-          return finish({ status: "failed", error: `页面提示上传失败（${label}，可能不收 txt 或文件太大）` });
+      let usedVia = "";
+      let lastError = "";
+      for (const mode of ATTACH_MODES) {
+        if (mode === "input") {
+          // 控件平时不在 DOM 里，先点一下「+ / 上传文件」把它催出来
+          const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
+          log("催上传控件", JSON.stringify(menu || {}));
+          await sleep(800);
         }
-        if (Number(check?.count || 0) > baseline) {
-          attachedOk = true;
-          break;
+        const attached = await runInTab(tabId, pageAttachFiles, [[item], mode]).catch(() => null);
+        if (!attached?.ok) {
+          lastError = `${mode}：${attached?.error || "未知原因"}`;
+          log("塞入失败", label, lastError);
+          continue;
         }
+        log("已塞入，等页面认账", label, `方式=${mode}`);
 
-        if (await cancelled("uploading", `等 ${label} 挂上`)) return;
-        await sleep(1500);
+        // 页面上这个文件名比塞之前多一次才算真挂上
+        const modeDeadline = Date.now() + ATTACH_VERIFY_MS;
+        while (Date.now() < modeDeadline) {
+          const check = await runInTab(tabId, pageCountAttachment, [item.name]).catch(() => null);
+          if (check?.failed) {
+            return finish({ status: "failed",
+                            error: `页面提示上传失败（${label}，可能不收 txt 或文件太大）` });
+          }
+          if (Number(check?.count || 0) > baseline) {
+            attachedOk = true;
+            usedVia = mode;
+            break;
+          }
+          if (await cancelled("uploading", `等 ${label} 挂上（${mode}）`)) return;
+          await sleep(1500);
+        }
+        if (attachedOk) break;
+        lastError = `${mode}：塞进去了但页面没挂上`;
+        log("没挂上，换下一种方式", label, mode);
       }
       if (!attachedOk) {
-        return finish({ status: "failed", error: `附件一直没挂上，超时（${label}）` });
+        return finish({ status: "failed", error: `附件没挂上（${label}）：${lastError}` });
       }
-      log("附件已挂上", label);
+      log("附件已挂上", label, `方式=${usedVia}`);
     }
+
 
 
     if (await cancelled("sending", "发送提问")) return;
