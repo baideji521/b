@@ -688,6 +688,9 @@ class MainWindow(QMainWindow):
             lambda playing: self.btn_play.setText("暂停" if playing else "播放")
         )
         self.player.audioFailed.connect(self.on_audio_failed)
+        # 右键菜单：添加 / 从播放器移除 / 彻底删除
+        self.player.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.player.customContextMenuRequested.connect(self.on_player_menu)
 
         self.btn_play = QPushButton("播放")
         self.btn_play.clicked.connect(self.toggle_play)
@@ -1138,6 +1141,73 @@ class MainWindow(QMainWindow):
                                               f"视频文件 ({patterns})")
         if path:
             self.load_video(Path(path))
+
+    # --------------------------------------------------- 播放器右键：添加 / 删除
+    def on_player_menu(self, pos) -> None:
+        menu = QMenu(self)
+        act_add = menu.addAction("添加视频…")
+        menu.addSeparator()
+        act_close = menu.addAction("删除（从播放器移除）")
+        act_purge = menu.addAction("彻底删除（不可恢复）")
+        loaded = self.video_path is not None
+        act_close.setEnabled(loaded)
+        act_purge.setEnabled(loaded)
+        chosen = menu.exec_(self.player.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_add:
+            self.on_open()
+        elif chosen is act_close:
+            self.close_current_video()
+        elif chosen is act_purge:
+            self.delete_current_video_file()
+
+    def close_current_video(self) -> None:
+        """只从界面上撤下来：磁盘上的视频和已有分析结果都不动。"""
+        if self.video_path is None:
+            return
+        name = self.video_path.name
+        self.player.close_video()
+        self.video_path = None
+        self.timeline, self.speech = [], []
+        self.timeline_doc, self.speech_doc = {}, {}
+        self.show_translated = False
+        self.chk_sound.blockSignals(True)
+        self.chk_sound.setChecked(False)
+        self.chk_sound.blockSignals(False)
+        self.slider.setValue(0)
+        self.lbl_time.setText("00:00.00 / 00:00.00")
+        self.setWindowTitle(theme.APP_TITLE)
+        self.update_translate_button()
+        self.refresh_timeline_table()
+        self.refresh_speech_list()
+        self.refresh_export_hint()
+        self.statusBar().showMessage("已从播放器移除，文件还在原处")
+        self.append_log(f"[播放器] 移除 {name}（文件未删除）")
+
+    def delete_current_video_file(self) -> None:
+        """把视频文件本身删掉。不进回收站，删完就没了，所以要二次确认。"""
+        if self.video_path is None:
+            return
+        target = self.video_path
+        answer = QMessageBox.warning(
+            self, "彻底删除",
+            f"把这个文件从磁盘上删除，不进回收站、无法恢复：\n\n{target}\n\n确定删除？",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel,
+        )
+        if answer != QMessageBox.Yes:
+            return
+        # 先松开文件：播放器还占着句柄时 Windows 上删不掉
+        self.close_current_video()
+        try:
+            target.unlink()
+        except OSError as exc:
+            QMessageBox.critical(self, "删除失败", f"{target}\n\n{exc}")
+            self.append_log(f"[删除] 失败：{target} —— {exc}")
+            return
+        self.append_log(f"[删除] 已彻底删除 {target}")
+        self.statusBar().showMessage(f"已删除 {target.name}（分析结果仍保留在输出目录）")
+
 
     # ------------------------------------------------------------- 拖拽打开
     @staticmethod
