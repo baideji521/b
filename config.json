@@ -199,6 +199,8 @@
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
     "upload_mode": "auto",
+    "focus_browser": false,
+
 
     "keep_merged_file": false,
 

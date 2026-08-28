@@ -1566,6 +1566,8 @@ class MainWindow(QMainWindow):
              "video": self.video_path.name,
              "message": str(cfg.get("message") or ""),
              "upload_mode": str(cfg.get("upload_mode") or "manual"),
+             "focus_browser": bool(cfg.get("focus_browser", False)),
+
              "expect": "json"},
             files=[prompt_path, merged_path])
         state = self.bridge.state()

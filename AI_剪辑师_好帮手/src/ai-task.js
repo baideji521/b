@@ -519,6 +519,9 @@ async function handleAiTask(task) {
   const message = String(task.message || "Reply with the JSON object only.");
   // manual = 半自动：文件你自己选进去，剩下的（发送、等回答、抠 JSON、回传）扩展来
   const uploadMode = String(task.upload_mode || "manual");
+  // 默认死活不抢焦点；要它自己跳到前台就在 config.json 里把 bridge.focus_browser 打开
+  const focusBrowser = Boolean(task.focus_browser);
+
 
   let tabId = null;
   let createdTab = false;
@@ -556,7 +559,8 @@ async function handleAiTask(task) {
 
 
     if (await cancelled("opening", `打开 ${url}`)) return;
-    const target = await ensureGeminiTab(url, { focus: uploadMode !== "auto" });
+    const target = await ensureGeminiTab(url, { focus: focusBrowser });
+
 
     tabId = target.tabId;
     createdTab = target.created;
@@ -684,12 +688,16 @@ async function handleAiTask(task) {
 
     if (!autoDone) {
 
-      // 半自动：把 Gemini 窗口拉到前台、顺手点开上传菜单，等你自己把文件选进去
-      await chrome.tabs.update(tabId, { active: true }).catch(() => {});
-      const tab = await chrome.tabs.get(tabId).catch(() => null);
-      if (typeof tab?.windowId === "number") {
-        await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+      // 半自动：要你亲手选文件。只有开了 focus_browser 才把窗口拉到前台，
+      // 否则安静等着，你自己切到 Gemini 标签页就行（AI_剪辑师 的日志里有文件路径）
+      if (focusBrowser) {
+        await chrome.tabs.update(tabId, { active: true }).catch(() => {});
+        const tab = await chrome.tabs.get(tabId).catch(() => null);
+        if (typeof tab?.windowId === "number") {
+          await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {});
+        }
       }
+
       const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
       log("等你手动选文件", JSON.stringify(menu || {}));
 
