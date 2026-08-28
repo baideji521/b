@@ -811,7 +811,6 @@ class MainWindow(QMainWindow):
                                      "输出到导出目录，文件名带 _高光时刻")
 
         self.btn_highlight.clicked.connect(self.on_highlight)
-        export_row.addWidget(self._section("导出"))
         export_row.addWidget(self.btn_highlight)
         # 选目录和打开目录挨着放在第一行：先选，再打开
         top.addWidget(self.btn_export_dir)
