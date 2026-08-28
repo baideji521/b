@@ -39,6 +39,9 @@ const SETTLE_TIMEOUT_MS = 3000;
 
 // 半自动模式等你手动把文件选进去的上限
 const MANUAL_TIMEOUT_MS = 600000;
+// 发出去这么久还没有新回答，就再点一次发送（后台标签页第一次可能没吃进去）
+const RESEND_AFTER_MS = 12000;
+
 
 
 const ANSWER_TIMEOUT_MS = 600000;
@@ -309,7 +312,10 @@ function pageCloseOverlays() {
  * 所以只看「有没有」会误判，必须比塞之前后的次数。
  */
 function pageCountAttachment(name) {
-  const text = document.body ? document.body.innerText || "" : "";
+  // 后台标签页可能不做布局，innerText 会是空的，退回 textContent
+  const body = document.body;
+  const text = body ? body.innerText || body.textContent || "" : "";
+
   const count = (needle) => {
     if (!needle) return 0;
     let hit = 0;
@@ -340,7 +346,9 @@ function pageCountAttachment(name) {
 
 /** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
 function pageUploadSettled() {
-  const text = document.body ? document.body.innerText || "" : "";
+  const body = document.body;
+  const text = body ? body.innerText || body.textContent || "" : "";
+
   const pending = /上传中|正在上传|处理中|uploading|processing/i.test(text);
   const spinner = document.querySelectorAll(
     "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']"
@@ -383,6 +391,20 @@ function pageSendMessage(selector, text) {
     }
   }
 
+  // 后台标签页里回车常常不生效（页面没焦点，键盘事件被当噪音），
+  // 所以优先点发送按钮——点击不需要焦点；找不到按钮才退回模拟回车。
+  const send = Array.from(document.querySelectorAll("button, [role='button']")).find((b) => {
+    const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} `
+      + `${b.className || ""}`;
+    if (!/发送|send|提交|submit/i.test(label)) return false;
+    if (/停止|stop|取消|cancel/i.test(label)) return false;
+    return !b.disabled && b.getAttribute("aria-disabled") !== "true";
+  });
+  if (send) {
+    send.click();
+    return { ok: true, sent: "button", typed: message.length };
+  }
+
   const key = {
     key: "Enter", code: "Enter", keyCode: 13, which: 13,
     bubbles: true, cancelable: true, composed: true,
@@ -392,6 +414,7 @@ function pageSendMessage(selector, text) {
   editor.dispatchEvent(new KeyboardEvent("keyup", key));
   return { ok: true, sent: "enter", typed: message.length };
 }
+
 
 
 /** 读最后一条回答的纯文本，并判断是否还在写。 */
@@ -408,7 +431,9 @@ function pageReadAnswer() {
     if (nodes.length) break;
   }
   const last = nodes[nodes.length - 1] || null;
-  const text = last ? (last.innerText || "").trim() : "";
+  // 后台标签页不做布局时 innerText 是空的，退回 textContent
+  const text = last ? (last.innerText || last.textContent || "").trim() : "";
+
   // 还在生成时页面上有「停止」按钮
   const streaming = Array.from(document.querySelectorAll("button")).some((b) => {
     const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""}`;
@@ -769,15 +794,24 @@ async function handleAiTask(task) {
     // 等回答：文本连续 STABLE_MS 不变且没有「停止」按钮就算写完
     let text = "";
     let stableSince = 0;
+    let resent = false;
+    const sentAt = Date.now();
     const answerDeadline = Date.now() + ANSWER_TIMEOUT_MS;
     while (Date.now() < answerDeadline) {
       await sleep(POLL_ANSWER_MS);
       const snapshot = await runInTab(tabId, pageReadAnswer).catch(() => null);
       // 新回答还没冒出来（条数没涨）就继续等，别读到窗口里原有的旧回答
       if (Number(snapshot?.blocks || 0) <= baselineBlocks) {
+        // 后台标签页里第一次发送有可能没吃进去，等一会儿没反应就再点一次发送
+        if (!resent && Date.now() - sentAt > RESEND_AFTER_MS) {
+          resent = true;
+          const again = await runInTab(tabId, pageSendMessage, [editor.selector, ""]).catch(() => null);
+          log("没反应，再发一次", again?.sent || "失败");
+        }
         if (await cancelled("waiting_answer", "等新回答出现")) return;
         continue;
       }
+
       const current = snapshot?.text || "";
 
       if (current && current === text && !snapshot?.streaming) {
