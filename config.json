@@ -195,6 +195,12 @@
     "port": 5998,
     "port_fallbacks": 0,
 
+    "mode": "api",
+    "api_key": "",
+    "api_key_env": "GEMINI_API_KEY",
+    "api_model": "gemini-2.5-flash",
+    "api_timeout": 300,
+
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
