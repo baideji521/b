@@ -111,7 +111,8 @@ def _prompt_zh(window_start: float, window_end: float, timestamps: list[float],
         "1. 按连续动作理解，描述动作的变化过程，不要逐帧描述静态画面。",
         "2. 画面长时间没变化就只输出一个覆盖整段时间的事件，不要输出重复事件。",
         "3. 只在动作发生变化（移动、拿起/放下、进出画面、镜头切换、掉落等）时切分新事件。",
-        f"4. start/end 用 {window_start:.1f} 到 {window_end:.1f} 之间的绝对秒数，升序且不重叠。",
+        f"4. start/end 用 {window_start:.1f} 到 {window_end:.1f} 之间的绝对秒数，升序且不重叠；"
+        "必须把整个窗口连续覆盖完（第一条从窗口开头起，最后一条到窗口结尾止，前一条的 end 就是后一条的 start），不要留空档。",
         "5. importance：日常/静态 normal；背景轻微变化 low；摔倒/碰撞/掉落/突然进出 high；爆炸/事故/场景剧变 critical。",
         "6. 最多 5 条事件，description 不超过 30 字，只描述看得见的内容，不要猜测声音或说话内容。",
         "7. event 和 description 必须用中文；action / scene / subjects 必须用英文小写标签"
@@ -155,7 +156,9 @@ def _prompt_en(window_start: float, window_end: float, timestamps: list[float],
         "3. Start a new event only when the action changes (movement, picking up/putting down, "
         "entering/leaving frame, shot cut, falling, etc.).",
         f"4. start/end must be absolute seconds between {window_start:.1f} and {window_end:.1f}, "
-        "ascending and non-overlapping.",
+        "ascending and non-overlapping; together they must cover the whole window with no gaps "
+        "(first event starts at the window start, last one ends at the window end, "
+        "each event's end is the next one's start).",
         "5. importance: everyday/static -> normal; minor background change -> low; "
         "fall/collision/drop/sudden entry -> high; explosion/accident/drastic change -> critical.",
         "6. At most 5 events; description <= 20 words; describe only what is visible; never guess audio or speech.",

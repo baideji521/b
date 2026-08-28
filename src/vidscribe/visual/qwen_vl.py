@@ -322,6 +322,18 @@ class QwenVLAnalyzer:
         return events, meta
 
     # ------------------------------------------------------------- 输入构建
+    @property
+    def _prompt_emotion(self) -> bool:
+        """情绪字段还要不要视觉模型顺手判。
+
+        人脸专用模型（visual/face.py）开着的时候不问：它判出来的结果会把视觉模型这两个
+        字段整个覆盖掉，白解码。实测批量解码的耗时由一批里最长那条输出决定，
+        少两个字段就是少一截步数。
+        """
+        if not self.cfg.get("emotion_enabled", True):
+            return False
+        return not bool((self.cfg.get("face_emotion") or {}).get("enabled", False))
+
     def _messages(self, video_content: dict, start: float, end: float,
                   timestamps: list[float], previous_summary: str | None) -> list[dict]:
         return [
@@ -334,8 +346,7 @@ class QwenVLAnalyzer:
                     {"type": "text",
                      "text": prompts.build_user_prompt(start, end, timestamps, previous_summary,
                                                        output_language=self.output_language,
-                                                       with_emotion=bool(
-                                                           self.cfg.get("emotion_enabled", True)))},
+                                                       with_emotion=self._prompt_emotion)},
                 ],
             },
         ]
