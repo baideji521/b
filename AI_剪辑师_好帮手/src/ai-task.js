@@ -317,7 +317,8 @@ function pageCountAttachment(name) {
     return hit;
   };
   const stem = name.replace(/\.[^.]+$/, "");
-  const needles = [name, stem, stem.slice(0, 12)];
+  // 卡片上的名字会被截断成「2026082619....」，所以前缀要短一点才认得出
+  const needles = [name, stem, stem.slice(0, 10), stem.slice(0, 8)];
   let matched = 0;
   let used = "";
   for (const needle of needles) {
@@ -327,9 +328,13 @@ function pageCountAttachment(name) {
       break;
     }
   }
+  // 兜底信号：卡片左上角那个类型角标（TXT），数它有几个
+  const ext = (name.match(/\.([^.]+)$/) || ["", ""])[1].toUpperCase();
+  const chips = ext ? count(ext) : 0;
   const failed = /上传失败|上传出错|failed to upload|unsupported file/i.test(text);
-  return { count: matched, used, failed };
+  return { count: matched, used, chips, failed };
 }
+
 
 
 
@@ -566,10 +571,13 @@ async function handleAiTask(task) {
     const names = (payloads.length ? payloads : fileList).map((f) => f.name);
 
     const baselines = {};
+    let chipsBase = 0;
     for (const name of names) {
       const seen = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
       baselines[name] = Number(seen?.count || 0);
+      chipsBase = Math.max(chipsBase, Number(seen?.chips || 0));
     }
+
 
     let autoDone = false;
     if (uploadMode === "auto") {
@@ -579,19 +587,27 @@ async function handleAiTask(task) {
         let left = wanted.slice();
         while (Date.now() < deadline) {
           const still = [];
+          let chipsNow = 0;
           for (const name of left) {
             const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
             if (check?.failed) throw new Error(`页面提示上传失败（${name}）`);
+            chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
             if (Number(check?.count || 0) > baselines[name]) log("已挂上", name, `匹配=${check?.used || ""}`);
             else still.push(name);
           }
           left = still;
           if (!left.length) return true;
+          // 名字被截断得认不出时，用类型角标数兜底：多出来的角标数够了就算挂上
+          if (chipsNow - chipsBase >= wanted.length) {
+            log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`);
+            return true;
+          }
           await sleep(300);
         }
         log("还没出卡片", left.join("、"));
         return false;
       };
+
 
       // 你实测两个文件一起往页面任何一处拖就行，所以先一次拖两个；
       // 不行再一个一个拖，最后才退到粘贴 / file 控件
@@ -665,14 +681,22 @@ async function handleAiTask(task) {
       const manualDeadline = Date.now() + MANUAL_TIMEOUT_MS;
       for (;;) {
         const missing = [];
+        let chipsNow = 0;
         for (const name of names) {
           const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+          chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
           if (Number(check?.count || 0) <= baselines[name]) missing.push(name);
         }
         if (!missing.length) {
           log("两个文件都挂上了");
           break;
         }
+        // 名字截断认不出时用类型角标兜底，别把已经传好的又叫你传一遍
+        if (chipsNow - chipsBase >= names.length) {
+          log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`);
+          break;
+        }
+
         if (Date.now() > manualDeadline) {
           return finish({ status: "failed",
                           error: `等手动选文件超时，还差：${missing.join("、")}` });
