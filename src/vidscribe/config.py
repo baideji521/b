@@ -84,6 +84,17 @@ DEFAULTS: dict[str, Any] = {
         "dedup_similarity": 0.72,
         # 画面情绪：视觉模型在同一次推理里顺便判人物情绪，只多两个输出字段，不额外加载模型
         "emotion_enabled": True,
+        # 人脸表情：在原始帧上单独跑 YuNet + HSEmotion，覆盖视觉模型给的情绪
+        # （视觉模型那边人脸只有 70~85 像素、一个窗口只看 8 帧，判表情不可靠）
+        "face_emotion": {
+            "enabled": True,
+            "sample_fps": 2.0,
+            "detect_size": 640,
+            "detect_score": 0.6,
+            "min_face_px": 60,
+            "max_faces": 2,
+            "min_score": 0.35,
+        },
     },
     "speech": {
         "model_size": "large-v3",

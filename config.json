@@ -76,7 +76,16 @@
     "min_event_seconds": 0.4,
     "merge_similarity": 0.82,
     "dedup_similarity": 0.72,
-    "emotion_enabled": true
+    "emotion_enabled": true,
+    "face_emotion": {
+      "enabled": true,
+      "sample_fps": 2.0,
+      "detect_size": 640,
+      "detect_score": 0.6,
+      "min_face_px": 60,
+      "max_faces": 2,
+      "min_score": 0.35
+    }
   },
   "speech": {
     "model_size": "large-v3",

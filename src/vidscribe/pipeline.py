@@ -28,6 +28,8 @@ from .timeline.exporters import write_json, write_srt, write_timeline_txt
 from .video_io import VideoInfo, detect_scene_cuts, plan_windows, probe_video
 from .visual import prompts
 from .visual.factory import backend_for, create_analyzer
+from .visual.face import FaceEmotion
+from .visual.face import annotate as annotate_faces
 from .visual.qwen_vl import VisualOOM, VisualParams
 
 logger = get_logger(__name__)
@@ -43,6 +45,8 @@ class Pipeline:
         self.asr = WhisperASR(cfg.speech, model_dir, cfg.mirrors)
         self.emotion = EmotionRecognizer(cfg.speech.get("emotion", {}), model_dir, cfg.mirrors)
         self.speaker = SpeakerTagger(cfg.speech.get("speaker", {}), model_dir, cfg.mirrors)
+        # 人脸表情：跟视觉模型无关的独立通道（YuNet + HSEmotion，CPU onnx）
+        self.face = FaceEmotion(cfg.visual.get("face_emotion", {}), model_dir)
         self.env = bench.environment_snapshot()
         logger.info("视觉后端：%s（%s）", self.analyzer.backend, self.analyzer.model_id)
 
@@ -201,6 +205,9 @@ class Pipeline:
                 "output_language": decision.output_language,
                 "emotion_enabled": want_visual_emotion,
             })
+        # 4.5) 人脸表情：在原始帧上单独判，覆盖视觉模型顺带给的情绪
+        self._annotate_face_emotion(info, visual_events, visual_meta, ckpt, timer,
+                                   decision.output_language, want_visual_emotion)
         # 复用缓存时情绪显示名可能还是上一次的语言：标签固定英文存着，按需重渲，不用重跑模型
         for ev in visual_events:
             if ev.emotion_en:
@@ -630,6 +637,49 @@ class Pipeline:
                             video=info.name)
         else:
             logger.info("本条没做说话人分离：%s", meta.get("reason"))
+
+    def _annotate_face_emotion(self, info: VideoInfo, events: list[VisualEvent],
+                               visual_meta: dict[str, Any], ckpt: Checkpoint,
+                               timer: bench.Timer, output_language: str,
+                               emotion_enabled: bool) -> None:
+        """人脸表情：在原始帧上扫全片，覆盖视觉模型顺带给的情绪。
+
+        判过就不重判（visual_meta 里有 face 元信息当标记），跟说话人那边一个套路。
+        判不出人脸的事件保留视觉模型的情绪，`emotion_source` 会写清楚是谁判的。
+        """
+        if not self.face.enabled or not events:
+            return
+        cached = visual_meta.get("face")
+        if isinstance(cached, dict) and cached.get("available"):
+            logger.info("复用已有画面表情结果：%s 个事件来自人脸模型",
+                        cached.get("events_from_face"))
+            return
+
+        fcfg = self.cfg.visual.get("face_emotion", {}) or {}
+        with timer.stage("face_seconds"):
+            try:
+                report_progress("visual", 0.9, "人脸表情识别", video=info.name)
+                samples = self.face.scan(
+                    info,
+                    on_progress=lambda p: report_progress(
+                        "visual", 0.9 + 0.08 * p, "人脸表情识别", video=info.name),
+                )
+                meta = annotate_faces(events, samples,
+                                      min_score=float(fcfg.get("min_score", 0.35)))
+            except Exception as exc:  # noqa: BLE001 - 表情是增强项，不能连累画面事件
+                logger.error("人脸表情识别失败：%s", exc)
+                logger.debug(traceback.format_exc())
+                meta = {"available": False, "reason": f"error: {exc}"[:300]}
+            finally:
+                self.face.unload()
+
+        visual_meta["face"] = meta
+        ckpt.save("visual", {
+            "events": [e.to_dict() for e in events],
+            "meta": visual_meta,
+            "output_language": output_language,
+            "emotion_enabled": emotion_enabled,
+        })
 
     def _annotate_emotion(self, info: VideoInfo, speech_payload: dict[str, Any],
                           ckpt: Checkpoint, timer: bench.Timer,

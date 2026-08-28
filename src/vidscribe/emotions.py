@@ -21,6 +21,7 @@ EMOTION_ZH: dict[str, str] = {
     "sad": "难过",
     "fearful": "害怕",
     "disgusted": "厌恶",
+    "contempt": "轻蔑",
     "calm": "平静",
     "neutral": "中立",
     "other": "其他",

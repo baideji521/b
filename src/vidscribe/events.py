@@ -31,6 +31,8 @@ class VisualEvent:
     emotion: str | None = None            # 中文显示名
     emotion_en: str | None = None         # 英文小写标签，取自 prompts.VISUAL_EMOTIONS
     emotion_intensity: float | None = None
+    # 情绪是谁判的：face=人脸专用模型（visual/face.py），model=视觉大模型顺带给的
+    emotion_source: str | None = None
     # --- 最终自然语言层的记录 ---
     description_language: str | None = None
     language_fallback: bool = False
