@@ -65,7 +65,7 @@
     "max_pixels_tokens": 112,
     "total_pixels_tokens": 2048,
     "max_new_tokens": 192,
-    "batch_size": 4,
+    "batch_size": 8,
     "window_seconds": 15.0,
     "window_overlap_seconds": 3.0,
     "long_video_threshold": 18.0,
