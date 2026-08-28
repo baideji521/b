@@ -86,6 +86,10 @@ def _entry(ev: VisualEvent | None, speech: list[SpeechEvent]) -> dict[str, Any]:
         "end": round(end, 3),
         "visual": ev.description if ev else None,
         "visual_event": ev.event if ev else None,
+        # 结构化事实（固定英文小写标签）：description 是自然语言，按动作/场景检索得靠这三个
+        "action": ev.action if ev else None,
+        "scene": ev.scene if ev else None,
+        "subjects": list(ev.subjects) if ev and ev.subjects else [],
         "speech": speech_text,
         "visual_event_id": ev.id if ev else None,
         "speech_event_ids": [s.id for s in speech],

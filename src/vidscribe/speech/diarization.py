@@ -105,6 +105,10 @@ class Diarizer:
         self.spec = EMBEDDINGS.get(model_id)
         self.threshold = float(self.cfg.get("threshold")
                                or (self.spec or {}).get("threshold", 1.1))
+        # sherpa-onnx 默认 num_threads=1，173.7s 素材要 47.5s；2/4/8/16 线程分别是
+        # 28.9 / 20.6 / 22.7 / 19.1s，结果一字不差（44 段 / 同样的人数）。4 之后基本吃满，
+        # 再加只是抢核，所以默认 4。
+        self.num_threads = max(1, int(self.cfg.get("num_threads", 4)))
         self.sd = None
         self.load_seconds = 0.0
 
@@ -126,8 +130,10 @@ class Diarizer:
             segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
                 pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
                     model=str(seg)),
+                num_threads=self.num_threads,
             ),
-            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(emb)),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+                model=str(emb), num_threads=self.num_threads),
             clustering=sherpa_onnx.FastClusteringConfig(num_clusters=-1,
                                                         threshold=self.threshold),
             min_duration_on=float(self.cfg.get("min_duration_on", 0.3)),
@@ -137,8 +143,8 @@ class Diarizer:
             raise RuntimeError("sherpa-onnx 分离配置不合法（模型文件对不上）")
         self.sd = sherpa_onnx.OfflineSpeakerDiarization(config)
         self.load_seconds = round(time.perf_counter() - started, 2)
-        logger.info("说话人分离模型就绪：%s（阈值 %.2f），耗时 %.1fs",
-                    self.spec["file"], self.threshold, self.load_seconds)
+        logger.info("说话人分离模型就绪：%s（阈值 %.2f，%d 线程），耗时 %.1fs",
+                    self.spec["file"], self.threshold, self.num_threads, self.load_seconds)
 
     def unload(self) -> None:
         self.sd = None

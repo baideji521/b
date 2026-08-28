@@ -126,6 +126,7 @@
       "device": "auto",
       "diarization": {
         "threshold": null,
+        "num_threads": 4,
         "min_speaker_seconds": 2.0,
         "min_speaker_share": 0.1,
         "min_duration_on": 0.3,

@@ -71,6 +71,11 @@ def write_timeline_txt(path: Path, video_name: str, duration: float, language: s
             head = f"{labels['visual']}{tag}"
             lines.append(f"{head}：" if lang == "zh" else f"{head}:")
             lines.append(entry["visual"])
+            facts = " / ".join(x for x in (entry.get("action"), entry.get("scene"),
+                                           ", ".join(entry.get("subjects") or [])) if x)
+            if facts:
+                sep = "：" if lang == "zh" else ": "
+                lines.append(f"{labels['facts']}{sep}{facts}")
         if entry.get("ocr_text"):
             sep = "：" if lang == "zh" else ": "
             lines.append(f"{labels['ocr']}{sep}{entry['ocr_text']}")

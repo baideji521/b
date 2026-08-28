@@ -221,10 +221,14 @@ _SUBJECT_ZH = {
 }
 
 _LABELS = {
-    "zh": {"visual": "画面", "speech": "语音", "ocr": "画面文字", "no_speech": "无语音"},
-    "en": {"visual": "Visual", "speech": "Speech", "ocr": "On-screen text", "no_speech": "no speech"},
-    "ja": {"visual": "映像", "speech": "音声", "ocr": "画面テキスト", "no_speech": "音声なし"},
-    "ko": {"visual": "화면", "speech": "음성", "ocr": "화면 텍스트", "no_speech": "음성 없음"},
+    "zh": {"visual": "画面", "speech": "语音", "ocr": "画面文字", "no_speech": "无语音",
+           "facts": "动作/场景/主体"},
+    "en": {"visual": "Visual", "speech": "Speech", "ocr": "On-screen text",
+           "no_speech": "no speech", "facts": "Action/Scene/Subjects"},
+    "ja": {"visual": "映像", "speech": "音声", "ocr": "画面テキスト", "no_speech": "音声なし",
+           "facts": "動作/場面/対象"},
+    "ko": {"visual": "화면", "speech": "음성", "ocr": "화면 텍스트", "no_speech": "음성 없음",
+           "facts": "동작/장면/대상"},
 }
 
 
