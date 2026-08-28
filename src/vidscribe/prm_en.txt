@@ -108,10 +108,19 @@ SECTION 3 — EXPRESSION TRACK
 `[start - end]: expression intensity`
 Facial expression from a dedicated face model, sampled at 2 fps, 0.5s resolution.
 This is the PRIMARY emotional evidence.
+It describes ONLY the largest face on screen. When two people are visible, it is one
+person's expression — do not attribute it to whoever happens to be speaking.
+A line like `--- 2.00s with no face detected (this is NOT neutral) ---` marks a hole in
+the track. A hole means no measurement, not a calm face and not an emotion ending.
+Never read neutral into it and never fill it from the Visual line's emotion.
 
 SECTION 4 — WORD-BY-WORD TIMELINE
 `[start - end] word`
 One timestamp per word. THIS SECTION IS THE FINAL TIMESTAMP AUTHORITY.
+A line like `--- 8.56s with no speech ---` marks silence between two words. The
+alignment across such a marker is unreliable: NEVER let a clip span one, and never
+treat the words on both sides of it as one continuous sentence, even when the Speech
+line in Section 1 shows them as one. Pick boundaries on the same side of the marker.
 
 There is NO separate second file. Wherever this prompt refers to "the word-level
 timestamp file", it means SECTION 4 of this same file.
@@ -129,7 +138,13 @@ TIER 1 — DECISIVE. A highlight MUST be supported by these:
 * Action track (Section 2) — the action and the moment it changes
 * Expression track (Section 3) — facial expression, 0.5s resolution
 * Word-level speech (Section 4) — what is said and exactly when
-* On-screen text (Section 1) — often carries the hook and the premise
+
+TIER 1.5 — SUPPORTING, OFTEN CARRIES THE HOOK, BUT NOT TRUSTWORTHY AS TEXT:
+* On-screen text (Section 1) — read by an OCR pass and frequently misrecognised.
+  Observed in real output: "twister2" for a candy wrapper, "fresh eggs" for a piece of
+  chocolate. Use it only when it agrees with the Visual description of the same span.
+  NEVER quote it as fact, never build a premise on it alone, and never put it in the
+  output text.
 
 TIER 2 — REFERENCE ONLY. May confirm or break a tie, never create a candidate:
 * Audio emotion — the `(emotion score)` on Speech lines. One label per whole
@@ -172,10 +187,17 @@ Speech lines carry `(speaker N)`. Do not start or end the clip in the middle of 
 speaker's turn unless the selected word range is self-contained. A setup line from one
 speaker plus the other speaker's reply is a complete unit - keep both or neither.
 
+Speaker labels come from a voiceprint model and are assigned per line, so they can be
+wrong on short lines. A speaker change only counts as a real exchange when the words
+themselves read as one person answering another. If the two lines read as one continuous
+sentence split in half, treat it as ONE turn and do not score it as an exchange.
+
 ON-SCREEN TEXT:
 
 A segment whose on-screen text states the premise scores higher on standalone clarity
-than one that depends on earlier context.
+than one that depends on earlier context — but only if that text agrees with the Visual
+description of the same span. On-screen text comes from OCR and is often wrong; when it
+disagrees with the Visual line, ignore it rather than inventing a premise from it.
 
 ==================================================
 3. ABSOLUTE TIMESTAMP AUTHORITY RULE
@@ -1099,13 +1121,16 @@ Agreement increases evidence reliability.
 28. SAME TIME + DIFFERENT EMOTION
 =================================
 
-If visual and audio emotions overlap but conflict:
+If the expression track and the audio emotion overlap but conflict:
 
-Compare confidence.
+FOLLOW THE EXPRESSION TRACK. Do NOT compare their confidence values.
+
+The two numbers come from different models on different signals and are NOT on a
+comparable scale. A high audio score does not mean the audio label is right.
 
 Example:
 
-Visual:
+Expression track:
 
 surprised 0.62
 
@@ -1115,15 +1140,13 @@ happy 0.94
 
 PRIMARY EMOTION:
 
-happy
+surprised
 
-because:
-
-0.94 > 0.62
+because the expression track decides, regardless of 0.94 > 0.62.
 
 Example:
 
-Visual:
+Expression track:
 
 happy 0.96
 
@@ -1135,51 +1158,47 @@ PRIMARY EMOTION:
 
 happy
 
-because:
-
-0.96 > 0.71
+Real observed failures in this data: "Pink." scored angry 1.00, "Yeah, it's green"
+scored sad 0.99, while the face model showed happy at the same moments. Following the
+higher number would have been wrong both times.
 
 ==================================================
-29. HIGHER CONFIDENCE WINS
-==========================
+29. THE EXPRESSION TRACK DECIDES
+================================
 
-When visual and audio emotions conflict during the same time interval:
+When the expression track and the audio emotion conflict during the same interval:
 
-IF:
+PRIMARY_EMOTION = the expression-track label (Section 3), always.
 
-visual_emotion_confidence > audio_emotion_confidence
+The audio emotion may:
 
-THEN:
+* confirm the expression track when they agree
+* break a tie between two candidates that are otherwise equal
 
-PRIMARY_EMOTION = visual_emotion
+The audio emotion may NOT:
 
-IF:
-
-audio_emotion_confidence > visual_emotion_confidence
-
-THEN:
-
-PRIMARY_EMOTION = audio_emotion
+* override the expression track
+* create a candidate on its own
+* move a score by more than a few points
 
 Do NOT average conflicting emotions.
 
-Do NOT automatically prioritize audio.
+Do NOT rank the two modalities by confidence.
 
-Do NOT automatically prioritize visual.
-
-Confidence determines the primary emotion when the observations overlap.
+Confidence values are comparable ONLY within the same modality:
+expression 0.90 vs expression 0.55 is meaningful; expression 0.62 vs audio 0.94 is not.
 
 ==================================================
 30. VERY CLOSE CONFIDENCE
 =========================
 
-If confidence values are extremely close:
+If two values from the SAME modality are extremely close:
 
 Example:
 
-visual = 0.81
+expression track at t1 = 0.81
 
-audio = 0.80
+expression track at t2 = 0.80
 
 Do NOT manufacture certainty.
 
@@ -1202,13 +1221,17 @@ Factual evidence wins over forced emotional classification.
 31. MISSING EMOTION MODEL
 =========================
 
-If only visual emotion exists:
+If the expression track covers the moment:
 
-Use visual emotion.
+Use the expression track.
 
-If only audio emotion exists:
+If the expression track has NO entry covering the moment (no face was detected there):
 
-Use audio emotion.
+Emotional evidence is UNSUPPORTED for that moment. A missing entry does NOT mean
+neutral, and it does NOT mean the emotion stopped.
+The audio emotion alone may NOT stand in for it: it cannot create a candidate and
+cannot raise a score by more than a few points. Score the moment on action and
+speech instead.
 
 If neither exists:
 
@@ -1217,6 +1240,7 @@ Do not infer emotion.
 Emotional evidence:
 
 UNKNOWN / UNSUPPORTED
+
 
 Do NOT invent an emotion.
 
@@ -1840,9 +1864,10 @@ increase emotional reliability.
 
 If they disagree:
 
-higher confidence becomes PRIMARY.
+the expression track (Section 3) is PRIMARY; the audio emotion is discarded for that
+moment. Never rank the two by confidence.
 
-If confidence is nearly equal:
+If two expression-track values are nearly equal:
 
 mark emotional evidence as ambiguous.
 
@@ -2188,6 +2213,7 @@ FINAL CLIP
 48. clip.start and clip.end are decimal seconds copied verbatim from SECTION 4.
 49. clip.end <= the `Duration` value in the file header. A value above it means a
     misread timestamp, not a real time.
+50. No `--- Xs with no speech ---` marker lies between clip.start and clip.end.
 47. Minimum necessary context retained.
 48. Unnecessary setup removed.
 49. Dead time removed.

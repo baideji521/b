@@ -31,6 +31,7 @@ from ..logging_setup import get_logger
 from ..video_io import VideoInfo
 from .diarization import Diarizer, assign_sentences, drop_tiny
 from .emotion import SAMPLE_RATE, _decode_mono16k
+from .sentences import split_on_turns
 
 
 logger = get_logger(__name__)
@@ -444,13 +445,20 @@ class SpeakerTagger:
         turns = drop_tiny(turns,
                           min_seconds=float(diar_cfg.get("min_speaker_seconds", 2.0)),
                           min_share=float(diar_cfg.get("min_speaker_share", 0.10)))
+        # 先按切换点把跨了两个人的句子切开，再归属：whisper 按停顿分句，一问一答之间
+        # 常常没停顿，整句只能挑一个标签，后半句就被标错人。
+        before = len(segments)
+        segments[:] = split_on_turns(
+            segments, [t for turn in turns for t in (turn[0], turn[1])])
+        turn_splits = len(segments) - before
         picks = assign_sentences(segments, turns)
         speakers = _write_speakers(segments, picks)
 
         elapsed = round(time.perf_counter() - started, 2)
-        logger.info("说话人分离完成：%d 人 / %d 句（分段 %d 段，聚类前 %d 人，阈值 %.2f），耗时 %.1fs",
+        logger.info("说话人分离完成：%d 人 / %d 句（分段 %d 段，聚类前 %d 人，阈值 %.2f，"
+                    "按切换点切开 %d 句），耗时 %.1fs",
                     speakers, len(segments), len(turns), raw_speakers,
-                    self.diarizer.threshold, elapsed)
+                    self.diarizer.threshold, turn_splits, elapsed)
         return {
             "available": True,
             "model": {"id": self.model_id, "device": "cpu",
@@ -459,6 +467,7 @@ class SpeakerTagger:
             "speakers": speakers,
             "sampling": "diarization",
             "turns": len(turns),
+            "turn_splits": turn_splits,
             "raw_speakers": raw_speakers,
             "threshold": self.diarizer.threshold,
             "load_seconds": self.diarizer.load_seconds,

@@ -339,6 +339,51 @@ def _shape(lines: list[dict[str, Any]]) -> list[tuple[float, float, str]]:
              str(s.get("text") or "").strip()) for s in lines]
 
 
+def split_on_turns(segments: list[dict[str, Any]], bounds: list[float],
+                   min_seconds: float = 0.30) -> list[dict[str, Any]]:
+    """在说话人切换点上把跨了两个人的句子切开。返回新列表。
+
+    whisper 是按停顿分句的，一问一答之间常常没有停顿，于是
+    "If this is green,（另一个人）then you have to make me an advent calendar."
+    落在同一句里。声纹只能给整句挑一个标签，后半句就被标成前一个人——下游按
+    "说话人切换"找高光时，看到的切换点是错的。
+
+    切点取词的间隙：边界落在哪两个词之间，就在那儿断开。没有词级时间戳的句子原样带过
+    （按字数摊时间只会造出更假的边界）。太靠句首/句尾（`min_seconds` 以内）的边界忽略，
+    那种基本是分段模型的边界抖动。
+    """
+    if not bounds or not segments:
+        return list(segments)
+    marks = sorted({round(float(b), 3) for b in bounds})
+    out: list[dict[str, Any]] = []
+    for seg in segments:
+        words = [w for w in (seg.get("words") or [])
+                 if w.get("start") is not None and w.get("end") is not None]
+        start, end = float(seg.get("start") or 0.0), float(seg.get("end") or 0.0)
+        inner = [m for m in marks if start + min_seconds < m < end - min_seconds]
+        if len(words) < 2 or not inner:
+            out.append(seg)
+            continue
+        groups: list[list[dict[str, Any]]] = [[words[0]]]
+        for word in words[1:]:
+            edge = float(word["start"])
+            prev_end = float(groups[-1][-1]["end"])
+            if any(prev_end <= m <= edge for m in inner):
+                groups.append([word])
+            else:
+                groups[-1].append(word)
+        if len(groups) <= 1:
+            out.append(seg)
+            continue
+        out.extend(_child(seg, "".join(str(w.get("word") or "") for w in group).strip(),
+                          float(group[0]["start"]), float(group[-1]["end"]), group)
+                   for group in groups)
+    for index, line in enumerate(out, start=1):
+        if line.get("id") is not None:
+            line["id"] = index
+    return out
+
+
 def split_sentences(segments: list[dict[str, Any]], min_pause: float = 0.30,
                     break_punct: bool = False,
                     break_clauses: bool = True) -> list[dict[str, Any]]:

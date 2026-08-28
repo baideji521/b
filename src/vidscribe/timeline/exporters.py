@@ -159,6 +159,10 @@ def write_srt(path: Path, speech_segments: list[dict[str, Any]],
 MIN_SRT_SECONDS = 0.3
 # 合并导出里语音情绪的最低置信度：低于这个分就不打标签（详见 write_merged_txt）
 MIN_SPEECH_EMOTION_SCORE = 0.30
+# 逐词时间轴里超过这个秒数的静音会显式标一行，免得下游跨过洞取片段边界
+MIN_WORD_GAP_SECONDS = 1.5
+# 表情轨里超过这个秒数的空档会显式标一行（没检到人脸，不是 neutral）
+MIN_FACE_GAP_SECONDS = 1.0
 
 # 导出文本里的固定用词：整份文件跟着内容语言走，不能中文表头配英文正文
 _TXT_WORDS: dict[str, dict[str, str]] = {
@@ -182,8 +186,11 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "legend_speech": "行格式：[起 - 止] 语音（说话人 N）（音频情绪 置信度，仅参考；"
                             "置信度低于 0.30 的直接不打）：内容",
            "legend_action": "行格式：[起 - 止]：动作 @ 场景",
-           "legend_expression": "行格式：[起 - 止]：表情 强度(0-1) —— 情绪判定以本段为准",
+           "legend_expression": "行格式：[起 - 止]：表情 强度(0-1) —— 情绪判定以本段为准；"
+                                "只代表画面里最大的那张脸",
+           "face_gap": "--- 中间 {gap:.2f}s 没检到人脸（不等于 neutral）---",
            "legend_words": "行格式：[起 - 止] 词 —— clip.start / clip.end 一律取自本段",
+           "word_gap": "--- 中间 {gap:.2f}s 没有说话 ---",
            "translated_file": "译文"},
     "en": {"video": "Video", "speech_count": "Speech segments", "event_count": "Visual events",
            "duration": "Duration",
@@ -211,8 +218,10 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
                             "reference only; omitted when the score is below 0.30): text",
            "legend_action": "Row: [start - end]: action @ scene",
            "legend_expression": "Row: [start - end]: expression intensity(0-1) - decisive "
-                                "emotional evidence",
+                                "emotional evidence; largest face on screen only",
+           "face_gap": "--- {gap:.2f}s with no face detected (this is NOT neutral) ---",
            "legend_words": "Row: [start - end] word - clip.start / clip.end must come from here",
+           "word_gap": "--- {gap:.2f}s with no speech ---",
            "translated_file": "translated"},
 
 }
@@ -506,10 +515,16 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
     if emotions:
         lines += ["", "=" * 60, f"SECTION 3 - {w['expression_section']}",
                   w["legend_expression"], "=" * 60, ""]
+        prev_face_end: float | None = None
         for span in emotions:
+            # 表情轨的空档是"没检到人脸"，不是情绪变 neutral。不标出来，
+            # 下游只能靠相邻两段的时间差自己猜，通常猜成中性。
+            if prev_face_end is not None and float(span["start"]) - prev_face_end > MIN_FACE_GAP_SECONDS:
+                lines.append(w["face_gap"].format(gap=float(span["start"]) - prev_face_end))
             name = display_name(span.get("emotion_en"), None, language) or span.get("emotion_en")
             lines.append(f"[{fmt_secs(span['start'])} - {fmt_secs(span['end'])}]"
                          f"{w['sep']}{name} {span.get('intensity', 0):.2f}")
+            prev_face_end = float(span["end"])
 
     # 末尾附一段逐词时间轴：一个词一个时间戳。说明文字跟着内容语言走（英文内容出英文表头），
     # 逐词只出原文——逐词翻译是词表不是句子。
@@ -518,8 +533,15 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
         lines += ["", "=" * 60, f"SECTION 4 - {w['words_section']}",
                   f"{w['word_count']}{w['sep']}{len(items)}",
                   w["legend_words"], "=" * 60, ""]
+        prev_end: float | None = None
         for start, end, body in items:
+            # 词与词之间的静音显式标出来：ASR 的对齐会在一句话中间留洞
+            # （实测 "If" 105.50 -> "this" 114.06，中间 8.5s），
+            # 下游按"第一个词的 start 到最后一个词的 end"取边界就会把静音包进片段。
+            if prev_end is not None and start - prev_end > MIN_WORD_GAP_SECONDS:
+                lines.append(w["word_gap"].format(gap=start - prev_end))
             lines.append(f"[{fmt_secs(start)} - {fmt_secs(end)}] {body}")
+            prev_end = end
     _write_lines(path, lines)
     return len(rows)
 
