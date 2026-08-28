@@ -190,6 +190,17 @@
       }
     }
   },
+  "bridge": {
+    "enabled": true,
+    "port": 5998,
+    "port_fallbacks": 9,
+    "task_type": "gemini_json",
+    "ai_url": "https://gemini.google.com/app",
+    "prompt_file": "prm/prm_en.txt",
+    "keep_merged_file": false,
+    "message": "Follow the rules in prm_en.txt and analyze the attached *_merged.txt. Reply with the JSON object only.",
+    "auto_clip": true
+  },
   "runtime": {
     "max_auto_retries": 3,
     "keep_models_loaded": true,

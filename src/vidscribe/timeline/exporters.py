@@ -431,16 +431,16 @@ def write_events_txt(path: Path, video_name: str, events: list[dict[str, Any]],
     return count
 
 
-def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]],
-                     events: list[dict[str, Any]], translated: bool = False,
-                     language: str = "zh",
-                     actions: list[dict[str, Any]] | None = None,
-                     emotions: list[dict[str, Any]] | None = None,
-                     duration: float = 0.0) -> int:
-    """合并导出：按时间把画面事件和语音段穿插在一条时间线上。
+def merged_lines(video_name: str, segments: list[dict[str, Any]],
+                 events: list[dict[str, Any]], translated: bool = False,
+                 language: str = "zh",
+                 actions: list[dict[str, Any]] | None = None,
+                 emotions: list[dict[str, Any]] | None = None,
+                 duration: float = 0.0) -> tuple[list[str], int]:
+    """拼出合并导出的正文，返回 (行列表, 时间线条数)。
 
-    每行带各自来源的情绪：画面行跟画面情绪，语音行跟语音情绪，两者不混。
-    末尾依次附动作轨、表情轨、逐词时间轴，供高光筛选时按时间对齐三路证据。
+    写文件走 write_merged_txt；直接要文本的（比如把这份喂给 AI）用这个函数，
+    免得为了拿字符串先落一个临时文件。
     """
     from ..emotions import display_name  # noqa: PLC0415
     from ..language import labels_for  # noqa: PLC0415
@@ -542,8 +542,24 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
                 lines.append(w["word_gap"].format(gap=start - prev_end))
             lines.append(f"[{fmt_secs(start)} - {fmt_secs(end)}] {body}")
             prev_end = end
+    return lines, len(rows)
+
+
+def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]],
+                     events: list[dict[str, Any]], translated: bool = False,
+                     language: str = "zh",
+                     actions: list[dict[str, Any]] | None = None,
+                     emotions: list[dict[str, Any]] | None = None,
+                     duration: float = 0.0) -> int:
+    """合并导出：按时间把画面事件和语音段穿插在一条时间线上。
+
+    每行带各自来源的情绪：画面行跟画面情绪，语音行跟语音情绪，两者不混。
+    末尾依次附动作轨、表情轨、逐词时间轴，供高光筛选时按时间对齐三路证据。
+    """
+    lines, count = merged_lines(video_name, segments, events, translated, language,
+                               actions, emotions, duration)
     _write_lines(path, lines)
-    return len(rows)
+    return count
 
 
 

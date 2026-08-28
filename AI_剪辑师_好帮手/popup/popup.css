@@ -1,0 +1,76 @@
+:root {
+  color-scheme: dark;
+  --bg: #16181d;
+  --fg: #e8eaed;
+  --dim: #9aa0a6;
+  --ok: #6dd58c;
+  --bad: #f28b82;
+  --line: #2b2f36;
+}
+
+body {
+  margin: 0;
+  padding: 14px 16px 16px;
+  width: 280px;
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 "Microsoft YaHei", system-ui, sans-serif;
+}
+
+h1 {
+  margin: 0;
+  font-size: 15px;
+}
+
+.sub {
+  margin: 2px 0 12px;
+  color: var(--dim);
+  font-size: 12px;
+}
+
+dl {
+  margin: 0 0 12px;
+  display: grid;
+  grid-template-columns: 68px 1fr;
+  gap: 6px 8px;
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+
+dt {
+  color: var(--dim);
+}
+
+dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+dd.ok {
+  color: var(--ok);
+}
+
+dd.bad {
+  color: var(--bad);
+}
+
+button {
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #22262d;
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+button:hover {
+  background: #2b3038;
+}
+
+.hint {
+  margin: 8px 0 0;
+  color: var(--dim);
+  font-size: 12px;
+}

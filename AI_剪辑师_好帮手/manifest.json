@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "AI_剪辑师_好帮手",
+  "version": "1.0.0",
+  "description": "给 AI_剪辑师 打工：把它给的 txt 上传到 Gemini，把 AI 回的 JSON 送回去。",
+  "minimum_chrome_version": "116",
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "AI_剪辑师_好帮手",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/active-16.png",
+      "24": "icons/active-24.png",
+      "32": "icons/active-32.png",
+      "48": "icons/active-48.png",
+      "128": "icons/active-128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/active-16.png",
+    "24": "icons/active-24.png",
+    "32": "icons/active-32.png",
+    "48": "icons/active-48.png",
+    "128": "icons/active-128.png"
+  },
+  "permissions": ["storage", "alarms", "tabs", "scripting"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://gemini.google.com/*"
+  ]
+}

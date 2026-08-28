@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AI_剪辑师_好帮手</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <h1>AI_剪辑师_好帮手</h1>
+    <p class="sub">给 AI_剪辑师 打工：上传 txt 到 Gemini，把 JSON 送回去</p>
+
+    <dl>
+      <dt>AI_剪辑师</dt>
+      <dd id="endpoint">读取中…</dd>
+      <dt>配对</dt>
+      <dd id="paired">读取中…</dd>
+      <dt>状态</dt>
+      <dd id="state">读取中…</dd>
+    </dl>
+
+    <button id="pair" type="button">重新配对</button>
+    <p class="hint">
+      先在 AI_剪辑师 里点「配对扩展」开配对窗口，再点这里。
+    </p>
+
+    <script src="popup.js" type="module"></script>
+  </body>
+</html>

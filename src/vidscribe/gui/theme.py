@@ -24,7 +24,7 @@ from PyQt5.QtGui import (
     QPixmap,
 )
 
-APP_TITLE = "VidScribe · 视频事件与语音时间轴"
+APP_TITLE = "AI_剪辑师"
 
 # --- 调色板 ---------------------------------------------------------------
 BG = "#26292d"          # 窗口底

@@ -16,7 +16,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, QObject, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
@@ -297,7 +297,7 @@ class HighlightWorker(QThread):
 
     def __init__(self, cfg, payload_text: str, fallback: Path | None,
                  export_dir: Path | None, offsets: tuple[float, float, float] = (0.0, 0.0, 0.0),
-                 sfx: tuple[str, float] = ("", -6.0)):
+                 sfx: tuple[str, float] = ("", -6.0), video_only: bool = False):
         super().__init__()
         self.cfg = cfg
         self.payload_text = payload_text
@@ -305,7 +305,10 @@ class HighlightWorker(QThread):
         self.export_dir = export_dir
         self.offsets = offsets
         self.sfx = sfx
+        # AI 自动剪辑走这条：只落 <视频名>_高光时刻.mp4，不写同名 .json
+        self.video_only = video_only
         self.output: Path | None = None
+
 
     def _sfx_plan(self, video: Path, freeze_time: float):
         """按冻帧点的表情挑一条音效。表情来自该视频的 timeline.json，读不到就走兜底类别。"""
@@ -359,12 +362,14 @@ class HighlightWorker(QThread):
             result = render_highlight(video, spec, target, on_log=self.log.emit,
                                       on_progress=self.progress.emit,
                                       sfx=self._sfx_plan(video, spec.freeze_time))
-            write_json(target.with_suffix(".json"),
-                       {"spec": spec.raw,
-                        "offsets": {"start": start_delta, "end": end_delta,
-                                    "text": text_delta},
+            if not self.video_only:
+                write_json(target.with_suffix(".json"),
+                           {"spec": spec.raw,
+                            "offsets": {"start": start_delta, "end": end_delta,
+                                        "text": text_delta},
 
-                        "result": result})
+                            "result": result})
+
         except Exception as exc:
             self.log.emit(f"[错误] {type(exc).__name__}: {exc}")
             self.done.emit(False, f"{type(exc).__name__}: {exc}")
@@ -394,6 +399,12 @@ class AudioWorker(QThread):
         self.done.emit(str(path) if path else "", "" if path else "这个视频没有可用音轨")
 
 
+class BridgeEvents(QObject):
+    """把 Bridge 的 HTTP 线程事件搬到 GUI 线程：跨线程 emit 走队列连接是安全的。"""
+
+    event = pyqtSignal(str, object)
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config, video: Path | None = None):
         super().__init__()
@@ -406,6 +417,12 @@ class MainWindow(QMainWindow):
         self.worker: AnalyzeWorker | None = None
         self.audio_worker: AudioWorker | None = None
         self.clip_worker: HighlightWorker | None = None
+        # 浏览器扩展对接（Bridge）：GUI 起服务，扩展轮询领任务去驱动网页版 AI
+        self.bridge = None
+        self._bridge_events: BridgeEvents | None = None
+        self._bridge_token = ""
+        # 发给扩展的临时文件（合并导出），任务结束就删
+        self._bridge_temp_files: list[Path] = []
         self._last_highlight_json = ""
         # 剪辑高光的三个加减秒数（起始 / 结束 / 文本），从设置里带回来
 
@@ -437,6 +454,8 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self.apply_settings()
         self.check_cache()
+        self.start_bridge()   # apply_settings 之后才有令牌，起服务要排在它后面
+
 
 
         if video:
@@ -504,6 +523,10 @@ class MainWindow(QMainWindow):
         if (isinstance(saved_sfx, list) and len(saved_sfx) == 2
                 and isinstance(saved_sfx[0], str) and isinstance(saved_sfx[1], (int, float))):
             self._highlight_sfx = (saved_sfx[0], round(float(saved_sfx[1]), 1))
+        token = s.get("bridge_token")
+        # 配对令牌存在设置里，重启后扩展不用重新配对
+        if isinstance(token, str) and token.strip():
+            self._bridge_token = token.strip()
         geo = s.get("window")
         if isinstance(geo, list) and len(geo) == 4 and all(isinstance(v, int) for v in geo):
             self.setGeometry(*geo)
@@ -538,6 +561,7 @@ class MainWindow(QMainWindow):
             "timeline_row_height": self.table.verticalHeader().defaultSectionSize(),
             "highlight_offsets": list(self._highlight_offsets),
             "highlight_sfx": list(self._highlight_sfx),
+            "bridge_token": self._bridge_token,
         })
         for splitter, key in self._splitters():
             self.settings[key] = splitter.sizes()
@@ -751,6 +775,27 @@ class MainWindow(QMainWindow):
         for w in (self.btn_export_speech, self.btn_export_events, self.btn_export_merged,
                   self.btn_highlight, self.btn_export_dir):
             export_row.addWidget(w)
+
+        # --- AI 对接（浏览器扩展 Bridge）---
+        # 合并导出 + 提示词交给扩展，扩展在浏览器里问网页版 AI，回传的 JSON 直接进剪辑高光
+        self.lbl_bridge = QLabel("未启动")
+        self.lbl_bridge.setToolTip("本机 Bridge 服务状态。扩展轮询它领任务")
+        self.btn_bridge_pair = QPushButton("配对扩展")
+        self.btn_bridge_pair.setToolTip("打开 120 秒配对窗口，扩展会自动把令牌领走；"
+                                       "扩展选项页里的地址要填这里显示的端口")
+        self.btn_bridge_pair.clicked.connect(self.on_bridge_pair)
+        self.btn_bridge_send = QPushButton("发给 AI")
+        self.btn_bridge_send.setToolTip("把合并导出的文本 + 高光筛选提示词发给扩展，"
+                                        "扩展去问网页版 AI，回来的 JSON 自动填进剪辑高光")
+        self.btn_bridge_send.clicked.connect(self.on_bridge_send)
+        self.btn_bridge_stop = QPushButton("停止 AI")
+        self.btn_bridge_stop.setToolTip("取消正在跑的 AI 任务")
+        self.btn_bridge_stop.clicked.connect(self.on_bridge_stop)
+        export_row.addWidget(self._section("AI 对接"))
+        for w in (self.lbl_bridge, self.btn_bridge_pair, self.btn_bridge_send,
+                  self.btn_bridge_stop):
+            export_row.addWidget(w)
+
 
 
         # --- 左侧播放器（OpenCV 逐帧渲染画面，音轨走 QMediaPlayer）---
@@ -1345,14 +1390,24 @@ class MainWindow(QMainWindow):
         self.schedule_save()  # 加减秒数存进 gui_settings.json，下次打开自动带回来
         if not text.strip():
             return
+        self.run_highlight(text)
+
+    def run_highlight(self, text: str, ai: bool = False) -> None:
+        """按 JSON 直接起渲染。手动走对话框和 AI 自动回填都汇到这里。
+
+        AI 自动那条只出一个成品：<视频名>_高光时刻.mp4，落在运行目录。
+        """
         self._last_highlight_json = text
         self.btn_highlight.setEnabled(False)
         self.set_progress(0.0)
         self.lbl_stage.setText("剪辑高光｜准备中")
 
         self.statusBar().showMessage("正在渲染高光片段…")
-        self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, self.export_dir,
-                                           self._highlight_offsets, self._highlight_sfx)
+        directory = self.cfg.root if ai else self.export_dir
+        self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, directory,
+                                           self._highlight_offsets, self._highlight_sfx,
+                                           video_only=ai)
+
         self.clip_worker.log.connect(self.append_log)
         self.clip_worker.progress.connect(self.on_highlight_progress)
         self.clip_worker.done.connect(self.on_highlight_done)
@@ -1402,6 +1457,202 @@ class MainWindow(QMainWindow):
         """音效类别 / 音量一改就存盘，和加减秒数一样点取消也留着。"""
         self._highlight_sfx = (category, round(float(gain_db), 1))
         self.schedule_save()
+
+    # ------------------------------------------------------- AI 对接（Bridge）
+    def start_bridge(self) -> None:
+        """起本机 Bridge 服务，供浏览器扩展轮询领任务。端口被占就往后顺延。"""
+        cfg = self.cfg.bridge
+        if not cfg.get("enabled", True) or self.bridge is not None:
+            return
+        from ..bridge import BridgeServer  # noqa: PLC0415 - 只有 GUI 用得上
+
+        self._bridge_events = BridgeEvents()
+        self._bridge_events.event.connect(self.on_bridge_event)
+        emit = self._bridge_events.event.emit
+        server = BridgeServer(port=int(cfg.get("port") or 5998),
+                              fallbacks=int(cfg.get("port_fallbacks") or 0),
+                              token=self._bridge_token,
+                              on_event=lambda kind, data: emit(kind, data))
+        try:
+            server.start()
+        except OSError as exc:
+            self.append_log(f"[AI 对接] Bridge 起不来：{exc}")
+            self.lbl_bridge.setText("端口被占")
+            return
+        self.bridge = server
+        if self._bridge_token != server.token:
+            self._bridge_token = server.token
+            self.schedule_save()
+        self.append_log(f"[AI 对接] Bridge 监听 {server.url}"
+                        f"（扩展选项页填这个地址，然后点「配对扩展」）")
+        self._bridge_timer = QTimer(self)
+        self._bridge_timer.setInterval(2000)
+        self._bridge_timer.timeout.connect(self.refresh_bridge_label)
+        self._bridge_timer.start()
+        self.refresh_bridge_label()
+
+    def stop_bridge(self) -> None:
+        if self.bridge is None:
+            return
+        self.bridge.stop()
+        self.bridge = None
+
+    def refresh_bridge_label(self) -> None:
+        if self.bridge is None:
+            self.lbl_bridge.setText("未启动")
+            return
+        state = self.bridge.state()
+        port = state["url"].rsplit(":", 1)[-1]
+        task = state["task"]
+        if task:
+            text = f":{port} 任务中 {task['stage'] or task['status']}"
+        elif state["pair_window_left"] > 0:
+            text = f":{port} 配对窗口 {state['pair_window_left']:.0f}s"
+        elif state["extension_online"]:
+            text = f":{port} 扩展在线"
+        elif state["paired_at"]:
+            text = f":{port} 扩展离线"
+        else:
+            text = f":{port} 等待配对"
+        self.lbl_bridge.setText(text)
+        self.lbl_bridge.setToolTip(f"Bridge {state['url']}\n"
+                                   f"扩展选项页的地址填这个，令牌点「配对扩展」自动领取")
+
+    def on_bridge_pair(self) -> None:
+        """开一个 120 秒配对窗口：扩展轮询到就自动把令牌领走，不用手抄。"""
+        if self.bridge is None:
+            self.start_bridge()
+        if self.bridge is None:
+            QMessageBox.warning(self, "AI 对接", "Bridge 没有启动，端口可能被占用")
+            return
+        self.bridge.open_pair_window()
+        self.append_log(f"[AI 对接] 配对窗口已开（120 秒）。扩展地址：{self.bridge.url}")
+        self.refresh_bridge_label()
+
+    def on_bridge_send(self) -> None:
+        """把 prm/prm_en.txt 和 <视频名>_merged.txt 交给扩展，让它上传到网页版 AI。
+
+        合并导出临时落在项目根目录（扩展要按文件上传，不是粘贴正文），任务结束就删。
+        """
+        if self.bridge is None:
+            QMessageBox.warning(self, "AI 对接", "Bridge 没有启动")
+            return
+        if self.video_path is None:
+            QMessageBox.information(self, "提示", "请先打开一个视频")
+            return
+        if not self.speech and not self.timeline:
+            QMessageBox.information(self, "提示", "还没有分析结果，先跑一次分析")
+            return
+        cfg = self.cfg.bridge
+        prompt_path = self.resolve_prompt_file()
+        if prompt_path is None:
+            QMessageBox.warning(self, "AI 对接",
+                                "找不到高光筛选提示词。放一份 prm_en.txt 到 prm/ 或项目根目录")
+            return
+
+        # 合并导出写到运行目录，文件名跟「合并导出」按钮一致
+        merged_path = self.cfg.root / f"{self.video_path.stem}_merged.txt"
+        count = write_merged_txt(
+            merged_path, self.video_path.name, self.speech, self._events_for_export(),
+            self.show_translated, self.export_language(),
+            actions=self.timeline_doc.get("action_track"),
+            emotions=self.timeline_doc.get("expression_track"),
+            duration=float(self.timeline_doc.get("duration") or 0.0))
+        self._bridge_temp_files = [merged_path]
+
+        task_id = self.bridge.submit(
+            str(cfg.get("task_type") or "gemini_json"),
+            {"url": str(cfg.get("ai_url") or "https://gemini.google.com/app"),
+             "video": self.video_path.name,
+             "message": str(cfg.get("message") or ""),
+             "expect": "json"},
+            files=[prompt_path, merged_path])
+        state = self.bridge.state()
+        self.append_log(f"[AI 对接] 已入队 {task_id}：上传 {prompt_path.name} + "
+                        f"{merged_path.name}（时间线 {count} 条）"
+                        + ("，等扩展领取" if state["extension_online"]
+                           else "；扩展当前离线，先确认扩展已装好并配对"))
+        self.refresh_bridge_label()
+
+    def resolve_prompt_file(self) -> Path | None:
+        """找高光筛选提示词。按 config 里的路径、prm/、项目根、包内副本依次找。
+
+        这份文件被挪过好几次位置，找不到就返回 None，由调用方提示，别让任务默默少一个附件。
+        """
+        candidates = []
+        configured = str(self.cfg.bridge.get("prompt_file") or "").strip()
+        if configured:
+            path = Path(configured)
+            candidates.append(path if path.is_absolute() else self.cfg.root / path)
+        candidates += [self.cfg.root / "prm" / "prm_en.txt",
+                       self.cfg.root / "prm_en.txt",
+                       Path(__file__).resolve().parents[1] / "prm_en.txt"]
+        for path in candidates:
+            if path.is_file():
+                return path
+        return None
+
+    def on_bridge_stop(self) -> None:
+        if self.bridge is None:
+            return
+        self.bridge.cancel()
+        self.clean_bridge_temp()
+        self.append_log("[AI 对接] 已请求取消当前任务")
+        self.refresh_bridge_label()
+
+    def clean_bridge_temp(self) -> None:
+        """删掉临时的合并导出。配置里 keep_merged_file=true 就留着。"""
+        if self.cfg.bridge.get("keep_merged_file"):
+            self._bridge_temp_files = []
+            return
+        for path in getattr(self, "_bridge_temp_files", []):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                self.append_log(f"[AI 对接] 临时文件删不掉：{path.name} {exc}")
+        self._bridge_temp_files = []
+
+
+    def on_bridge_event(self, kind: str, data: object) -> None:
+        """Bridge 的 HTTP 线程事件（已经过 BridgeEvents 搬到 GUI 线程）。"""
+        info = data if isinstance(data, dict) else {}
+        if kind == "paired":
+            self.append_log("[AI 对接] 扩展已配对，令牌已领取")
+        elif kind == "claimed":
+            self.append_log(f"[AI 对接] 扩展领走任务 {info.get('task_id', '')}")
+        elif kind == "progress":
+            self.append_log(f"[AI 对接] {info.get('stage', '')} {info.get('message', '')}".rstrip())
+        elif kind == "result":
+            self.on_bridge_result(info)
+        self.refresh_bridge_label()
+
+    def on_bridge_result(self, info: dict) -> None:
+        """AI 回来了：解析出 JSON 就直接按它剪，解析不出只记日志不猜。"""
+        self.clean_bridge_temp()
+        parsed = info.get("json")
+        if not isinstance(parsed, dict):
+            reason = info.get("error") or "回答里没有可解析的 JSON"
+            self.append_log(f"[AI 对接] 任务失败：{reason}")
+            text = str(info.get("text") or "")
+            if text:
+                self.append_log(f"[AI 对接] AI 原文前 200 字：{text[:200]}")
+            QMessageBox.warning(self, "AI 对接", f"没拿到可用 JSON：{reason}")
+            return
+        self._last_highlight_json = json.dumps(parsed, ensure_ascii=False, indent=2)
+        clip = parsed.get("clip") if isinstance(parsed.get("clip"), dict) else parsed
+        self.append_log(f"[AI 对接] 收到 JSON：clip.start={clip.get('start')} "
+                        f"clip.end={clip.get('end')}")
+        idle = ((self.clip_worker is None or not self.clip_worker.isRunning())
+                and (self.worker is None or not self.worker.isRunning()))
+        if self.cfg.bridge.get("auto_clip", True) and idle:
+            self.append_log("[AI 对接] 直接按这份 JSON 开始剪辑（bridge.auto_clip）")
+            self.run_highlight(self._last_highlight_json, ai=True)
+
+            return
+        self.statusBar().showMessage("AI 结果已收到，剪辑高光对话框已带上 JSON", 10000)
+        if idle:
+            self.on_highlight()
+
 
     def on_highlight_done(self, ok: bool, message: str) -> None:
         self.btn_highlight.setEnabled(True)
@@ -1693,6 +1944,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.save_settings()  # 退出时把界面参数存下来，下次启动自动加载
+        self.stop_bridge()
         if self.worker is not None and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(3000)

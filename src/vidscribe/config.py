@@ -161,6 +161,26 @@ DEFAULTS: dict[str, Any] = {
             },
         },
     },
+    "bridge": {
+        # 浏览器扩展对接（见 vidscribe/bridge/server.py）：GUI 起一个只监听
+        # 127.0.0.1 的小 HTTP 服务，扩展轮询领任务、驱动网页版 AI、回传 JSON
+        "enabled": True,
+        "port": 5998,
+        # 端口被占时往后顺延几个（扩展那边也按这个范围探测）
+        "port_fallbacks": 9,
+        # 任务类型标识，扩展按它筛任务
+        "task_type": "gemini_json",
+        "ai_url": "https://gemini.google.com/app",
+        # 高光筛选提示词：相对项目根目录。这份和合并导出都是当附件上传给网页版 AI
+        "prompt_file": "prm/prm_en.txt",
+        # 合并导出临时落在项目根目录，任务结束就删（想留档改成 true）
+        "keep_merged_file": False,
+        # 两个 txt 上传后跟着发的那句话。规则都在 prm_en.txt 里，这里只说清干什么
+        "message": ("Follow the rules in prm_en.txt and analyze the attached "
+                    "*_merged.txt. Reply with the JSON object only."),
+        # AI 回了可用 JSON 就直接按它剪，不再等我点一次「剪辑高光」
+        "auto_clip": True,
+    },
     "runtime": {
         "max_auto_retries": 3,
         "keep_models_loaded": True,
@@ -264,6 +284,10 @@ class Config:
     @property
     def highlight(self) -> dict[str, Any]:
         return self.data["highlight"]
+
+    @property
+    def bridge(self) -> dict[str, Any]:
+        return self.data["bridge"]
 
     @property
     def mirrors(self) -> dict[str, Any]:
