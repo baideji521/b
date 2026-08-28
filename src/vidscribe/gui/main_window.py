@@ -1567,6 +1567,10 @@ class MainWindow(QMainWindow):
              "message": str(cfg.get("message") or ""),
              "upload_mode": str(cfg.get("upload_mode") or "manual"),
              "focus_browser": bool(cfg.get("focus_browser", False)),
+             # 后台标签页会被浏览器冻结（不排版、不跑定时器），所以默认把 Gemini
+             # 挪进一个不抢焦点的小窗口，页面照常渲染又挡不着你干活
+             "side_window": bool(cfg.get("side_window", True)),
+
 
              "expect": "json"},
             files=[prompt_path, merged_path])

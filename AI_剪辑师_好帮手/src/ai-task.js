@@ -457,14 +457,36 @@ async function runInTab(tabId, fn, args = []) {
 }
 
 /**
- * 先看 gemini.google.com 是不是已经开着：开着就直接用那个窗口，绝不动它的 URL，
+ * 把 Gemini 挪到一个自己的小窗口里，不抢焦点。
+ *
+ * 关键在于「后台标签页」和「不在最前面的窗口」是两码事：藏在别的标签页后面的标签页
+ * 会被 Chrome 冻结——不排版、不跑定时器，拖放和读回答全废；而独立窗口里的活动标签页
+ * 照常渲染，只是没有键盘焦点（所以发送要点按钮，不能靠回车）。
+ * 窗口开得小、贴右下角，挡不着你干活。
+ */
+async function moveToSideWindow(tabId) {
+  const anchor = await chrome.windows.getLastFocused({}).catch(() => null);
+  const bounds = { width: 560, height: 620 };
+  if (anchor && typeof anchor.left === "number" && typeof anchor.width === "number") {
+    bounds.left = Math.max(0, anchor.left + anchor.width - bounds.width - 24);
+    bounds.top = Math.max(0, (anchor.top || 0) + Math.max(0, (anchor.height || 900) - bounds.height - 48));
+  }
+  const win = await chrome.windows.create({ tabId, focused: false, ...bounds }).catch((err) => {
+    log("挪窗口失败，先凑合用原来那个", err?.message || err);
+    return null;
+  });
+  return win?.id ?? null;
+}
+
+/**
+ * 先看 gemini.google.com 是不是已经开着：开着就直接用，绝不动它的 URL，
  * 也不等页面加载（省掉重新加载那几秒）。没开才新建一个。
  *
- * 默认全程不抢焦点：拖放、回车、读回答都是注入脚本干的，标签页在后台也照跑，
- * 所以不会打断你手上的活。只有半自动（要你亲手选文件）才把窗口拉到前台。
+ * sideWindow=true（默认）时保证它是自己窗口里的活动标签页——不然一被别的标签页盖住，
+ * 页面就被冻结，上传上去也发不出去、回答也读不出来。
  * 返回 { tabId, created, ready }，created=false 的标签页是用户自己的，事后不许关。
  */
-async function ensureGeminiTab(url, { focus = false } = {}) {
+async function ensureGeminiTab(url, { focus = false, sideWindow = true } = {}) {
   const opened = await chrome.tabs.query({ url: "*://gemini.google.com/*" }).catch(() => []);
   const existing = Array.isArray(opened) ? opened.find((tab) => typeof tab.id === "number") : null;
   if (existing) {
@@ -474,8 +496,21 @@ async function ensureGeminiTab(url, { focus = false } = {}) {
       if (typeof existing.windowId === "number") {
         await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
       }
+    } else if (sideWindow && !existing.active) {
+      // 被别的标签页盖着 = 冻结状态，拽出来单开一个窗口，不抢焦点
+      log("它被别的标签页盖着，挪到单独的小窗口");
+      await moveToSideWindow(existing.id);
     }
     return { tabId: existing.id, created: false, ready: existing.status === "complete" };
+  }
+  if (!focus && sideWindow) {
+    log("Gemini 没打开，开个不抢焦点的小窗口", url);
+    const win = await chrome.windows.create({ url, focused: false, width: 560, height: 620 })
+      .catch(() => null);
+    const tab = win?.tabs?.[0];
+    if (tab && typeof tab.id === "number") {
+      return { tabId: tab.id, created: true, ready: false };
+    }
   }
   log("Gemini 没打开，新建标签页", url, focus ? "" : "（后台打开）");
   const tab = await chrome.tabs.create({ url, active: focus });
@@ -546,6 +581,9 @@ async function handleAiTask(task) {
   const uploadMode = String(task.upload_mode || "manual");
   // 默认死活不抢焦点；要它自己跳到前台就在 config.json 里把 bridge.focus_browser 打开
   const focusBrowser = Boolean(task.focus_browser);
+  // 独立小窗口：不抢焦点但保证页面在渲染（后台标签页会被冻结，什么都干不了）
+  const sideWindow = task.side_window === undefined ? true : Boolean(task.side_window);
+
 
 
   let tabId = null;
@@ -584,7 +622,7 @@ async function handleAiTask(task) {
 
 
     if (await cancelled("opening", `打开 ${url}`)) return;
-    const target = await ensureGeminiTab(url, { focus: focusBrowser });
+    const target = await ensureGeminiTab(url, { focus: focusBrowser, sideWindow });
 
 
     tabId = target.tabId;

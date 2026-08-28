@@ -200,6 +200,8 @@
     "prompt_file": "prm/prm_en.txt",
     "upload_mode": "auto",
     "focus_browser": false,
+    "side_window": true,
+
 
 
     "keep_merged_file": false,
