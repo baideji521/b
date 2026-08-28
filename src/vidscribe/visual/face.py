@@ -271,6 +271,41 @@ def aggregate(samples: list[dict[str, Any]], start: float, end: float,
     }
 
 
+def segments(samples: list[dict[str, Any]], min_score: float = 0.35,
+             min_seconds: float = 0.4) -> list[dict[str, Any]]:
+    """逐表情时间段：相邻同标签的采样点并成一段。
+
+    不额外推理——用的就是 `scan()` 已经算好的那批采样点，纯序列化，所以是零成本。
+    每段 intensity 取段内平均置信度；短于 `min_seconds` 的段丢掉（表情抖一下不算一段）。
+    """
+    runs: list[dict[str, Any]] = []
+    for sample in samples:
+        faces = sample.get("faces") or []
+        if not faces:
+            continue
+        face = max(faces, key=lambda f: int(f.get("width") or 0))
+        score = float(face.get("score") or 0.0)
+        label = str(face.get("emotion_en") or "")
+        if not label or score < min_score:
+            continue
+        t = float(sample.get("time") or 0.0)
+        if runs and runs[-1]["emotion_en"] == label:
+            runs[-1]["end"] = t
+            runs[-1]["scores"].append(score)
+            continue
+        runs.append({"start": t, "end": t, "emotion_en": label, "scores": [score]})
+    out: list[dict[str, Any]] = []
+    for run in runs:
+        scores = run.pop("scores")
+        if run["end"] - run["start"] < min_seconds:
+            continue
+        out.append({"start": round(run["start"], 3), "end": round(run["end"], 3),
+                    "emotion_en": run["emotion_en"],
+                    "intensity": round(sum(scores) / len(scores), 3),
+                    "samples": len(scores)})
+    return out
+
+
 def annotate(events: list[VisualEvent], samples: list[dict[str, Any]],
              min_score: float = 0.35) -> dict[str, Any]:
     """用人脸表情覆盖事件的情绪字段，返回统计（写进 visual meta）。
@@ -290,8 +325,10 @@ def annotate(events: list[VisualEvent], samples: list[dict[str, Any]],
         ev.emotion_source = "face"
         replaced += 1
     with_face = sum(1 for s in samples if s.get("faces"))
-    logger.info("画面表情：%d 个事件用人脸模型判定，%d 个沿用视觉模型（采样 %d 点 / 检出 %d 点）",
-                replaced, kept, len(samples), with_face)
+    spans = segments(samples, min_score)
+    logger.info("画面表情：%d 个事件用人脸模型判定，%d 个沿用视觉模型"
+                "（采样 %d 点 / 检出 %d 点 / 表情段 %d）",
+                replaced, kept, len(samples), with_face, len(spans))
     return {
         "available": True,
         "events_from_face": replaced,
@@ -299,4 +336,5 @@ def annotate(events: list[VisualEvent], samples: list[dict[str, Any]],
         "samples": len(samples),
         "samples_with_face": with_face,
         "min_score": min_score,
+        "segments": spans,
     }

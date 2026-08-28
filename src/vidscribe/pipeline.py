@@ -23,7 +23,7 @@ from .speech.sentences import split_sentences
 from .speech.speakers import SpeakerTagger
 from .speech.whisper_asr import WhisperASR
 
-from .timeline.engine import build_timeline, filter_timeline
+from .timeline.engine import action_track, build_timeline, filter_timeline
 from .timeline.exporters import write_json, write_srt, write_timeline_txt
 from .video_io import VideoInfo, detect_scene_cuts, plan_windows, probe_video
 from .visual import prompts
@@ -234,6 +234,11 @@ class Pipeline:
                 min_confidence=float(self.cfg.timeline.get("confidence_filter", 0.0)),
             )
             language = speech_payload.get("language")
+            # 两条独立时间戳轨：动作按事件归并，表情来自人脸模型的 2fps 采样。
+            # 都是已算好的结果重排一遍，不额外推理。
+            actions = action_track(visual_events)
+            face_spans = ((visual_meta.get("face") or {}).get("segments") or []) \
+                if isinstance(visual_meta.get("face"), dict) else []
             timeline_doc = {
                 "video": info.name,
                 "video_path": info.path,
@@ -280,10 +285,13 @@ class Pipeline:
                     }
                     for e in filtered
                 ],
+                "action_track": actions,
+                "expression_track": face_spans,
             }
             write_json(out_dir / "timeline.json", timeline_doc)
             write_timeline_txt(out_dir / "timeline.txt", info.name, info.duration, language, filtered,
-                               output_language=decision.output_language)
+                               output_language=decision.output_language,
+                               actions=actions, emotions=face_spans)
             srt_kind = write_srt(
                 out_dir / "timeline.srt",
                 speech_payload.get("segments", []),

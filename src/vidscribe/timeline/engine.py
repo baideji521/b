@@ -112,6 +112,27 @@ def _entry(ev: VisualEvent | None, speech: list[SpeechEvent]) -> dict[str, Any]:
     }
 
 
+def action_track(events: list[VisualEvent], max_gap: float = 0.5) -> list[dict[str, Any]]:
+    """逐动作时间戳：相邻事件的 action 标签相同就并成一段。
+
+    纯归并，不额外推理——动作标签是视觉模型这一趟已经给出的。粒度就是事件粒度
+    （本机实测平均 8~9s 一段），要更细必须加帧或上骨架模型，那会实打实加推理时间。
+    """
+    track: list[dict[str, Any]] = []
+    for ev in events:
+        label = ev.action or None
+        if not label:
+            continue
+        last = track[-1] if track else None
+        if last and last["action"] == label and ev.start - last["end"] <= max_gap:
+            last["end"] = round(max(last["end"], ev.end), 3)
+            last["event_ids"].append(ev.id)
+            continue
+        track.append({"start": round(ev.start, 3), "end": round(ev.end, 3),
+                      "action": label, "scene": ev.scene or None, "event_ids": [ev.id]})
+    return track
+
+
 def filter_timeline(entries: list[dict[str, Any]], importance: str = "low",
                     min_confidence: float = 0.0) -> list[dict[str, Any]]:
     threshold = IMPORTANCE_ORDER.get(importance, 0)

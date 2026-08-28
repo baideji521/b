@@ -40,8 +40,15 @@ def write_json(path: Path, payload: Any) -> None:
 
 
 def write_timeline_txt(path: Path, video_name: str, duration: float, language: str | None,
-                       entries: list[dict[str, Any]], output_language: str = "zh") -> None:
-    """最终用户可见文本。段落标签跟随 output_language（英文音频 -> Visual/Speech）。"""
+                       entries: list[dict[str, Any]], output_language: str = "zh",
+                       actions: list[dict[str, Any]] | None = None,
+                       emotions: list[dict[str, Any]] | None = None) -> None:
+    """最终用户可见文本。段落标签跟随 output_language（英文音频 -> Visual/Speech）。
+
+    末尾附两条独立时间戳轨：动作（事件粒度归并）和表情（人脸模型 2fps 归并），
+    两者都是已算好的结果重新排一遍，不额外推理。
+    """
+    from ..emotions import display_name  # noqa: PLC0415
     from ..language import labels_for, normalize_code
 
     labels = labels_for(output_language)
@@ -90,6 +97,25 @@ def write_timeline_txt(path: Path, video_name: str, duration: float, language: s
             lines.append(f"{head}：" if lang == "zh" else f"{head}:")
             lines.append(entry["speech"])
         lines.append("")
+        lines.append("")
+    sep = "：" if lang == "zh" else ": "
+    if actions:
+        lines.append("=" * 60)
+        lines.append("动作轨（逐动作时间戳）" if lang == "zh" else "Action track")
+        lines.append("")
+        for span in actions:
+            scene = f" @ {span['scene']}" if span.get("scene") else ""
+            lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
+                         f"{sep}{span['action']}{scene}")
+        lines.append("")
+    if emotions:
+        lines.append("=" * 60)
+        lines.append("表情轨（逐表情时间戳）" if lang == "zh" else "Expression track")
+        lines.append("")
+        for span in emotions:
+            name = display_name(span.get("emotion_en"), None, output_language) or span.get("emotion_en")
+            lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
+                         f"{sep}{name} {span.get('intensity', 0):.2f}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
