@@ -267,16 +267,34 @@ function pageOpenUploadMenu() {
 
 
 /**
- * 数页面上这个文件名出现了几次。复用的窗口里可能有上一轮的同名附件，
- * 所以只看「有没有」会误判，必须比上传前后的次数。
+ * 数页面上这个文件出现了几次。Gemini 的附件卡片只写主名（prm_en.txt 显示成 prm_en，
+ * 后缀是单独的 TXT 角标），名字太长还会截断，所以按「全名 → 去后缀 → 名字前缀」
+ * 三级放宽去数，哪一级数到就用哪一级。复用的窗口里可能有上一轮的同名附件，
+ * 所以只看「有没有」会误判，必须比塞之前后的次数。
  */
 function pageCountAttachment(name) {
   const text = document.body ? document.body.innerText || "" : "";
-  let count = 0;
-  for (let idx = text.indexOf(name); idx >= 0; idx = text.indexOf(name, idx + name.length)) count += 1;
+  const count = (needle) => {
+    if (!needle) return 0;
+    let hit = 0;
+    for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + needle.length)) hit += 1;
+    return hit;
+  };
+  const stem = name.replace(/\.[^.]+$/, "");
+  const needles = [name, stem, stem.slice(0, 12)];
+  let matched = 0;
+  let used = "";
+  for (const needle of needles) {
+    matched = count(needle);
+    if (matched > 0) {
+      used = needle;
+      break;
+    }
+  }
   const failed = /上传失败|上传出错|failed to upload|unsupported file/i.test(text);
-  return { count, failed };
+  return { count: matched, used, failed };
 }
+
 
 
 /** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
@@ -555,10 +573,12 @@ async function handleAiTask(task) {
             if (Number(check?.count || 0) > baseline) {
               attachedOk = true;
               usedVia = mode;
+              log("页面认账", label, `匹配=${check?.used || ""}`);
               break;
             }
             if (await cancelled("uploading", `等 ${label} 挂上（${mode}）`)) return;
-            await sleep(1500);
+            await sleep(1000);
+
           }
           if (attachedOk) break;
           lastError = `${mode}：塞进去了但页面没挂上`;

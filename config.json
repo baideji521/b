@@ -198,7 +198,8 @@
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
-    "upload_mode": "manual",
+    "upload_mode": "auto",
+
     "keep_merged_file": false,
 
     "message": "Follow the rules in prm_en.txt and analyze the attached *_merged.txt. Reply with the JSON object only.",
