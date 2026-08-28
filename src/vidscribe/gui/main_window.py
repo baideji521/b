@@ -679,13 +679,6 @@ class MainWindow(QMainWindow):
         self.btn_analyze.clicked.connect(lambda: self.on_analyze(False))
         self.btn_reanalyze = QPushButton("重新分析（忽略缓存）")
         self.btn_reanalyze.clicked.connect(lambda: self.on_analyze(True))
-        self.btn_speech_only = QPushButton("单独解析视频声音")
-        self.btn_speech_only.setToolTip("只重跑语音识别，画面事件结果保留（run --skip-visual --force-speech）")
-        self.btn_speech_only.clicked.connect(self.on_analyze_speech_only)
-        self.btn_translate = QPushButton("翻译")
-        self.btn_translate.setToolTip("只翻译界面上还没有译文的行（英->中 / 中->英），"
-                                      "不会重新分析视频；译好后按钮变成“回译”，切回原文")
-        self.btn_translate.clicked.connect(self.on_translate)
         self.btn_outdir = QPushButton("打开导出目录")
         self.btn_outdir.setToolTip("打开导出文件所在的目录（分析结果目录由 config.json 固定，界面不改它）")
         self.btn_outdir.clicked.connect(self.on_open_outdir)
@@ -772,8 +765,7 @@ class MainWindow(QMainWindow):
         self.spin_conf.valueChanged.connect(self.refresh_timeline_table)
         self.spin_conf.valueChanged.connect(self.save_settings)
 
-        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_speech_only,
-                  self.btn_translate, self.btn_outdir):
+        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_outdir):
             top.addWidget(w)
         top.addWidget(self.chk_auto_translate)
         top.addWidget(self.chk_emotion_audio)
@@ -786,18 +778,9 @@ class MainWindow(QMainWindow):
         top.addWidget(self.cmb_importance)
         top.addWidget(self.spin_conf)
 
-        # 导出行
+        # 导出行：三个文本导出挪到播放器右键里了，这里只留剪辑和目录
         export_row = FlowLayout(spacing=8)
         export_row.setContentsMargins(2, 0, 2, 4)
-        self.btn_export_speech = QPushButton("导出语音文本")
-        self.btn_export_speech.setToolTip("默认存成剪映可用的 SRT，对话框里可以改存 .txt")
-        self.btn_export_speech.clicked.connect(lambda: self.export_text("speech"))
-        self.btn_export_events = QPushButton("导出事件文本")
-        self.btn_export_events.setToolTip("默认存成剪映可用的 SRT，对话框里可以改存 .txt")
-        self.btn_export_events.clicked.connect(lambda: self.export_text("events"))
-        self.btn_export_merged = QPushButton("合并导出")
-        self.btn_export_merged.setToolTip("画面事件 + 语音按时间穿插的可读文本（txt）")
-        self.btn_export_merged.clicked.connect(lambda: self.export_text("merged"))
         self.btn_export_dir = QPushButton("导出目录…")
         self.btn_export_dir.clicked.connect(self.on_pick_export_dir)
         self.btn_highlight = QPushButton("剪辑高光")
@@ -807,8 +790,7 @@ class MainWindow(QMainWindow):
 
         self.btn_highlight.clicked.connect(self.on_highlight)
         export_row.addWidget(self._section("导出"))
-        for w in (self.btn_export_speech, self.btn_export_events, self.btn_export_merged,
-                  self.btn_highlight, self.btn_export_dir):
+        for w in (self.btn_highlight, self.btn_export_dir):
             export_row.addWidget(w)
 
         # --- AI 对接（浏览器扩展 Bridge）---
@@ -1050,30 +1032,8 @@ class MainWindow(QMainWindow):
             except Exception as exc:
                 self.append_log(f"[警告] 读取 speech_events.json 失败: {exc}")
 
-        self.update_translate_button()
         self.refresh_timeline_table()
         self.refresh_speech_list()
-
-    # ------------------------------------------------------------ 译文/原文
-    def has_translation(self) -> bool:
-        if any(s.get("text_translated") for s in self.speech):
-            return True
-        return any(e.get("visual_translated") for e in self.timeline)
-
-    def update_translate_button(self) -> None:
-        if self.show_translated:
-            self.btn_translate.setText("回译")
-            self.btn_translate.setToolTip("切回原文")
-            return
-        self.btn_translate.setText("翻译")
-        pending = len(self.pending_translations())
-        if pending:
-            self.btn_translate.setToolTip(f"翻译界面上还没有译文的 {pending} 行"
-                                          f"（英->中 / 中->英），不会重新分析视频")
-        elif self.has_translation():
-            self.btn_translate.setToolTip("所有条目都有译文了，点一下直接切到译文显示")
-        else:
-            self.btn_translate.setToolTip("界面上没有可翻译的文本")
 
     def speech_display(self, seg: dict[str, Any]) -> str:
         if self.show_translated and seg.get("text_translated"):
@@ -1302,16 +1262,27 @@ class MainWindow(QMainWindow):
         menu = QMenu(self)
         act_add = menu.addAction("添加视频…")
         menu.addSeparator()
+        # 三个文本导出从上面的按钮行挪到这儿，界面清爽一点
+        act_speech = menu.addAction("导出语音文本（SRT 剪映可用 / txt）")
+        act_events = menu.addAction("导出事件文本（SRT 剪映可用 / txt）")
+        act_merged = menu.addAction("合并导出（画面 + 语音按时间穿插，txt）")
+        menu.addSeparator()
         act_close = menu.addAction("删除（从播放器移除）")
         act_purge = menu.addAction("彻底删除（不可恢复）")
         loaded = self.video_path is not None
-        act_close.setEnabled(loaded)
-        act_purge.setEnabled(loaded)
+        for act in (act_speech, act_events, act_merged, act_close, act_purge):
+            act.setEnabled(loaded)
         chosen = menu.exec_(self.player.mapToGlobal(pos))
         if chosen is None:
             return
         if chosen is act_add:
             self.on_open()
+        elif chosen is act_speech:
+            self.export_text("speech")
+        elif chosen is act_events:
+            self.export_text("events")
+        elif chosen is act_merged:
+            self.export_text("merged")
         elif chosen is act_close:
             self.close_current_video()
         elif chosen is act_purge:
@@ -1333,7 +1304,6 @@ class MainWindow(QMainWindow):
         self.slider.setValue(0)
         self.lbl_time.setText("00:00.00 / 00:00.00")
         self.setWindowTitle(theme.APP_TITLE)
-        self.update_translate_button()
         self.refresh_timeline_table()
         self.refresh_speech_list()
         self.refresh_export_hint()
@@ -1791,8 +1761,6 @@ class MainWindow(QMainWindow):
     def start_worker(self, argv: list[str], label: str) -> None:
         self.btn_analyze.setEnabled(False)
         self.btn_reanalyze.setEnabled(False)
-        self.btn_speech_only.setEnabled(False)
-        self.btn_translate.setEnabled(False)
         self.set_progress(0.0)
         self.lbl_stage.setText(f"{label}｜启动子进程")
 
@@ -1835,16 +1803,6 @@ class MainWindow(QMainWindow):
                         f"声纹={self.cmb_speaker.currentText()}，"
                         f"顺手翻译={'是' if auto else '否'}）…")
         self.start_worker(argv, "分析")
-
-    def on_analyze_speech_only(self) -> None:
-        if self.video_path is None:
-            QMessageBox.information(self, "提示", "请先打开一个视频")
-            return
-        if self.busy():
-            return
-        self.append_log(f"只解析声音：{self.video_path.name}（画面事件结果保留）…")
-        self.start_worker(["run", str(self.video_path), "--skip-visual", "--force-speech",
-                           *self._emotion_argv()], "语音识别")
 
     def source_language(self) -> str | None:
         """界面上这批文本的语言：优先用 whisper 判定的音频语言。"""
@@ -1922,7 +1880,6 @@ class MainWindow(QMainWindow):
 
     def set_translated_view(self, translated: bool) -> None:
         self.show_translated = bool(translated)
-        self.update_translate_button()
         self.refresh_timeline_table()
         self.refresh_speech_list()
 
@@ -1999,7 +1956,7 @@ class MainWindow(QMainWindow):
 
 
     def on_worker_done(self, ok: bool, message: str) -> None:
-        for btn in (self.btn_analyze, self.btn_reanalyze, self.btn_speech_only, self.btn_translate):
+        for btn in (self.btn_analyze, self.btn_reanalyze):
             btn.setEnabled(True)
         label = self.worker.label if self.worker is not None else "任务"
         if ok:
