@@ -6,14 +6,21 @@
 切出来的每段基本是单人，声纹才干净。
 
 **人数怎么定**：`FastClusteringConfig(num_clusters=-1, threshold=T)` 按余弦距离做层次
-合并，阈值 T 决定人数。实测那条已知 2 人的视频（双胞胎，同一副嗓子，最难的一档）：
+合并，阈值 T 决定人数。阈值是拿 **sherpa-onnx 官方带标准答案的素材**标的（4 人一条、
+2 人三条），再加自己的素材交叉验证。中文 cam++ + T=0.7 + 碎簇门槛 10% 是唯一全中的组合：
 
-- 英文 VoxCeleb cam++：T=0.7 → 6 人，0.9 → 4 人，**1.1 → 2 人（25.9s / 93.3s，
-  跟强制 k=2 的结果完全一致）**，1.3 → 1 人
-- 中文 cam++ zh-cn：T=0.7 → 7 人，**0.9 → 2 人**，1.1 → 1 人
+- 官方 `0-four-speakers-zh`（4 人）→ 4；`1/2/3-two-speakers-en`（各 2 人）→ 2/2/2
+- 已知 2 人的双胞胎素材（同一副嗓子，最难的一档）→ 2
+- 两条单人 tiktok → 1
 
-所以阈值跟着声纹模型走（见 `EMBEDDINGS`），不是一个全局常数。
+**英文 VoxCeleb 那份反而更差**（哪怕在英文素材上）：T=0.6 时官方三条 2 人素材判成
+2/3/3，单人素材也判成 2；换任何阈值都做不到全中。所以默认用中文那份，"英文"选项留着
+备用，阈值 0.6。
+
+**T 不能只用一条素材标**：早先只拿双胞胎那条标出 T=1.1，回头在官方标注上一验，4 人判成
+2 人、2 人判成 1 人——单条素材标出来的阈值完全不可用。
 """
+
 
 from __future__ import annotations
 
@@ -43,7 +50,8 @@ SEGMENTATION = {
 EMBEDDINGS: dict[str, dict[str, Any]] = {
     "iic/speech_campplus_sv_en_voxceleb_16k": {
         "file": "campplus_en_voxceleb.onnx",
-        "threshold": 1.1,
+        "threshold": 0.6,
+
         "urls": [
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
             "https://hf-mirror.com/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
@@ -51,7 +59,8 @@ EMBEDDINGS: dict[str, dict[str, Any]] = {
     },
     "iic/speech_campplus_sv_zh-cn_16k-common": {
         "file": "campplus_zh_cn_common.onnx",
-        "threshold": 0.9,
+        "threshold": 0.7,
+
         "urls": [
             "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
             "https://hf-mirror.com/csukuangfj/speaker-embedding-models/resolve/main/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx",
@@ -146,11 +155,14 @@ class Diarizer:
 
 
 def drop_tiny(turns: list[tuple[float, float, int]], min_seconds: float = 2.0,
-              min_share: float = 0.05) -> list[tuple[float, float, int]]:
+              min_share: float = 0.10) -> list[tuple[float, float, int]]:
     """说话时长太短的簇并回时间上相邻的簇。
 
     过度切分的残渣一般只有一两秒（笑声、背景人声、"嗯"），留着会让人数虚高。
+    10% 这个门槛是跟阈值 0.7 一起标出来的：5% 时官方 4 人素材仍是 4，但双胞胎那条会多出
+    一个假人（3 而不是 2）；15% 开始有并掉真人的风险，所以取中间的 10%。
     """
+
     if not turns:
         return turns
     total = sum(end - start for start, end, _ in turns)

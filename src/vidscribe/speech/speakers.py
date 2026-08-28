@@ -165,10 +165,11 @@ class SpeakerTagger:
         self.mirrors = mirrors or {}
         self.model = None
         # 声纹模型只有两个选择（界面「声纹」下拉，走 --speaker-model 传进来）：
-        # - 英文：3D-Speaker 的 VoxCeleb cam++（纯英文语料，512 维）
-        # - 中文：cam++ zh-cn（中文语料，192 维）
+        # - 中文：cam++ zh-cn（192 维）—— 默认。在官方标注素材上全中（4 人判 4、
+        #   三条 2 人判 2），英文素材上也比下面那份准
+        # - 英文：3D-Speaker 的 VoxCeleb cam++（512 维），实测更差，留着备用
         self.model_id: str = str(self.cfg.get("model_id")
-                                 or "iic/speech_campplus_sv_en_voxceleb_16k")
+                                 or "iic/speech_campplus_sv_zh-cn_16k-common")
         self.device: str = "cpu"
         self.load_seconds = 0.0
         self.model_path: str | None = None
@@ -439,9 +440,10 @@ class SpeakerTagger:
             return None
 
         raw_speakers = len({spk for _, _, spk in turns})
+        diar_cfg = self.cfg.get("diarization", {}) or {}
         turns = drop_tiny(turns,
-                          min_seconds=float(self.cfg.get("min_speaker_seconds", 2.0)),
-                          min_share=float(self.cfg.get("min_cluster_share", 0.05)))
+                          min_seconds=float(diar_cfg.get("min_speaker_seconds", 2.0)),
+                          min_share=float(diar_cfg.get("min_speaker_share", 0.10)))
         picks = assign_sentences(segments, turns)
         speakers = _write_speakers(segments, picks)
 

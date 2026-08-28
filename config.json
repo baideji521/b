@@ -103,21 +103,22 @@
     },
     "speaker": {
       "enabled": true,
-      "model_id": "iic/speech_campplus_sv_en_voxceleb_16k",
+      "model_id": "iic/speech_campplus_sv_zh-cn_16k-common",
       "models": [
-        {
-          "label": "英文",
-          "model_id": "iic/speech_campplus_sv_en_voxceleb_16k"
-        },
         {
           "label": "中文",
           "model_id": "iic/speech_campplus_sv_zh-cn_16k-common"
+        },
+        {
+          "label": "英文",
+          "model_id": "iic/speech_campplus_sv_en_voxceleb_16k"
         }
       ],
       "device": "auto",
-      "min_speaker_seconds": 2.0,
       "diarization": {
         "threshold": null,
+        "min_speaker_seconds": 2.0,
+        "min_speaker_share": 0.1,
         "min_duration_on": 0.3,
         "min_duration_off": 0.5
       },
