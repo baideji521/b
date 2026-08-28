@@ -797,11 +797,10 @@ class MainWindow(QMainWindow):
         self.btn_advanced.clicked.connect(self.on_advanced)
         self._advanced_dialog: QDialog | None = None
 
-        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze,
-                  self.btn_advanced, self.btn_outdir):
+        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze):
             top.addWidget(w)
 
-        # 导出行：三个文本导出挪到播放器右键里了，这里只留剪辑和目录
+        # 导出行：三个文本导出挪到播放器右键里了，这里只留剪辑
         export_row = FlowLayout(spacing=8)
         export_row.setContentsMargins(2, 0, 2, 4)
         self.btn_export_dir = QPushButton("导出目录…")
@@ -813,8 +812,10 @@ class MainWindow(QMainWindow):
 
         self.btn_highlight.clicked.connect(self.on_highlight)
         export_row.addWidget(self._section("导出"))
-        for w in (self.btn_highlight, self.btn_export_dir):
-            export_row.addWidget(w)
+        export_row.addWidget(self.btn_highlight)
+        # 选目录和打开目录挨着放在第一行：先选，再打开
+        top.addWidget(self.btn_export_dir)
+        top.addWidget(self.btn_outdir)
 
         # --- AI 对接（浏览器扩展 Bridge）---
         # 合并导出 + 提示词交给扩展，扩展在浏览器里问网页版 AI，回传的 JSON 直接进剪辑高光
@@ -976,7 +977,12 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addWidget(flow.wrap(top))
+        # 第一行：左边一排常用按钮（窄了会自动折行），高级选项钉在最右边
+        first_row = QHBoxLayout()
+        first_row.setContentsMargins(0, 0, 0, 0)
+        first_row.addWidget(flow.wrap(top), 1)
+        first_row.addWidget(self.btn_advanced, 0, Qt.AlignTop)
+        layout.addLayout(first_row)
         layout.addWidget(flow.wrap(export_row))
         layout.addWidget(vertical, 1)
         self.setCentralWidget(central)
