@@ -425,102 +425,25 @@ DO NOT hallucinate it.
 7. TIMESTAMP SOURCE PRIORITY
 ============================
 
-When determining FINAL clip timing, use the following priority:
-
-PRIORITY 1
-WORD-LEVEL TIMESTAMP FILE
-
-PRIORITY 2
-Explicitly supplied speech timing
-
-PRIORITY 3
-Explicitly supplied visual event timing
-
-PRIORITY 4
-Other analytical timing
-
-However:
-
-PRIORITY 2–4 may ONLY be used to locate and understand the event.
-
-They must NOT override available word-level timing for final dialogue-aligned boundaries.
+For FINAL clip timing: SECTION 4 first, always. Speech-segment timing, visual event
+timing and any other analytical timing exist ONLY to locate and understand the event;
+they may never override an available word-level boundary.
 
 ==================================================
-8. CRITICAL WORD-LEVEL ALIGNMENT RULE
-=====================================
+8-9. WORD-LEVEL ALIGNMENT AFTER THE WINNER IS PICKED
+====================================================
 
-After the final winner is selected:
+Once the winner is chosen, do NOT output the estimated start/end you were working with.
+Re-locate the clip in SECTION 4: find the FIRST NECESSARY WORD and the LAST NECESSARY
+WORD, then set
 
-DO NOT directly output its previously estimated start/end.
+  clip.start = first necessary word .start
+  clip.end   = last necessary word .end
+  duration   = clip.end - clip.start
 
-Instead:
-
-RE-LOCATE THE FINAL CLIP IN THE WORD-LEVEL TIMESTAMP FILE.
-
-Suppose internal analysis produces:
-
-candidate_start = 20.40
-candidate_end = 31.67
-
-These are NOT automatically valid final timestamps.
-
-You MUST inspect the relevant dialogue/word sequence.
-
-Find:
-
-FIRST NECESSARY WORD
-+
-LAST NECESSARY WORD
-
-Then:
-
-clip.start = FIRST NECESSARY WORD.start
-
-clip.end = LAST NECESSARY WORD.end
-
-The final duration is then:
-
-duration = clip.end - clip.start
-
-==================================================
-9. WORD-LEVEL ALIGNMENT OVERRIDES APPROXIMATE TIME
-==================================================
-
-If the analysis says:
-
-20.40
-
-but the first necessary word actually begins at:
-
-20.68
-
-then:
-
-FINAL START = 20.68
-
-NOT:
-
-20.40
-
-If the analysis says:
-
-31.67
-
-but the final necessary word actually ends at:
-
-31.42
-
-then:
-
-FINAL END = 31.42
-
-NOT:
-
-31.67
-
-The word-level timestamp wins.
-
-Always.
+Worked example: internal analysis suggested 20.40 - 31.67, but the first necessary word
+begins at 20.68 and the last one ends at 31.42, so the final values are 20.68 and 31.42.
+The word-level value wins every time, in both directions — later start, earlier end.
 
 ==================================================
 10. DO NOT FORCE ORIGINAL EVENT BOUNDARIES
@@ -750,26 +673,26 @@ You MUST inspect:
 10. Expression/Speech temporal overlap
 11. Chronological order
 12. Event transitions
-11. Dialogue transitions
-12. Emotion transitions
-13. Challenges
-14. Results
-15. Twists
-16. Failures
-17. Successes
-18. Reactions
-19. Unexpected outcomes
-20. Strong visual actions
-21. Strong dialogue
-22. High-information moments
-23. Complete mini-stories
-24. Payoff moments
-25. Context-dependent moments
-26. Context-independent moments
-27. Emotional peaks
-28. Visual peaks
-29. Dialogue peaks
-30. Multimodal synchronization peaks
+13. Dialogue transitions
+14. Emotion transitions
+15. Challenges
+16. Results
+17. Twists
+18. Failures
+19. Successes
+20. Reactions
+21. Unexpected outcomes
+22. Strong visual actions
+23. Strong dialogue
+24. High-information moments
+25. Complete mini-stories
+26. Payoff moments
+27. Context-dependent moments
+28. Context-independent moments
+29. Emotional peaks
+30. Visual peaks
+31. Dialogue peaks
+32. Multimodal synchronization peaks
 
 NEVER stop after finding the first strong moment.
 
@@ -2270,45 +2193,45 @@ FINAL CLIP
 51. If the payoff depends on a spoken rule / bet / promise, the premise sentence starts
     inside the clip (Section 2C, Case A) — or, when the 15.00 cap made that impossible,
     the `comment` overlay states the rule.
-47. Minimum necessary context retained.
-48. Unnecessary setup removed.
-49. Dead time removed.
-50. Repetition removed.
-51. Ending trimmed to natural payoff.
-52. Complete highlight preserved.
-53. No further safe trimming possible.
+52. Minimum necessary context retained.
+53. Unnecessary setup removed.
+54. Dead time removed.
+55. Repetition removed.
+56. Ending trimmed to natural payoff.
+57. Complete highlight preserved.
+58. No further safe trimming possible.
 
 FACTUAL
 
-54. No invented information.
-55. No invented reactions.
-56. No invented results.
-57. No invented timestamps.
-58. No invented emotions.
-59. No invented dialogue.
-60. Final score independently determined.
-61. Final score does not copy input score.
-62. Final score does not copy confidence.
+59. No invented information.
+60. No invented reactions.
+61. No invented results.
+62. No invented timestamps.
+63. No invented emotions.
+64. No invented dialogue.
+65. Final score independently determined.
+66. Final score does not copy input score.
+67. Final score does not copy confidence.
 
 OVERLAYS
 
-63. One English word.
-64. One emoji.
-65. One English comment.
-66. Comment contains 1–6 English words.
-67. All overlay timestamps are inside final clip.
-68. Overlay roles are different.
-69. Overlay timestamps are based on final clip timing.
+68. One English word.
+69. One emoji.
+70. One English comment.
+71. Comment contains 1–6 English words.
+72. All overlay timestamps are inside final clip.
+73. Overlay roles are different.
+74. Overlay timestamps are based on final clip timing.
 
 VOICEOVER
 
-70. Disabled unless genuinely necessary.
+75. Disabled unless genuinely necessary.
 
 JSON
 
-71. Valid JSON.
-72. Exact schema.
-73. No extra fields.
+76. Valid JSON.
+77. Exact schema.
+78. No extra fields.
 
 ==================================================
 62. ABSOLUTELY FIXED JSON STRUCTURE
@@ -2736,110 +2659,22 @@ STEP 54
 Return ONLY the final JSON object.
 
 ==================================================
-66. ABSOLUTE WORD-TIMESTAMP RULE
-================================
+66. WORD-TIMESTAMP RULE (RESTATES SECTION 3 — SAME RULE, NOT A NEW ONE)
+=======================================================================
 
-THIS RULE OVERRIDES ALL OTHER TIMESTAMP PREFERENCES.
+When the final clip contains dialogue, clip.start and clip.end come from SECTION 4 and
+from nowhere else. All of the following are INVALID as output values: Visual Event
+boundaries, Speech Segment boundaries, action- or expression-track boundaries, your own
+earlier candidate numbers, and anything labelled "approximate". On any conflict with
+Section 4, SECTION 4 WINS.
 
-When the final highlight contains dialogue:
+Order of work: decide which words are necessary -> find those words in SECTION 4 -> read
+their real start/end -> output exactly those numbers.
 
-DO NOT output an approximate timestamp.
+Word-level alignment is mandatory, not an optional refinement. Never write
+"approximately" or "around" anywhere in the output.
 
-DO NOT output a Visual Event boundary.
-
-DO NOT output a Speech Segment boundary.
-
-DO NOT output a manually guessed timestamp.
-
-DO NOT output a previously generated candidate timestamp.
-
-DO NOT output the original AI candidate timestamp.
-
-FIRST identify the actual necessary words.
-
-THEN locate those words in the word-level timestamp file.
-
-THEN use the actual word timestamps.
-
-Therefore:
-
-CONTENT SELECTION
-comes from:
-
-MERGED ANALYSIS
-
-FINAL TIME ALIGNMENT
-comes from:
-
-WORD-LEVEL TIMESTAMP FILE
-
-==================================================
-67. ABSOLUTE CONFLICT RULE
-==========================
-
-If there is any conflict between:
-
-AI analysis timestamp
-
-and:
-
-word-level timestamp
-
-WORD-LEVEL TIMESTAMP WINS.
-
-If there is any conflict between:
-
-Visual Event boundary
-
-and:
-
-word-level timestamp
-
-WORD-LEVEL TIMESTAMP WINS.
-
-If there is any conflict between:
-
-Speech Segment boundary
-
-and:
-
-word-level timestamp
-
-WORD-LEVEL TIMESTAMP WINS.
-
-If there is any conflict between:
-
-Emotion boundary
-
-and:
-
-word-level timestamp
-
-WORD-LEVEL TIMESTAMP WINS.
-
-The word-level timestamp file is the final timing authority for dialogue-aligned clips.
-
-==================================================
-68. WORD-LEVEL PRECISION IS NOT OPTIONAL
-========================================
-
-Do NOT treat word-level alignment as:
-
-"optional refinement."
-
-It is MANDATORY.
-
-Do NOT say:
-
-"approximately"
-
-Do NOT say:
-
-"around"
-
-Do NOT use approximate timing if exact word timing is available.
-
-The final JSON must contain the actual aligned timestamps.
+Content selection comes from Sections 1-3. Final timing comes from Section 4.
 
 ==================================================
 69. FINAL PRECISION TRIM + WORD ALIGNMENT
@@ -2872,87 +2707,43 @@ They do NOT decide the highlight by themselves.
 70. FINAL PRINCIPLES
 ====================
 
-SCAN EVERYTHING.
+SCAN EVERYTHING. DISCOVER BROADLY. DO NOT STOP EARLY.
 
-DISCOVER BROADLY.
+Run the five-stage elimination INTERNALLY (Section 17): many candidates -> top 3 ->
+re-edit -> top 2 -> one winner -> re-edit the winner. This reasoning is internal work,
+NOT output. The reply is the JSON object and nothing else — no stage list, no candidate
+table, no explanation outside the `reason` and `evaluation` fields.
 
-DO NOT STOP EARLY.
+CHECK UPSTREAM CONTEXT. CHECK DOWNSTREAM PAYOFF. PRESERVE CONTINUITY.
 
-GENERATE MULTIPLE INTERNAL CANDIDATES.
+MINIMUM NECESSARY SETUP. MAXIMUM PAYOFF.
 
-REDUCE TO TOP 3.
+VALUE DENSITY > DURATION. QUALITY > LENGTH. PAYOFF > SETUP.
 
-RE-EDIT TOP 3.
-
-REDUCE TO TOP 2.
-
-RE-EVALUATE TOP 2.
-
-SELECT ONE WINNER.
-
-THEN RE-EDIT THE WINNER AGAIN.
-
-CHECK UPSTREAM CONTEXT.
-
-CHECK DOWNSTREAM PAYOFF.
-
-PRESERVE CONTINUITY.
-
-MINIMUM NECESSARY SETUP.
-
-MAXIMUM PAYOFF.
-
-VALUE DENSITY > DURATION.
-
-QUALITY > LENGTH.
-
-PAYOFF > SETUP.
-
-ACTUAL EVENT > KEYWORD.
-
-DATA EVIDENCE > GUESS.
-
-EVENT EVIDENCE > RAW EMOTION.
+ACTUAL EVENT > KEYWORD. DATA EVIDENCE > GUESS. EVENT EVIDENCE > RAW EMOTION.
 
 EMOTION EVIDENCE > EMOTION LABEL ALONE.
 
 CONFIDENCE = RELIABILITY, NOT HIGHLIGHT VALUE.
 
-WHEN VISUAL AND AUDIO EMOTION CONFLICT AT THE SAME TIME:
+WHEN THE EXPRESSION TRACK AND AUDIO EMOTION CONFLICT AT THE SAME TIME:
 
-HIGHER CONFIDENCE WINS.
+THE EXPRESSION TRACK WINS. NEVER RANK THE TWO BY CONFIDENCE — THEIR SCORES COME FROM
+DIFFERENT MODELS AND ARE NOT COMPARABLE.
 
-WHEN CONFIDENCE IS NEARLY EQUAL:
+WHEN TWO EXPRESSION-TRACK VALUES ARE NEARLY EQUAL:
 
 DO NOT FORCE A WINNER.
 
-NEVER COPY EVENT BOUNDARIES.
+NEVER COPY EVENT / SPEECH / EMOTION BOUNDARIES INTO THE OUTPUT.
 
-NEVER COPY SPEECH BOUNDARIES.
+NEVER COPY INPUT SCORE OR INPUT CONFIDENCE INTO THE FINAL SCORE.
 
-NEVER COPY EMOTION BOUNDARIES.
+NEVER INVENT INFORMATION, TIMESTAMPS, WORDS OR WORD TIMESTAMPS.
 
-NEVER COPY INPUT SCORE.
+WHEN DIALOGUE IS USED: FIND THE ACTUAL WORDS, THEN THEIR ACTUAL TIMESTAMPS IN SECTION 4,
+AND ALIGN TO THOSE. SECTION 4 > ALL OTHER TIMESTAMP SOURCES.
 
-NEVER COPY INPUT CONFIDENCE INTO FINAL SCORE.
-
-NEVER INVENT INFORMATION.
-
-NEVER INVENT TIMESTAMPS.
-
-NEVER INVENT WORDS.
-
-NEVER INVENT WORD TIMESTAMPS.
-
-WHEN DIALOGUE IS USED:
-
-FIND THE ACTUAL WORDS.
-
-FIND THEIR ACTUAL TIMESTAMPS.
-
-USE THE WORD TIMESTAMPS FOR FINAL ALIGNMENT.
-
-WORD-LEVEL TIMESTAMP > ALL OTHER TIMESTAMP SOURCES.
 
 ONE CONTINUOUS CLIP.
 
@@ -3049,27 +2840,11 @@ PRESERVE COMPLETE PAYOFF.
 
 THEN:
 
-IDENTIFY THE ACTUAL NECESSARY SPOKEN WORD RANGE.
+IDENTIFY THE ACTUAL NECESSARY SPOKEN WORD RANGE, THEN TAKE ITS FIRST WORD'S START AND
+ITS LAST WORD'S END FROM SECTION 4 VERBATIM.
 
-SEARCH THE WORD-LEVEL TIMESTAMP FILE.
-
-FIND THE FIRST NECESSARY WORD.
-
-FIND THE LAST NECESSARY WORD.
-
-USE THE FIRST WORD'S ACTUAL START TIMESTAMP.
-
-USE THE LAST WORD'S ACTUAL END TIMESTAMP.
-
-DO NOT USE APPROXIMATE SPEECH TIMESTAMPS WHEN WORD TIMESTAMPS ARE AVAILABLE.
-
-DO NOT USE VISUAL EVENT BOUNDARIES AS FINAL DIALOGUE BOUNDARIES.
-
-DO NOT USE SPEECH SEGMENT BOUNDARIES AS FINAL DIALOGUE BOUNDARIES.
-
-DO NOT USE EMOTION BOUNDARIES AS FINAL DIALOGUE BOUNDARIES.
-
-WORD-LEVEL TIMESTAMP IS THE FINAL AUTHORITY.
+NO OTHER SOURCE MAY SUPPLY A FINAL DIALOGUE BOUNDARY — NOT SPEECH-SEGMENT TIMES, NOT
+VISUAL EVENT BOUNDARIES, NOT EMOTION BOUNDARIES, NOT AN APPROXIMATION.
 
 RECALCULATE:
 
@@ -3111,35 +2886,9 @@ VALIDATE JSON.
 
 FINAL RESPONSE:
 
-ONLY ONE JSON OBJECT.
-
-NO MARKDOWN.
-
-NO CODE BLOCK.
-
-NO EXPLANATION.
-
-NO ANALYSIS.
-
-NO CANDIDATES.
-
-NO TOP 3.
-
-NO TOP 2.
-
-NO ALTERNATIVES.
-
-NO COMPARISON.
-
-NO INTERNAL REASONING.
-
-NO WORD RANGE.
-
-NO TIMESTAMP SOURCE.
-
-NO EXTRA FIELDS.
-
-NO TEXT OUTSIDE JSON.
+ONLY ONE JSON OBJECT. NOTHING ELSE — no markdown, no code block, no prose, no candidate
+list, no top 3 / top 2, no comparison, no internal reasoning, no word range, no timestamp
+source, no extra fields, no text outside the JSON.
 
 The final output MUST START WITH {
 
