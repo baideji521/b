@@ -157,6 +157,8 @@ def write_srt(path: Path, speech_segments: list[dict[str, Any]],
 
 # ------------------------------------------------------- GUI 侧的单项/合并导出
 MIN_SRT_SECONDS = 0.3
+# 合并导出里语音情绪的最低置信度：低于这个分就不打标签（详见 write_merged_txt）
+MIN_SPEECH_EMOTION_SCORE = 0.30
 
 # 导出文本里的固定用词：整份文件跟着内容语言走，不能中文表头配英文正文
 _TXT_WORDS: dict[str, dict[str, str]] = {
@@ -177,7 +179,8 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
                              "取值范围 0 到上面那个时长；直接照抄，不要做任何换算。",
            "legend_visual": "行格式：[起 - 止] 画面（表情 置信度）[重要度]：描述",
            "legend_ocr": "行格式：    画面文字：…（缩进行，属于上面那条画面行）",
-           "legend_speech": "行格式：[起 - 止] 语音（说话人 N）（音频情绪 置信度，仅参考）：内容",
+           "legend_speech": "行格式：[起 - 止] 语音（说话人 N）（音频情绪 置信度，仅参考；"
+                            "置信度低于 0.30 的直接不打）：内容",
            "legend_action": "行格式：[起 - 止]：动作 @ 场景",
            "legend_expression": "行格式：[起 - 止]：表情 强度(0-1) —— 情绪判定以本段为准",
            "legend_words": "行格式：[起 - 止] 词 —— clip.start / clip.end 一律取自本段",
@@ -205,7 +208,7 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "legend_ocr": "Row:     On-screen text: ... (indented, belongs to the Visual row "
                          "above)",
            "legend_speech": "Row: [start - end] Speech (speaker N) (audio emotion score, "
-                            "reference only): text",
+                            "reference only; omitted when the score is below 0.30): text",
            "legend_action": "Row: [start - end]: action @ scene",
            "legend_expression": "Row: [start - end]: expression intensity(0-1) - decisive "
                                 "emotional evidence",
@@ -452,10 +455,15 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
         text = speech_text_of(seg, translated).strip()
         if text:
             who = speaker_tag(seg.get("speaker"), language) if multi else ""
-            kind = labels["speech"] + who + emotion_tag(seg.get("emotion_en"),
-                                                 seg.get("emotion_intensity"), language,
-                                                 seg.get("emotion"))
-            rows.append((float(seg["start"]), float(seg["end"]), kind, text, []))
+            # 置信度太低的音频情绪不打出来：emotion2vec 逐句判，低分那批基本是噪声
+            # （"Yeah, it's green" 判 sad 0.99 这种错也有，但 0.0x 的更是纯干扰），
+            # 而高光判定本来就以表情轨为准，少给模型一堆假证据。
+            score = seg.get("emotion_intensity")
+            weak = isinstance(score, (int, float)) and float(score) < MIN_SPEECH_EMOTION_SCORE
+            mood = "" if weak else emotion_tag(seg.get("emotion_en"), score, language,
+                                               seg.get("emotion"))
+            rows.append((float(seg["start"]), float(seg["end"]),
+                         labels["speech"] + who + mood, text, []))
     rows.sort(key=lambda r: (r[0], r[2]))
 
     lines = [

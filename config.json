@@ -74,6 +74,7 @@
     "scene_sample_fps": 3.0,
     "snap_tolerance_seconds": 1.0,
     "min_event_seconds": 0.4,
+    "max_event_seconds": 12.0,
     "merge_similarity": 0.82,
     "dedup_similarity": 0.72,
     "emotion_enabled": true,

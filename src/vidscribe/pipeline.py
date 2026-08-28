@@ -533,6 +533,7 @@ class Pipeline:
             dedup_similarity=float(vcfg["dedup_similarity"]),
             merge_similarity=float(vcfg["merge_similarity"]),
             min_seconds=float(vcfg["min_event_seconds"]),
+            max_event_seconds=float(vcfg.get("max_event_seconds") or 12.0),
         )
         logger.info("视觉事件：原始 %d -> 合并去重后 %d", len(all_events), len(events))
 

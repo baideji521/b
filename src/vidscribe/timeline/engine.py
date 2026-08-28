@@ -117,11 +117,15 @@ def _field(ev: Any, name: str) -> Any:
     return ev.get(name) if isinstance(ev, dict) else getattr(ev, name, None)
 
 
-def action_track(events: list[Any], max_gap: float = 0.5) -> list[dict[str, Any]]:
+def action_track(events: list[Any], max_gap: float = 0.5,
+                 max_span: float = 12.0) -> list[dict[str, Any]]:
     """逐动作时间戳：相邻事件的 action 标签相同就并成一段。
 
     纯归并，不额外推理——动作标签是视觉模型这一趟已经给出的。粒度就是事件粒度
     （本机实测平均 8~9s 一段），要更细必须加帧或上骨架模型，那会实打实加推理时间。
+
+    max_span 是一段的上限：一直在吃就会并出一条几十秒的 eating，那种轨没有分辨率，
+    下游按"动作变化点"找高光等于找不到。超上限就另起一段。
     """
     track: list[dict[str, Any]] = []
     for ev in events:
@@ -130,7 +134,8 @@ def action_track(events: list[Any], max_gap: float = 0.5) -> list[dict[str, Any]
             continue
         start, end = float(_field(ev, "start") or 0.0), float(_field(ev, "end") or 0.0)
         last = track[-1] if track else None
-        if last and last["action"] == label and start - last["end"] <= max_gap:
+        if (last and last["action"] == label and start - last["end"] <= max_gap
+                and max(last["end"], end) - last["start"] <= max_span):
             last["end"] = round(max(last["end"], end), 3)
             last["event_ids"].append(_field(ev, "id"))
             continue

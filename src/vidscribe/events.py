@@ -189,8 +189,13 @@ def dedupe_across_windows(events: list[VisualEvent], similarity: float = 0.72) -
 
 
 def merge_adjacent(events: list[VisualEvent], similarity: float = 0.82,
-                   max_gap: float = 1.5) -> list[VisualEvent]:
-    """相邻的同一状态事件合并成一个长事件（"男人一直站着" 只输出一条）。"""
+                   max_gap: float = 1.5, max_span: float = 12.0) -> list[VisualEvent]:
+    """相邻的同一状态事件合并成一个长事件（"男人一直站着" 只输出一条）。
+
+    max_span 是合并后的上限：不加这个上限，"一直在吃" 会跨好几个窗口连成一条
+    36 秒的事件，动作轨就失去分辨率了，high/critical 也被摊平。超过上限就另起一条，
+    时间轴上仍然是连续的，只是切成了多段。
+    """
     if not events:
         return []
     ordered = sorted(events, key=lambda e: (e.start, e.end))
@@ -198,7 +203,8 @@ def merge_adjacent(events: list[VisualEvent], similarity: float = 0.82,
     for ev in ordered[1:]:
         prev = merged[-1]
         gap = ev.start - prev.end
-        if gap <= max_gap and _event_similarity(prev, ev) >= similarity:
+        grown = max(prev.end, ev.end) - prev.start
+        if gap <= max_gap and grown <= max_span and _event_similarity(prev, ev) >= similarity:
             _absorb(prev, ev)
         else:
             merged.append(ev)
@@ -243,12 +249,13 @@ def resolve_overlaps(events: list[VisualEvent], min_seconds: float = 0.4) -> lis
 
 
 def finalize(events: list[VisualEvent], duration: float, *, dedup_similarity: float,
-             merge_similarity: float, min_seconds: float) -> list[VisualEvent]:
+             merge_similarity: float, min_seconds: float,
+             max_event_seconds: float = 12.0) -> list[VisualEvent]:
     for ev in events:
         ev.start = max(0.0, round(min(ev.start, duration if duration > 0 else ev.start), 3))
         ev.end = round(min(max(ev.end, ev.start), duration if duration > 0 else ev.end), 3)
     events = dedupe_across_windows(events, dedup_similarity)
-    events = merge_adjacent(events, merge_similarity)
+    events = merge_adjacent(events, merge_similarity, max_span=max_event_seconds)
     events = resolve_overlaps(events, min_seconds)
     events = drop_noise(events, min_seconds)
     events = sorted(events, key=lambda e: (e.start, e.end))

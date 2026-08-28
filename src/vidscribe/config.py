@@ -80,6 +80,8 @@ DEFAULTS: dict[str, Any] = {
         "scene_sample_fps": 3.0,
         "snap_tolerance_seconds": 1.0,
         "min_event_seconds": 0.4,
+        # 合并后的事件上限：再像也不连成一条 36 秒的"一直在吃"，动作轨得留分辨率
+        "max_event_seconds": 12.0,
         "merge_similarity": 0.82,
         "dedup_similarity": 0.72,
         # 画面情绪：视觉模型在同一次推理里顺便判人物情绪，只多两个输出字段，不额外加载模型
