@@ -584,6 +584,7 @@ class MainWindow(QMainWindow):
             "importance_index": self.cmb_importance.currentIndex(),
             "confidence": round(float(self.spin_conf.value()), 3),
             "play_sound": bool(self.chk_sound.isChecked()),
+            "auto_ai": bool(self.chk_auto_ai.isChecked()),
             "auto_translate": bool(self.chk_auto_translate.isChecked()),
             "emotion_audio": bool(self.chk_emotion_audio.isChecked()),
             "emotion_visual": bool(self.chk_emotion_visual.isChecked()),
@@ -662,7 +663,12 @@ class MainWindow(QMainWindow):
         chosen = QFileDialog.getExistingDirectory(self, "选择导出目录", str(self.export_root()))
         if not chosen:
             return
-        self.export_dir = Path(chosen)
+        self.apply_export_dir(Path(chosen))
+
+    def apply_export_dir(self, path: Path) -> None:
+        """设导出目录。第一行的「导出目录…」和「AI 选项」里的输出目录都走这里，
+        免得两处各存一份、对不上。"""
+        self.export_dir = Path(path)
         self.save_settings()
         self.refresh_export_hint()
         self.append_log(f"[导出目录] {self.export_dir}")
@@ -840,18 +846,22 @@ class MainWindow(QMainWindow):
         self.btn_ai_options.setToolTip("走接口还是网页版扩展、API key、模型、Bridge 端口、"
                                       "扩展上传方式和自动开剪")
         self.btn_ai_options.clicked.connect(self.on_ai_options)
-        self.btn_bridge_send = QPushButton("发给 AI")
+        # 「自动」勾上：分析一跑完就自己把文本发给 AI，拿到 JSON 再按 auto_clip 开剪，
+        # 整条链路不用你点。状态存 gui_settings.json
+        self.chk_auto_ai = QCheckBox("自动")
+        self.chk_auto_ai.setToolTip("分析完自动发给 AI（回来的 JSON 照旧按「拿到 JSON 就自动开剪」处理）")
+        self.chk_auto_ai.setChecked(bool(self.settings.get("auto_ai", False)))
+        self.chk_auto_ai.toggled.connect(lambda *_: self.save_settings())
+        self.btn_bridge_send = QPushButton("发送_AI")
         self.btn_bridge_send.setToolTip("把合并导出的文本 + 高光筛选提示词发给 AI，"
-                                        "回来的 JSON 直接开剪。默认走 Gemini 接口（不开浏览器），"
-                                        "config.json 里 bridge.mode 改 extension 才用网页版扩展")
+                                        "回来的 JSON 直接开剪。走哪条路在「AI 选项」里选")
         self.btn_bridge_send.clicked.connect(self.on_bridge_send)
-        self.btn_bridge_stop = QPushButton("停止 AI")
+        self.btn_bridge_stop = QPushButton("停止_AI")
         self.btn_bridge_stop.setToolTip("取消正在跑的 AI 任务")
         self.btn_bridge_stop.clicked.connect(self.on_bridge_stop)
         # 第二行按用起来的顺序排：发给 AI -> 停止 -> 剪辑高光。
         # 端口状态和配对按钮是扩展那边的杂事，钉到最右边，跟第一行的「高级选项」对齐
-        for w in (self.btn_bridge_send, self.btn_bridge_stop, self.btn_highlight):
-            export_row.addWidget(w)
+        export_row.addWidget(self.btn_highlight)
 
 
 
@@ -1002,7 +1012,11 @@ class MainWindow(QMainWindow):
         second_row = QHBoxLayout()
         second_row.setContentsMargins(0, 0, 0, 0)
         second_row.addWidget(flow.wrap(export_row), 1)
+        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 停止_AI | 配对扩展 | AI 选项
+        second_row.addWidget(self.chk_auto_ai, 0, Qt.AlignVCenter)
         second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
+        second_row.addWidget(self.btn_bridge_send, 0, Qt.AlignTop)
+        second_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
         layout.addLayout(second_row)
@@ -1299,13 +1313,20 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 交互
     def input_root(self) -> Path:
-        """打开视频对话框从哪儿开：当前视频的上一层目录优先，其次上次用过的目录。"""
+        """打开视频对话框从哪儿开。
+
+        你在「AI 选项」里明确指了输入目录（不是默认的 input/）就听你的；
+        没指过才按老规矩：当前视频所在目录 -> 上次用过的目录 -> input/。
+        """
+        configured = self.cfg.path("input_dir")
+        if configured.is_dir() and configured != (self.cfg.root / "input"):
+            return configured
         if self.video_path is not None and self.video_path.parent.is_dir():
             return self.video_path.parent
         last = self.settings.get("last_video_dir")
         if last and Path(last).is_dir():
             return Path(last)
-        return self.cfg.path("input_dir") if self.cfg.path("input_dir").is_dir() else self.cfg.root
+        return configured if configured.is_dir() else self.cfg.root
 
     def on_open(self) -> None:
         patterns = " ".join(f"*{s}" for s in sorted(VIDEO_SUFFIXES))
@@ -1583,8 +1604,9 @@ class MainWindow(QMainWindow):
         else:
             text, mood = f":{port} 等待配对", "busy"
         if str(self.cfg.bridge.get("mode") or "api") == "api":
-            # 接口直连根本不用扩展，这时候显示扩展在不在线只会让人误会
-            text, mood = f"接口直连 {self.cfg.bridge.get('api_model') or ''}".strip(), "ok"
+            # 接口直连根本不用扩展，这时候显示扩展在不在线只会让人误会。
+            # 模型名在「AI 选项」里看得到，不用挤在药丸上
+            text, mood = "接口直连", "ok"
         self.set_bridge_pill(text, mood)
         self.lbl_bridge.setToolTip(f"Bridge {state['url']}\n"
                                    f"扩展选项页的地址填这个，令牌点「配对扩展」自动领取\n"
@@ -2041,6 +2063,10 @@ class MainWindow(QMainWindow):
             else:
                 self.append_log("重新加载结果")
                 self.load_results()
+                # 「自动」勾着就顺手把文本发给 AI，回来的 JSON 再按 auto_clip 开剪
+                if label == "分析" and self.chk_auto_ai.isChecked():
+                    self.append_log("[自动] 分析完了，直接发给 AI")
+                    self.on_bridge_send()
         else:
             self.lbl_stage.setText("失败")
             self.append_log(f"{label}失败：{message}")

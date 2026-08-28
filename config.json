@@ -105,7 +105,6 @@
       "en": "Hello, everyone! Today, we're doing a challenge. If this is pink, you have to pay. Really? Yes, of course. That's crazy!",
       "zh": "大家好，今天我们来做个挑战。如果是粉色的，你得请客。真的吗？当然是真的。太夸张了！"
     },
-
     "punctuation": {
       "enabled": true,
       "model_id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
@@ -141,10 +140,6 @@
       "min_silhouette_sentence": 0.33,
       "min_cluster_share": 0.05
     },
-
-
-
-
     "emotion": {
       "enabled": true,
       "model_id": "iic/emotion2vec_plus_large",
@@ -194,24 +189,18 @@
     "enabled": true,
     "port": 5998,
     "port_fallbacks": 0,
-
     "mode": "extension",
     "api_key": "",
     "api_key_env": "GEMINI_API_KEY",
     "api_model": "gemini-2.5-flash",
     "api_timeout": 300,
-
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
     "upload_mode": "auto",
     "focus_browser": false,
     "side_window": true,
-
-
-
     "keep_merged_file": false,
-
     "message": "Follow the rules in prm_en.txt and analyze the attached *_merged.txt. Reply with the JSON object only.",
     "auto_clip": true
   },
