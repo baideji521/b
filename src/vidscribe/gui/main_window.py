@@ -1058,6 +1058,12 @@ class MainWindow(QMainWindow):
         self.refresh_timeline_table()
         self.refresh_speech_list()
 
+    def has_translation(self) -> bool:
+        """界面上有没有任何译文：决定「翻译」是重新跑模型还是只切换显示。"""
+        if any(s.get("text_translated") for s in self.speech):
+            return True
+        return any(e.get("visual_translated") for e in self.timeline)
+
     def speech_display(self, seg: dict[str, Any]) -> str:
         if self.show_translated and seg.get("text_translated"):
             return str(seg["text_translated"])
@@ -2482,6 +2488,17 @@ class MainWindow(QMainWindow):
 def launch(cfg: Config, video: str | Path | None = None) -> int:
     app = QApplication(sys.argv[:1])
     theme.apply(app)
+
+    # PyQt5 里槽函数抛出的异常会直接 abort 整个进程——界面「闪退」，什么都看不到。
+    # 接住它：弹窗给出类型、消息和调用栈，界面继续开着。
+    def on_error(kind, value, trace) -> None:
+        import traceback  # noqa: PLC0415
+
+        detail = "".join(traceback.format_exception(kind, value, trace))
+        print(detail, file=sys.stderr)
+        QMessageBox.critical(None, "出错了", f"{kind.__name__}: {value}\n\n{detail[-1500:]}")
+
+    sys.excepthook = on_error
     window = MainWindow(cfg, Path(video) if video else None)
     window.show()
     return app.exec_()
