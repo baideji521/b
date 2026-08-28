@@ -811,7 +811,6 @@ class MainWindow(QMainWindow):
                                      "输出到导出目录，文件名带 _高光时刻")
 
         self.btn_highlight.clicked.connect(self.on_highlight)
-        export_row.addWidget(self.btn_highlight)
         # 选目录和打开目录挨着放在第一行：先选，再打开
         top.addWidget(self.btn_export_dir)
         top.addWidget(self.btn_outdir)
@@ -832,9 +831,9 @@ class MainWindow(QMainWindow):
         self.btn_bridge_stop = QPushButton("停止 AI")
         self.btn_bridge_stop.setToolTip("取消正在跑的 AI 任务")
         self.btn_bridge_stop.clicked.connect(self.on_bridge_stop)
-        export_row.addWidget(self._section("AI 对接"))
-        for w in (self.lbl_bridge, self.btn_bridge_pair, self.btn_bridge_send,
-                  self.btn_bridge_stop):
+        # 第二行按用起来的顺序排：发给 AI -> 停止 -> 剪辑高光。
+        # 端口状态和配对按钮是扩展那边的杂事，钉到最右边，跟第一行的「高级选项」对齐
+        for w in (self.btn_bridge_send, self.btn_bridge_stop, self.btn_highlight):
             export_row.addWidget(w)
 
 
@@ -982,7 +981,13 @@ class MainWindow(QMainWindow):
         first_row.addWidget(flow.wrap(top), 1)
         first_row.addWidget(self.btn_advanced, 0, Qt.AlignTop)
         layout.addLayout(first_row)
-        layout.addWidget(flow.wrap(export_row))
+        # 第二行同样的结构：左边动作，右边扩展状态 + 配对，两行右侧对齐
+        second_row = QHBoxLayout()
+        second_row.setContentsMargins(0, 0, 0, 0)
+        second_row.addWidget(flow.wrap(export_row), 1)
+        second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
+        second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
+        layout.addLayout(second_row)
         layout.addWidget(vertical, 1)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
