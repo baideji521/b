@@ -27,6 +27,7 @@ from PyQt5.QtWidgets import (
     QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QGridLayout,
     QHBoxLayout,
     QHeaderView,
@@ -603,6 +604,31 @@ class MainWindow(QMainWindow):
         gui_settings.save(self.cfg, self.settings)
 
 
+    # ------------------------------------------------------------- 高级选项
+    def on_advanced(self) -> None:
+        """高级选项对话框：视觉模型、声纹、过滤、自动翻译、两路情绪。
+
+        里面放的就是原来主界面上那几个控件本身（第一次打开时 reparent 进来），
+        所以已有的信号连接和存盘逻辑一行都不用改，勾选状态照旧实时写 gui_settings.json。
+        """
+        if self._advanced_dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("高级选项")
+            form = QFormLayout(dialog)
+            form.addRow("视觉模型", self.cmb_model)
+            form.addRow("声纹", self.cmb_speaker)
+            form.addRow("重要性", self.cmb_importance)
+            form.addRow("画面事件", self.spin_conf)
+            form.addRow(self.chk_auto_translate)
+            form.addRow(self.chk_emotion_audio)
+            form.addRow(self.chk_emotion_visual)
+            buttons = QDialogButtonBox(QDialogButtonBox.Close)
+            buttons.rejected.connect(dialog.reject)
+            form.addRow(buttons)
+            self._advanced_dialog = dialog
+        self._advanced_dialog.show()
+        self._advanced_dialog.raise_()
+
     # ------------------------------------------------------------- 导出目录
     def export_root(self) -> Path:
         """导出文件默认放哪儿：用户选过就用它，没选过就用当前视频的结果目录。"""
@@ -765,18 +791,15 @@ class MainWindow(QMainWindow):
         self.spin_conf.valueChanged.connect(self.refresh_timeline_table)
         self.spin_conf.valueChanged.connect(self.save_settings)
 
-        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_outdir):
+        # 不常改的都收进「高级选项」对话框，主界面只留每天要点的
+        self.btn_advanced = QPushButton("高级选项")
+        self.btn_advanced.setToolTip("视觉模型、声纹、重要性/置信度过滤、分析后自动翻译、两路情绪开关")
+        self.btn_advanced.clicked.connect(self.on_advanced)
+        self._advanced_dialog: QDialog | None = None
+
+        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze,
+                  self.btn_advanced, self.btn_outdir):
             top.addWidget(w)
-        top.addWidget(self.chk_auto_translate)
-        top.addWidget(self.chk_emotion_audio)
-        top.addWidget(self.chk_emotion_visual)
-        top.addWidget(self._section("视觉模型"))
-        top.addWidget(self.cmb_model)
-        top.addWidget(self._section("声纹"))
-        top.addWidget(self.cmb_speaker)
-        top.addWidget(self._section("重要性"))
-        top.addWidget(self.cmb_importance)
-        top.addWidget(self.spin_conf)
 
         # 导出行：三个文本导出挪到播放器右键里了，这里只留剪辑和目录
         export_row = FlowLayout(spacing=8)
