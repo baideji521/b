@@ -358,51 +358,83 @@ function pageUploadSettled() {
 
 
 /**
- * 附件挂稳之后发送：有那句话就先填进去，然后模仿按回车——手动就是这么发的，
-
- * 不去猜哪个是发送按钮（按钮 aria-label 一变就点错，回车不会）。
+ * 附件挂稳之后发送。
+ *
+ * 两个坑都在「页面没有键盘焦点」上：
+ * 1. execCommand("insertText") 要求文档有焦点，后台窗口里直接返回 false，
+ *    所以没焦点时改成写 DOM + 派发 InputEvent，Angular 照样收得到。
+ * 2. 回车事件在没焦点的页面常被忽略，所以优先点发送按钮（点击不需要焦点）。
+ * 按钮是 Angular 按输入内容动态启用的，第一次拿到可能还是 disabled，所以要重试几次。
+ * 返回值带上诊断字段，日志里能看出到底卡在哪一步。
  */
-function pageSendMessage(selector, text) {
+async function pageSendMessage(selector, text) {
   const editor = document.querySelector(selector);
   if (!editor) return { ok: false, error: "输入框不见了" };
-  editor.focus();
-
+  const nap = (ms) => new Promise((done) => setTimeout(done, ms));
+  const focused = document.hasFocus();
   const message = typeof text === "string" ? text : "";
+  const content = () => (editor.tagName === "TEXTAREA" ? editor.value : editor.textContent || "");
+
   if (message) {
+    editor.focus();
     if (editor.tagName === "TEXTAREA") {
       editor.value = message;
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
     } else {
-      // Quill 这类富文本要靠 beforeinput/input 才认，直接改 innerText 模型不更新，
-      // 所以优先用 execCommand 走浏览器自己的插入路径
       let typed = false;
-      try {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        typed = document.execCommand("insertText", false, message);
-      } catch {}
-      if (!typed) {
-        editor.innerText = message;
-        editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
+      if (focused) {
+        try {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(editor);
+          selection.removeAllRanges();
+          selection.addRange(range);
+          typed = document.execCommand("insertText", false, message);
+        } catch {}
+      }
+      if (!typed || !content().includes(message.slice(0, 12))) {
+        // 富文本控件靠 input 事件同步自己的模型，光改 DOM 不发事件按钮不会亮
+        editor.textContent = message;
+        editor.dispatchEvent(new InputEvent("beforeinput", {
+          bubbles: true, cancelable: true, inputType: "insertText", data: message,
+        }));
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true, cancelable: false, inputType: "insertText", data: message,
+        }));
       }
     }
   }
 
-  // 后台标签页里回车常常不生效（页面没焦点，键盘事件被当噪音），
-  // 所以优先点发送按钮——点击不需要焦点；找不到按钮才退回模拟回车。
-  const send = Array.from(document.querySelectorAll("button, [role='button']")).find((b) => {
-    const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} `
-      + `${b.className || ""}`;
-    if (!/发送|send|提交|submit/i.test(label)) return false;
-    if (/停止|stop|取消|cancel/i.test(label)) return false;
-    return !b.disabled && b.getAttribute("aria-disabled") !== "true";
-  });
-  if (send) {
-    send.click();
-    return { ok: true, sent: "button", typed: message.length };
+  const findSend = () => {
+    const buttons = Array.from(document.querySelectorAll(
+      "button.send-button, button, [role='button']"
+    ));
+    return buttons.find((b) => {
+      const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} `
+        + `${b.className || ""} ${b.querySelector("mat-icon")?.getAttribute("fonticon") || ""}`;
+      if (!/发送|send|提交|submit/i.test(label)) return false;
+      return !/停止|stop|取消|cancel|录音|mic/i.test(label);
+    }) || null;
+  };
+
+  let button = null;
+  let disabled = false;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    button = findSend();
+    if (button) {
+      disabled = button.disabled || button.getAttribute("aria-disabled") === "true";
+      if (!disabled) {
+        button.click();
+        await nap(300);
+        return {
+          ok: true, sent: "button", typed: message.length, focused,
+          editorLen: content().trim().length, attempts: attempt,
+        };
+      }
+      // 按钮还灰着：再补一次 input 事件催 Angular 重算状态
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
+    }
+    await nap(250);
   }
 
   const key = {
@@ -412,7 +444,12 @@ function pageSendMessage(selector, text) {
   editor.dispatchEvent(new KeyboardEvent("keydown", key));
   editor.dispatchEvent(new KeyboardEvent("keypress", key));
   editor.dispatchEvent(new KeyboardEvent("keyup", key));
-  return { ok: true, sent: "enter", typed: message.length };
+  await nap(300);
+  return {
+    ok: true, sent: "enter", typed: message.length, focused,
+    editorLen: content().trim().length,
+    button: button ? (disabled ? "灰着" : "没点上") : "没找到",
+  };
 }
 
 
@@ -426,9 +463,13 @@ function pageReadAnswer() {
     ".markdown",
   ];
   let nodes = [];
+  let used = "";
   for (const selector of groups) {
     nodes = Array.from(document.querySelectorAll(selector));
-    if (nodes.length) break;
+    if (nodes.length) {
+      used = selector;
+      break;
+    }
   }
   const last = nodes[nodes.length - 1] || null;
   // 后台标签页不做布局时 innerText 是空的，退回 textContent
@@ -439,8 +480,11 @@ function pageReadAnswer() {
     const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""}`;
     return /stop|停止/i.test(label);
   });
-  return { text, streaming, blocks: nodes.length };
+  // 一个块都没有时，报一下整页文本长度：0 说明页面被冻结/还没渲染，不是选择器写错
+  const bodyLen = (document.body?.textContent || "").length;
+  return { text, streaming, blocks: nodes.length, used, bodyLen };
 }
+
 
 // ---------------------------------------------------------------------------
 // 标签页操作
@@ -827,7 +871,10 @@ async function handleAiTask(task) {
     if (!sent?.ok) {
       return finish({ status: "failed", error: `发送失败：${sent?.error || "未知原因"}` });
     }
-    log("已发送", sent.sent);
+    log("已发送", sent.sent, JSON.stringify({
+      typed: sent.typed, editorLen: sent.editorLen, focused: sent.focused,
+      attempts: sent.attempts, button: sent.button,
+    }));
 
     // 等回答：文本连续 STABLE_MS 不变且没有「停止」按钮就算写完
     let text = "";
@@ -844,7 +891,10 @@ async function handleAiTask(task) {
         if (!resent && Date.now() - sentAt > RESEND_AFTER_MS) {
           resent = true;
           const again = await runInTab(tabId, pageSendMessage, [editor.selector, ""]).catch(() => null);
-          log("没反应，再发一次", again?.sent || "失败");
+          log("没反应，再发一次", again?.sent || "失败", JSON.stringify({
+            blocks: snapshot?.blocks, baseline: baselineBlocks,
+            bodyLen: snapshot?.bodyLen, used: snapshot?.used,
+          }));
         }
         if (await cancelled("waiting_answer", "等新回答出现")) return;
         continue;
@@ -863,7 +913,15 @@ async function handleAiTask(task) {
     }
 
     if (!text) {
-      return finish({ status: "failed", error: "AI 没有产出可读的回答" });
+      // 把最后一眼的现场情况带上：blocks=0 而 bodyLen>0 说明选择器没命中，
+      // bodyLen=0 说明这个标签页压根没渲染（被冻结了）
+      const last = await runInTab(tabId, pageReadAnswer).catch(() => null);
+      const detail = JSON.stringify({
+        blocks: last?.blocks, baseline: baselineBlocks,
+        bodyLen: last?.bodyLen, used: last?.used, streaming: last?.streaming,
+      });
+      log("读不到回答", detail);
+      return finish({ status: "failed", error: `AI 没有产出可读的回答 ${detail}` });
     }
     const parsed = extractJson(text);
     await reportProgress(taskId, "reporting", parsed ? "回传 JSON" : "回答里没有 JSON，原文回传");
