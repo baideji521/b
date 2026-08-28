@@ -2248,6 +2248,8 @@ class MainWindow(QMainWindow):
         act_del = menu.addAction("删除")
         act_clear = menu.addAction("清空")
         menu.addSeparator()
+        act_tr = menu.addAction("回译（切回原文）" if self.show_translated else "翻译")
+        menu.addSeparator()
         act_txt = menu.addAction("导出（SRT 剪映可用 / txt）")
         menu.addSeparator()
         self._add_size_actions(menu.addMenu("画面列宽 / 行高"))
@@ -2268,6 +2270,8 @@ class MainWindow(QMainWindow):
             self.delete_entries()
         elif chosen is act_clear:
             self.clear_entries()
+        elif chosen is act_tr:
+            self.on_translate()
         elif chosen is act_txt:
             self.export_text("events")
 
