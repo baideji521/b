@@ -567,8 +567,11 @@ async function handleAiTask(task) {
       return finish({ status: "failed", error: "找不到输入框，可能没登录或页面结构变了" });
     }
 
-    // 先记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上
+    // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
+    // 两个文件是一起拖进去的，所以只要认出 prm_en 那个就说明都进去了，
+    // 第二个名字太长会被截断成「2026082619....」，本来就认不准，不拿它当门槛。
     const names = (payloads.length ? payloads : fileList).map((f) => f.name);
+    const probe = names.slice(0, 1);
 
     const baselines = {};
     let chipsBase = 0;
@@ -577,6 +580,7 @@ async function handleAiTask(task) {
       baselines[name] = Number(seen?.count || 0);
       chipsBase = Math.max(chipsBase, Number(seen?.chips || 0));
     }
+
 
 
     let autoDone = false;
@@ -620,7 +624,7 @@ async function handleAiTask(task) {
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
         // 卡片可能晚一点才冒出来，升级到下一种方式之前先复查一遍，别白折腾
-        if (p > 0 && await waitCards(names, 600)) {
+        if (p > 0 && await waitCards(probe, 600)) {
           autoDone = true;
           break;
         }
@@ -637,7 +641,7 @@ async function handleAiTask(task) {
               log("塞入失败", plan.mode, attached?.error || "未知原因");
               continue;
             }
-            autoDone = await waitCards(names, ATTACH_VERIFY_MS);
+            autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
           } else {
             autoDone = true;
             for (const item of payloads) {
@@ -647,20 +651,20 @@ async function handleAiTask(task) {
                 autoDone = false;
                 break;
               }
-              if (!await waitCards([item.name], ATTACH_VERIFY_MS)) {
-                autoDone = false;
-                break;
-              }
+              await sleep(1200);
             }
+            if (autoDone) autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
           }
+
         } catch (error) {
           return finish({ status: "failed",
                           error: `${error?.message || error}（可能不收 txt 或文件太大）` });
         }
         if (autoDone) {
-          log(`${payloads.length} 个文件都挂上了`, `方式=${plan.mode}`, plan.batch ? "一次拖" : "逐个拖");
+          log(`${payloads.length} 个文件塞完了`, `方式=${plan.mode}`, plan.batch ? "一次拖" : "逐个拖");
           break;
         }
+
         log("换下一种方式", plan.mode, plan.batch ? "一次拖" : "逐个拖");
       }
     }
@@ -682,13 +686,14 @@ async function handleAiTask(task) {
       for (;;) {
         const missing = [];
         let chipsNow = 0;
-        for (const name of names) {
+        // 一起选的，认出第一个就够；第二个名字会被截断，认不准
+        for (const name of probe) {
           const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
           chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
           if (Number(check?.count || 0) <= baselines[name]) missing.push(name);
         }
         if (!missing.length) {
-          log("两个文件都挂上了");
+          log("文件已经在页面上了");
           break;
         }
         // 名字截断认不出时用类型角标兜底，别把已经传好的又叫你传一遍
@@ -696,6 +701,7 @@ async function handleAiTask(task) {
           log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`);
           break;
         }
+
 
         if (Date.now() > manualDeadline) {
           return finish({ status: "failed",
