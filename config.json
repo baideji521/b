@@ -219,8 +219,6 @@
     "max_auto_retries": 3,
     "keep_models_loaded": true,
     "unload_speech_before_visual": true,
-    "auto_clean_cache": true,
-    "cache_cleanup_interval_days": 3,
     "cache_max_age_days": 3
   },
   "mirrors": {

@@ -186,9 +186,8 @@ DEFAULTS: dict[str, Any] = {
         "keep_models_loaded": True,
         # 语音跑完就释放 whisper 显存再加载视觉模型（12GB 卡上必须开，否则会换页）
         "unload_speech_before_visual": True,
-        # 缓存（cache/ 断点与预览音频 + logs/ 日志）：开软件时检查，超过 3 天自动清一次
-        "auto_clean_cache": True,
-        "cache_cleanup_interval_days": 3,
+        # 缓存（cache/ 断点与预览音频 + logs/ 日志）：开软件只扫一眼报现状，绝不自动删。
+        # 这个天数只用来在清单里标"多久没动过"，清理都从「高级选项 -> 缓存管理」手动来
         "cache_max_age_days": 3,
     },
     "mirrors": {
@@ -303,3 +302,21 @@ class Config:
 
     def to_dict(self) -> dict[str, Any]:
         return copy.deepcopy(self.data)
+
+    def save_patch(self, patch: dict[str, Any], config_file: str | Path | None = None) -> Path:
+        """把界面上改的几项深度合并回 config.json，并同步到内存里的 self.data。
+
+        只写传进来的那几个键，文件里其它内容（注释性字段、手改过的值）原样保留——
+        所以是"读盘 -> 合并 -> 写回"，不是拿 self.data 整体覆盖（那会把默认值也写进去）。
+        """
+        path = Path(config_file) if config_file else self.root / "config.json"
+        on_disk: dict[str, Any] = {}
+        if path.is_file():
+            with open(path, "r", encoding="utf-8") as fh:
+                on_disk = json.load(fh)
+        _deep_update(on_disk, patch)
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(on_disk, fh, ensure_ascii=False, indent=2)
+            fh.write("\n")
+        _deep_update(self.data, patch)
+        return path

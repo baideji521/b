@@ -53,6 +53,21 @@ QMainWindow, QDialog {{ background: {BG}; }}
 QLabel {{ background: transparent; color: {TEXT}; }}
 QLabel[role="section"] {{ color: {TEXT_DIM}; font-weight: 600; padding: 2px 0 4px 2px; }}
 QLabel[role="hint"] {{ color: {TEXT_DIM}; }}
+/* 状态药丸：Bridge 端口 + 在线状态。灰底圆角，颜色跟着状态走，
+   一眼能看出"连上了/没连上"，不用去读小字。state 属性由代码 setProperty 切换，
+   切完要 unpolish/polish 才重绘。 */
+QLabel[role="pill"] {{
+    background: {PANEL};
+    border: 1px solid {LINE};
+    border-radius: 11px;
+    padding: 4px 12px;
+    color: {TEXT_DIM};
+    font-size: 12px;
+    font-weight: 600;
+}}
+QLabel[role="pill"][state="ok"] {{ color: {PLAYING}; border-color: #3f6f55; }}
+QLabel[role="pill"][state="busy"] {{ color: {ACCENT}; border-color: {ACCENT_DIM}; }}
+QLabel[role="pill"][state="off"] {{ color: #dd8b8b; border-color: #6f4040; }}
 
 QCheckBox {{ background: transparent; color: {TEXT}; spacing: 6px; }}
 QCheckBox::indicator {{

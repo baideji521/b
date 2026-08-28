@@ -329,13 +329,11 @@ def cmd_cache(cfg: Config, args: argparse.Namespace) -> int:
     cache_mod.migrate_layout(cfg)  # 顺手把旧的 work/<视频名>/ 布局搬过来
     days = float(args.days if args.days is not None
                  else cfg.runtime.get("cache_max_age_days", 3))
-    interval = float(cfg.runtime.get("cache_cleanup_interval_days", 3))
-    info = cache_mod.status(cfg, interval_days=interval, max_age_days=days)
+    info = cache_mod.status(cfg, max_age_days=days)
     logger.info("%s", cache_mod.summary_line(info))
-    logger.info("日志目录 %s；上次清理 %s（%s 天前）；本次是否到期：%s",
+    logger.info("日志目录 %s；上次清理 %s（%s 天前）",
                 info["log_dir"], info["last_cleanup"] or "从未",
-                info["days_since_cleanup"] if info["days_since_cleanup"] is not None else "-",
-                "是" if info["due"] else "否")
+                info["days_since_cleanup"] if info["days_since_cleanup"] is not None else "-")
     if info["stale_names"]:
         logger.info("超过 %g 天的缓存：%s", days, "，".join(info["stale_names"][:20])
                     + (" ..." if len(info["stale_names"]) > 20 else ""))
@@ -641,7 +639,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_cache.add_argument("--clean", action="store_true", help="真的删除过期缓存")
     p_cache.add_argument("--dry-run", action="store_true", help="配合 --clean：只列出要删什么")
     p_cache.add_argument("--days", type=float, default=None,
-                         help="多少天没动过算过期，默认取 runtime.cache_max_age_days（3）")
+                         help="多少天没动过算过期，默认取 runtime.cache_max_age_days（3）。"
+                              "只影响 --clean 删哪些，不加 --clean 什么都不删")
     p_cache.set_defaults(func=cmd_cache)
 
     p_hl = sub.add_parser("highlight", help="按 AI JSON 剪高光片段（起剪 / 冻帧 / 收尾三个时间严格照做）")

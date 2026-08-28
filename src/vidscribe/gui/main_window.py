@@ -622,12 +622,30 @@ class MainWindow(QMainWindow):
             form.addRow(self.chk_auto_translate)
             form.addRow(self.chk_emotion_audio)
             form.addRow(self.chk_emotion_visual)
+            btn_cache = QPushButton("缓存管理…")
+            btn_cache.setToolTip("看每份缓存占多少、多久没动过，自己挑着删。缓存不再自动清理")
+            btn_cache.clicked.connect(self.on_cache_manager)
+            form.addRow("缓存", btn_cache)
             buttons = QDialogButtonBox(QDialogButtonBox.Close)
             buttons.rejected.connect(dialog.reject)
             form.addRow(buttons)
             self._advanced_dialog = dialog
         self._advanced_dialog.show()
         self._advanced_dialog.raise_()
+
+    def on_cache_manager(self) -> None:
+        """缓存管理：列出每份缓存，勾选删除。开软件不再自动删任何东西。"""
+        from .cache_dialog import CacheDialog  # noqa: PLC0415
+
+        CacheDialog(self.cfg, self, log=self.append_log).exec_()
+
+    def on_ai_options(self) -> None:
+        """AI 选项：走接口还是网页版扩展、key、模型、端口、扩展上传方式。"""
+        from .ai_options import AiOptionsDialog  # noqa: PLC0415
+
+        dialog = AiOptionsDialog(self.cfg, self, log=self.append_log)
+        if dialog.exec_() == QDialog.Accepted:
+            self.refresh_bridge_label()
 
     # ------------------------------------------------------------- 导出目录
     def export_root(self) -> Path:
@@ -665,21 +683,15 @@ class MainWindow(QMainWindow):
 
 
     def check_cache(self) -> None:
-        """开软件先看一眼缓存：固定目录 cache/ + logs/，超过 3 天的自动清掉。
+        """开软件只看一眼缓存现状，一个字节都不删。
 
-        只删缓存（断点、预览音频、日志），output/ 的分析结果和 models/ 的权重不碰。
+        清理都是手动的：「高级选项 -> 缓存管理」里自己挑，或者跑 `python run.py cache --clean`。
         """
         from .. import cache as cache_mod  # noqa: PLC0415
 
-        rt = self.cfg.runtime
-        interval = float(rt.get("cache_cleanup_interval_days", 3))
-        max_age = float(rt.get("cache_max_age_days", 3))
+        max_age = float(self.cfg.runtime.get("cache_max_age_days", 3))
         try:
-            if rt.get("auto_clean_cache", True):
-                info = cache_mod.check_on_start(self.cfg, interval_days=interval,
-                                                max_age_days=max_age)
-            else:
-                info = cache_mod.status(self.cfg, interval_days=interval, max_age_days=max_age)
+            info = cache_mod.scan_on_start(self.cfg, max_age_days=max_age)
         except Exception as exc:  # 缓存检查失败不该挡着用软件
             self.append_log(f"缓存检查失败（不影响使用）：{type(exc).__name__}: {exc}")
             return
@@ -818,11 +830,16 @@ class MainWindow(QMainWindow):
         # --- AI 对接（浏览器扩展 Bridge）---
         # 合并导出 + 提示词交给扩展，扩展在浏览器里问网页版 AI，回传的 JSON 直接进剪辑高光
         self.lbl_bridge = QLabel("未启动")
+        self.lbl_bridge.setProperty("role", "pill")  # 药丸样式，见 theme.QSS
         self.lbl_bridge.setToolTip("本机 Bridge 服务状态。扩展轮询它领任务")
         self.btn_bridge_pair = QPushButton("配对扩展")
         self.btn_bridge_pair.setToolTip("打开 120 秒配对窗口，扩展会自动把令牌领走；"
                                        "扩展选项页里的地址要填这里显示的端口")
         self.btn_bridge_pair.clicked.connect(self.on_bridge_pair)
+        self.btn_ai_options = QPushButton("AI 选项")
+        self.btn_ai_options.setToolTip("走接口还是网页版扩展、API key、模型、Bridge 端口、"
+                                      "扩展上传方式和自动开剪")
+        self.btn_ai_options.clicked.connect(self.on_ai_options)
         self.btn_bridge_send = QPushButton("发给 AI")
         self.btn_bridge_send.setToolTip("把合并导出的文本 + 高光筛选提示词发给 AI，"
                                         "回来的 JSON 直接开剪。默认走 Gemini 接口（不开浏览器），"
@@ -987,6 +1004,7 @@ class MainWindow(QMainWindow):
         second_row.addWidget(flow.wrap(export_row), 1)
         second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
         second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
+        second_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
         layout.addLayout(second_row)
         layout.addWidget(vertical, 1)
         self.setCentralWidget(central)
@@ -1526,7 +1544,7 @@ class MainWindow(QMainWindow):
             server.start()
         except OSError as exc:
             self.append_log(f"[AI 对接] Bridge 起不来：{exc}")
-            self.lbl_bridge.setText("端口被占")
+            self.set_bridge_pill("端口被占", "off")
             return
         self.bridge = server
         if self._bridge_token != server.token:
@@ -1547,25 +1565,38 @@ class MainWindow(QMainWindow):
         self.bridge = None
 
     def refresh_bridge_label(self) -> None:
+        """刷状态药丸：文字 + 颜色（绿=通了，琥珀=忙/等配对，红=没通）。"""
         if self.bridge is None:
-            self.lbl_bridge.setText("未启动")
+            self.set_bridge_pill("未启动", "off")
             return
         state = self.bridge.state()
         port = state["url"].rsplit(":", 1)[-1]
         task = state["task"]
         if task:
-            text = f":{port} 任务中 {task['stage'] or task['status']}"
+            text, mood = f":{port} 任务中 {task['stage'] or task['status']}", "busy"
         elif state["pair_window_left"] > 0:
-            text = f":{port} 配对窗口 {state['pair_window_left']:.0f}s"
+            text, mood = f":{port} 配对窗口 {state['pair_window_left']:.0f}s", "busy"
         elif state["extension_online"]:
-            text = f":{port} 扩展在线"
+            text, mood = f":{port} 扩展在线", "ok"
         elif state["paired_at"]:
-            text = f":{port} 扩展离线"
+            text, mood = f":{port} 扩展离线", "off"
         else:
-            text = f":{port} 等待配对"
-        self.lbl_bridge.setText(text)
+            text, mood = f":{port} 等待配对", "busy"
+        if str(self.cfg.bridge.get("mode") or "api") == "api":
+            # 接口直连根本不用扩展，这时候显示扩展在不在线只会让人误会
+            text, mood = f"接口直连 {self.cfg.bridge.get('api_model') or ''}".strip(), "ok"
+        self.set_bridge_pill(text, mood)
         self.lbl_bridge.setToolTip(f"Bridge {state['url']}\n"
-                                   f"扩展选项页的地址填这个，令牌点「配对扩展」自动领取")
+                                   f"扩展选项页的地址填这个，令牌点「配对扩展」自动领取\n"
+                                   f"走哪条路、端口、模型都在「AI 选项」里改")
+
+    def set_bridge_pill(self, text: str, mood: str) -> None:
+        """药丸文字 + 配色。改了 state 属性必须 unpolish/polish，否则颜色不变。"""
+        self.lbl_bridge.setText(text)
+        if self.lbl_bridge.property("state") != mood:
+            self.lbl_bridge.setProperty("state", mood)
+            self.lbl_bridge.style().unpolish(self.lbl_bridge)
+            self.lbl_bridge.style().polish(self.lbl_bridge)
 
     def on_bridge_pair(self) -> None:
         """开一个 120 秒配对窗口：扩展轮询到就自动把令牌领走，不用手抄。"""

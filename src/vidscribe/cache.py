@@ -1,4 +1,4 @@
-"""缓存目录：固定位置、统一命名、超过 3 天自动清一次。
+"""缓存目录：固定位置、统一命名、只在你说删的时候才删。
 
 目录结构（`config.json` 的 `paths.cache_dir`，默认 `<项目>/cache`）：
 
@@ -17,8 +17,9 @@
 
 哪些**绝不**碰：`output/`（分析结果，是交付物）、`models/`（几十 GB 权重）、`input/`（原始视频）。
 
-清理策略：按最后修改时间，超过 `max_age_days` 天的整份删掉；
-距上次清理不满 `interval_days` 天就跳过。
+不会自动删任何东西：开软件只扫一眼报个现状。清理都是手动触发的——
+GUI 的「高级选项 -> 缓存管理」，或 `python run.py cache --clean`。
+`max_age_days` 只用来在清单里标出"多久没动过"，不是自动删除的开关。
 """
 
 from __future__ import annotations
@@ -40,7 +41,6 @@ CLEANUP_FILE = "cleanup.json"
 LEGACY_CLEANUP_FILE = ".cache_state.json"
 LEGACY_DIR_NAME = "work"
 SLUG_MAX_CHARS = 40
-DEFAULT_INTERVAL_DAYS = 3.0
 DEFAULT_MAX_AGE_DAYS = 3.0
 DAY = 86400.0
 
@@ -233,6 +233,46 @@ def _entries(cfg: Any) -> list[dict[str, Any]]:
     return items
 
 
+def entries(cfg: Any) -> list[dict[str, Any]]:
+    """给界面用的缓存清单：每项带 path / kind / name / bytes / mtime / age_days。
+
+    只读。删除走 remove()，那边有"必须在缓存目录内"的护栏。
+    """
+    return _entries(cfg)
+
+
+def remove(cfg: Any, paths: list[str | Path]) -> dict[str, Any]:
+    """按路径删指定的几份缓存（界面上勾选的那些）。
+
+    和 cleanup() 共用同一条护栏：路径必须真的在 cache/videos 或 logs 里面，
+    否则一概不动——避免手滑把 output/ 或视频原文件删了。
+    """
+    roots = [videos_root(cache_dir(cfg)), log_dir(cfg)]
+    removed: list[str] = []
+    failed: list[str] = []
+    freed = 0
+    for raw in paths:
+        path = Path(raw)
+        if not any(_inside(path, root) for root in roots):
+            logger.warning("跳过不在缓存目录内的路径：%s", path)
+            failed.append(f"{path.name}: 不在缓存目录内")
+            continue
+        if not path.exists():
+            continue
+        size = _size_of(path)
+        try:
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        except Exception as exc:
+            failed.append(f"{path.name}: {type(exc).__name__}")
+            continue
+        removed.append(path.name)
+        freed += size
+    return {"removed": removed, "failed": failed, "freed_bytes": freed}
+
+
 def read_state(cfg: Any) -> dict[str, Any]:
     path = cache_dir(cfg) / CLEANUP_FILE
     if not path.is_file():
@@ -254,9 +294,8 @@ def write_state(cfg: Any, state: dict[str, Any]) -> None:
         logger.warning("写缓存清理记录失败：%s", exc)
 
 
-def status(cfg: Any, interval_days: float = DEFAULT_INTERVAL_DAYS,
-           max_age_days: float = DEFAULT_MAX_AGE_DAYS) -> dict[str, Any]:
-    """扫描缓存：总量、过期量、上次清理时间、是否该清了。只读，不删东西。"""
+def status(cfg: Any, max_age_days: float = DEFAULT_MAX_AGE_DAYS) -> dict[str, Any]:
+    """扫描缓存：总量、多久没动过的有多少、上次手动清理是什么时候。只读，不删东西。"""
     items = _entries(cfg)
     state = read_state(cfg)
     last = float(state.get("last_cleanup_ts") or 0.0)
@@ -273,9 +312,6 @@ def status(cfg: Any, interval_days: float = DEFAULT_INTERVAL_DAYS,
         "stale_names": [it["name"] for it in stale],
         "last_cleanup": state.get("last_cleanup"),
         "days_since_cleanup": round((now - last) / DAY, 2) if last else None,
-        # 从没清过也算到期：第一次打开就把陈旧缓存收掉
-        "due": (last <= 0.0) or (now - last) >= interval_days * DAY,
-        "interval_days": interval_days,
         "max_age_days": max_age_days,
     }
 
@@ -320,37 +356,17 @@ def cleanup(cfg: Any, max_age_days: float = DEFAULT_MAX_AGE_DAYS,
             "dry_run": dry_run, "max_age_days": max_age_days}
 
 
-def check_on_start(cfg: Any, interval_days: float = DEFAULT_INTERVAL_DAYS,
-                   max_age_days: float = DEFAULT_MAX_AGE_DAYS) -> dict[str, Any]:
-    """开软件时调一次：先把目录布局规范化，再报告现状，到期就清。"""
+def scan_on_start(cfg: Any, max_age_days: float = DEFAULT_MAX_AGE_DAYS) -> dict[str, Any]:
+    """开软件时调一次：把目录布局规范化，然后报告现状。一个字节都不删。"""
     migrate_layout(cfg)
-    info = status(cfg, interval_days=interval_days, max_age_days=max_age_days)
-    info["cleanup"] = None
-    if info["due"] and info["stale_items"]:
-        info["cleanup"] = cleanup(cfg, max_age_days=max_age_days)
-        logger.info("缓存自动清理：删掉 %d 项，腾出 %s",
-                    len(info["cleanup"]["removed"]), human_size(info["cleanup"]["freed_bytes"]))
-    elif info["due"]:
-        # 到期但没有过期内容：也把时间戳往前推，避免每次开都重扫
-        state = read_state(cfg)
-        state["last_cleanup_ts"] = time.time()
-        state["last_cleanup"] = time.strftime("%Y-%m-%dT%H:%M:%S")
-        state["last_removed"] = []
-        state["last_freed_bytes"] = 0
-        write_state(cfg, state)
-    return info
+    return status(cfg, max_age_days=max_age_days)
 
 
 def summary_line(info: dict[str, Any]) -> str:
     """给日志/界面用的一句话。"""
     text = (f"缓存目录 {info['dir']}：{info['items']} 项 / {human_size(info['bytes'])}"
-            f"，其中超过 {info['max_age_days']:g} 天的 {info['stale_items']} 项 / "
-            f"{human_size(info['stale_bytes'])}")
-    done = info.get("cleanup")
-    if done:
-        text += f"；已自动清理 {len(done['removed'])} 项，腾出 {human_size(done['freed_bytes'])}"
-        if done["failed"]:
-            text += f"，{len(done['failed'])} 项删除失败（可能被占用）"
-    elif info.get("last_cleanup"):
+            f"，其中超过 {info['max_age_days']:g} 天没动过的 {info['stale_items']} 项 / "
+            f"{human_size(info['stale_bytes'])}（不会自动删，去「高级选项 -> 缓存管理」处理）")
+    if info.get("last_cleanup"):
         text += f"；上次清理 {info['last_cleanup']}"
     return text
