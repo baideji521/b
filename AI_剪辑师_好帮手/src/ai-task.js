@@ -29,7 +29,8 @@ const BRIDGE_TIMEOUT_MS = 30000;
 // 页面就绪 / 附件挂上 / 回答完成的等待上限
 const READY_TIMEOUT_MS = 60000;
 // 塞文件的方式，按顺序试：模仿手动拖放 -> 粘贴 -> 塞 file 控件
-const ATTACH_MODES = ["drop", "paste", "input"];
+// 塞文件的顺序：一次拖两个 -> 逐个拖 -> 粘贴 -> 塞 file 控件（见 handleAiTask 里的 plans）
+
 // 拖进去之后等这一个出卡片的时间；手动也就一秒多，超了就换下一种方式
 const ATTACH_VERIFY_MS = 5000;
 // 都挂上之后再确认一下没在转圈，很短；到点就直接按回车
@@ -181,16 +182,21 @@ function pageAttachFiles(payloads, mode) {
   );
 
   if (mode === "drop" || !mode) {
-    if (!editor && !document.body) return { ok: false, error: "页面还没渲染出可拖放的区域" };
-    // 手动拖文件时事件落在输入框那一片，从输入框往上逐层派发，谁监听谁收
+    const root = document.documentElement;
+    if (!document.body && !root) return { ok: false, error: "页面还没渲染出可拖放的区域" };
+    // 手动往页面任何一处拖都能进，所以直接砸整页：body / html / document，
+    // 再顺带砸一遍输入框那几层，谁监听谁收
     const targets = [];
-    for (let node = editor; node && targets.length < 4; node = node.parentElement) {
+    for (let node = editor; node && targets.length < 3; node = node.parentElement) {
       targets.push(node);
     }
     if (document.body) targets.push(document.body);
+    if (root) targets.push(root);
+    targets.push(document);
     if (!targets.length) return { ok: false, error: "找不到拖放目标" };
 
-    const rect = (editor || document.body).getBoundingClientRect();
+    const box = document.body || root;
+    const rect = box.getBoundingClientRect();
     const point = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
     let fired = 0;
     for (const target of targets) {
@@ -207,6 +213,7 @@ function pageAttachFiles(payloads, mode) {
       ? { ok: true, via: "drop", targets: targets.length, count: transfer.files.length }
       : { ok: false, error: "拖放事件派发失败" };
   }
+
 
   if (mode === "paste") {
     if (!editor) return { ok: false, error: "找不到输入框，没法模拟粘贴" };
@@ -539,49 +546,75 @@ async function handleAiTask(task) {
 
     let autoDone = false;
     if (uploadMode === "auto") {
-      // 完全照手动的节奏：拖第一个 → 一秒左右出卡片 → 拖第二个 → 出卡片 → 回车
-      for (const mode of ATTACH_MODES) {
-        if (mode === "input") {
-          // 控件平时不在 DOM 里，先点一下「+ / 上传文件」把它催出来
+      // 等某几个文件出卡片；出来就返回 true
+      const waitCards = async (wanted, ms) => {
+        const deadline = Date.now() + ms;
+        let left = wanted.slice();
+        while (Date.now() < deadline) {
+          const still = [];
+          for (const name of left) {
+            const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+            if (check?.failed) throw new Error(`页面提示上传失败（${name}）`);
+            if (Number(check?.count || 0) > baselines[name]) log("已挂上", name, `匹配=${check?.used || ""}`);
+            else still.push(name);
+          }
+          left = still;
+          if (!left.length) return true;
+          await sleep(300);
+        }
+        log("还没出卡片", left.join("、"));
+        return false;
+      };
+
+      // 你实测两个文件一起往页面任何一处拖就行，所以先一次拖两个；
+      // 不行再一个一个拖，最后才退到粘贴 / file 控件
+      const plans = [
+        { mode: "drop", batch: true },
+        { mode: "drop", batch: false },
+        { mode: "paste", batch: true },
+        { mode: "input", batch: true },
+      ];
+      for (const plan of plans) {
+        if (plan.mode === "input") {
           const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
           log("催上传控件", JSON.stringify(menu || {}));
           await sleep(300);
         }
-        let allOk = true;
-        for (let i = 0; i < payloads.length && allOk; i += 1) {
-          const item = payloads[i];
-          const attached = await runInTab(tabId, pageAttachFiles, [[item], mode]).catch(() => null);
-          if (!attached?.ok) {
-            log("塞入失败", item.name, mode, attached?.error || "未知原因");
-            allOk = false;
-            break;
-          }
-          // 等这一个出卡片，手动也就一秒多
-          allOk = false;
-          const deadline = Date.now() + ATTACH_VERIFY_MS;
-          while (Date.now() < deadline) {
-            const check = await runInTab(tabId, pageCountAttachment, [item.name]).catch(() => null);
-            if (check?.failed) {
-              return finish({ status: "failed",
-                              error: `页面提示上传失败（${item.name}，可能不收 txt 或文件太大）` });
+        try {
+          if (plan.batch) {
+            const attached = await runInTab(tabId, pageAttachFiles, [payloads, plan.mode]);
+            if (!attached?.ok) {
+              log("塞入失败", plan.mode, attached?.error || "未知原因");
+              continue;
             }
-            if (Number(check?.count || 0) > baselines[item.name]) {
-              allOk = true;
-              log("已挂上", item.name, `${mode} 匹配=${check?.used || ""}`);
-              break;
+            autoDone = await waitCards(names, ATTACH_VERIFY_MS);
+          } else {
+            autoDone = true;
+            for (const item of payloads) {
+              const attached = await runInTab(tabId, pageAttachFiles, [[item], plan.mode]);
+              if (!attached?.ok) {
+                log("塞入失败", item.name, plan.mode, attached?.error || "未知原因");
+                autoDone = false;
+                break;
+              }
+              if (!await waitCards([item.name], ATTACH_VERIFY_MS)) {
+                autoDone = false;
+                break;
+              }
             }
-            await sleep(300);
           }
-          if (!allOk) log("这个没挂上", item.name, mode);
+        } catch (error) {
+          return finish({ status: "failed",
+                          error: `${error?.message || error}（可能不收 txt 或文件太大）` });
         }
-        if (allOk) {
-          autoDone = true;
-          log(`${payloads.length} 个文件都挂上了（方式=${mode}）`);
+        if (autoDone) {
+          log(`${payloads.length} 个文件都挂上了`, `方式=${plan.mode}`, plan.batch ? "一次拖" : "逐个拖");
           break;
         }
-        log("换下一种方式", mode);
+        log("换下一种方式", plan.mode, plan.batch ? "一次拖" : "逐个拖");
       }
     }
+
 
 
     if (!autoDone) {
