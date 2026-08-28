@@ -32,6 +32,9 @@ const READY_TIMEOUT_MS = 60000;
 const ATTACH_MODES = ["drop", "paste", "input"];
 // 每种方式塞完之后等页面认账的时间，超了就换下一种
 const ATTACH_VERIFY_MS = 40000;
+// 附件挂上之后等它加载完（转圈停掉）的上限，之后才按回车
+const SETTLE_TIMEOUT_MS = 60000;
+
 const ANSWER_TIMEOUT_MS = 600000;
 
 // 回答连续这么久没有变化就算写完了
@@ -273,31 +276,61 @@ function pageCountAttachment(name) {
 }
 
 
-/** 填那句话并发送。 */
+/** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
+function pageUploadSettled() {
+  const text = document.body ? document.body.innerText || "" : "";
+  const pending = /上传中|正在上传|处理中|uploading|processing/i.test(text);
+  const spinner = document.querySelectorAll(
+    "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']"
+  ).length;
+  return { settled: !pending && spinner === 0, pending, spinner };
+}
+
+
+/**
+ * 附件挂稳之后发送：有那句话就先填进去，然后模仿按回车——手动就是这么发的，
+
+ * 不去猜哪个是发送按钮（按钮 aria-label 一变就点错，回车不会）。
+ */
 function pageSendMessage(selector, text) {
   const editor = document.querySelector(selector);
   if (!editor) return { ok: false, error: "输入框不见了" };
   editor.focus();
-  if (editor.tagName === "TEXTAREA") editor.value = text;
-  else editor.innerText = text;
-  editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
-  editor.dispatchEvent(new Event("change", { bubbles: true }));
 
-  const send = Array.from(document.querySelectorAll("button")).find((b) => {
-    const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} ${b.className || ""}`;
-    return /send|发送|提交/i.test(label) && !b.disabled;
-  });
-  if (send) {
-    send.click();
-    return { ok: true, sent: "button" };
+  const message = typeof text === "string" ? text : "";
+  if (message) {
+    if (editor.tagName === "TEXTAREA") {
+      editor.value = message;
+      editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
+    } else {
+      // Quill 这类富文本要靠 beforeinput/input 才认，直接改 innerText 模型不更新，
+      // 所以优先用 execCommand 走浏览器自己的插入路径
+      let typed = false;
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        typed = document.execCommand("insertText", false, message);
+      } catch {}
+      if (!typed) {
+        editor.innerText = message;
+        editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
+      }
+    }
   }
-  for (const type of ["keydown", "keypress", "keyup"]) {
-    editor.dispatchEvent(new KeyboardEvent(type, {
-      key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true,
-    }));
-  }
-  return { ok: true, sent: "enter" };
+
+  const key = {
+    key: "Enter", code: "Enter", keyCode: 13, which: 13,
+    bubbles: true, cancelable: true, composed: true,
+  };
+  editor.dispatchEvent(new KeyboardEvent("keydown", key));
+  editor.dispatchEvent(new KeyboardEvent("keypress", key));
+  editor.dispatchEvent(new KeyboardEvent("keyup", key));
+  return { ok: true, sent: "enter", typed: message.length };
 }
+
 
 /** 读最后一条回答的纯文本，并判断是否还在写。 */
 function pageReadAnswer() {
@@ -516,11 +549,28 @@ async function handleAiTask(task) {
 
 
 
-    if (await cancelled("sending", "发送提问")) return;
+    if (await cancelled("sending", "等附件加载完")) return;
+    // 附件还在转圈就按回车会白发一条，等页面彻底安静下来
+    const settleDeadline = Date.now() + SETTLE_TIMEOUT_MS;
+    for (;;) {
+      const settle = await runInTab(tabId, pageUploadSettled).catch(() => null);
+      if (settle?.settled) {
+        log("附件加载完成");
+        break;
+      }
+      if (Date.now() > settleDeadline) {
+        log("等加载超时，仍然按回车试一次", JSON.stringify(settle || {}));
+        break;
+      }
+      if (await cancelled("sending", "附件还在加载")) return;
+      await sleep(1000);
+    }
+
     // 复用的窗口里可能已经有旧回答，先记下条数，别把旧的当成这次的结果
     const before = await runInTab(tabId, pageReadAnswer).catch(() => null);
     const baselineBlocks = Number(before?.blocks || 0);
     const sent = await runInTab(tabId, pageSendMessage, [editor.selector, message]);
+
 
     if (!sent?.ok) {
       return finish({ status: "failed", error: `发送失败：${sent?.error || "未知原因"}` });
