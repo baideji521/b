@@ -169,6 +169,27 @@
     "importance_filter": "low",
     "confidence_filter": 0.0
   },
+  "highlight": {
+    "sfx": {
+      "enabled": true,
+      "dir": "assets/sfx",
+      "gain_db": -6.0,
+      "offset_seconds": 0.0,
+      "fallback_category": "punch",
+      "emotion_map": {
+        "happy": "funny",
+        "excited": "funny",
+        "surprised": "punch",
+        "angry": "punch",
+        "sad": "riser",
+        "fearful": "riser",
+        "disgusted": "fail",
+        "contempt": "fail",
+        "neutral": "ding",
+        "calm": "ding"
+      }
+    }
+  },
   "runtime": {
     "max_auto_retries": 3,
     "keep_models_loaded": true,

@@ -133,6 +133,34 @@ DEFAULTS: dict[str, Any] = {
         "importance_filter": "low",
         "confidence_filter": 0.0,
     },
+    "highlight": {
+        # 冻帧音效：原本冻帧段是纯静音（原声只到冻帧点），这里往那段里混一条音效
+        "sfx": {
+            "enabled": True,
+            # 音效库根目录，下面一层子目录就是类别（tools/fetch_sfx.py 下载归类）
+            "dir": "assets/sfx",
+            # 原声不动，音效压低一点混进去；正数会更响，注意别削波
+            "gain_db": -6.0,
+            # 相对冻帧点的偏移，负数=提前一点点起（配合 Flash 更有力）
+            "offset_seconds": 0.0,
+            # 表情轨没覆盖到冻帧点时用哪个类别
+            "fallback_category": "punch",
+            # 冻帧点的表情（timeline.json 的 expression_track）-> 类别目录
+            # 标签集合见 visual/face.py 的 AFFECTNET
+            "emotion_map": {
+                "happy": "funny",
+                "excited": "funny",
+                "surprised": "punch",
+                "angry": "punch",
+                "sad": "riser",
+                "fearful": "riser",
+                "disgusted": "fail",
+                "contempt": "fail",
+                "neutral": "ding",
+                "calm": "ding",
+            },
+        },
+    },
     "runtime": {
         "max_auto_retries": 3,
         "keep_models_loaded": True,
@@ -232,6 +260,10 @@ class Config:
     @property
     def runtime(self) -> dict[str, Any]:
         return self.data["runtime"]
+
+    @property
+    def highlight(self) -> dict[str, Any]:
+        return self.data["highlight"]
 
     @property
     def mirrors(self) -> dict[str, Any]:

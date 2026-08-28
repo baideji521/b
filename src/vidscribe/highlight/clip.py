@@ -33,6 +33,8 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFont
 
 from ..logging_setup import get_logger
 from ..video_io import probe_video
+from . import sfx as sfx_lib
+from .sfx import SfxPlan
 
 logger = get_logger("highlight")
 
@@ -418,16 +420,20 @@ def _decode_pcm(video: Path, start: float, end: float, rate: int) -> np.ndarray:
 
 
 def _write_audio(writer: _Writer, video: Path, audio_start: float, live_seconds: float,
-                 total_seconds: float, on_log: LogFn) -> None:
+                 total_seconds: float, on_log: LogFn,
+                 sfx: SfxPlan | None = None) -> dict[str, Any] | None:
     """音频完全跟着画面的帧网格走，避免音画错位。
 
     audio_start   = 输出第一帧对应的源时间（floor(clip.start*fps)/fps，不是 clip.start）
     live_seconds  = 正常播放段时长（play_frames/fps），到这里画面冻结，音频同时静音
     total_seconds = 输出总时长（total_frames/fps），音频补静音补到和视频一样长
+    sfx           = 冻帧音效，混在 live_seconds 那一刻（原本是纯静音的那段）
+
+    返回音效的实际落点信息（没混就是 None），并入 render_highlight 的统计。
     """
     if writer.audio is None:
         on_log("[AUDIO] 源视频没有可用音轨，输出为无声")
-        return
+        return None
     out_stream = writer.audio
     rate = int(out_stream.rate or 44100)
     live_samples = max(0, int(round(live_seconds * rate)))
@@ -444,7 +450,32 @@ def _write_audio(writer: _Writer, video: Path, audio_start: float, live_seconds:
     pcm = np.concatenate([live, silence], axis=1) if silence.size else live
     if pcm.size == 0:
         on_log("[AUDIO] 没有可写的音频样本")
-        return
+        return None
+
+    # 冻帧音效：叠在冻帧那一刻（live_samples），也就是原本纯静音的那段
+    sfx_info: dict[str, Any] | None = None
+    if sfx is not None and sfx.path is not None:
+        try:
+            wave = sfx_lib.load(sfx.path, rate)
+        except Exception as exc:  # noqa: BLE001 - 音效坏了不该毁掉整次渲染
+            on_log(f"[SFX] 读音效失败，跳过：{sfx.path.name} {exc}")
+        else:
+            at = live_samples + int(round(sfx.offset_seconds * rate))
+            pcm, used, truncated = sfx_lib.mix(pcm, wave, at, sfx.gain_db, rate)
+            if used <= 0:
+                on_log(f"[SFX] 音效落点在片尾之外，没混进去：{sfx.path.name}"
+                       f"（偏移 {sfx.offset_seconds:+.2f}s）")
+            else:
+                on_log(f"[SFX] {sfx.category}/{sfx.path.name}  {sfx.reason}")
+                on_log(f"[SFX] 落在输出 {at / rate:.3f}s，音效长 {wave.shape[1] / rate:.3f}s，"
+                       f"实用 {used / rate:.3f}s，增益 {sfx.gain_db:+.1f}dB"
+                       + ("（片尾不够长被截断，把界面「文本 加减秒数」调大一点）"
+                          if truncated else ""))
+                sfx_info = {
+                    "file": str(sfx.path), "category": sfx.category, "emotion": sfx.emotion,
+                    "gain_db": sfx.gain_db, "at_output_seconds": round(at / rate, 3),
+                    "used_seconds": round(used / rate, 3), "truncated": truncated,
+                }
 
     frame_size = out_stream.frame_size or 1024
     fifo = av.AudioFifo()
@@ -472,13 +503,18 @@ def _write_audio(writer: _Writer, video: Path, audio_start: float, live_seconds:
     on_log(f"[AUDIO] 原声 {audio_start:.4f} → {audio_start + live_seconds:.4f}"
            f"（{live_samples / rate:.3f}s，与画面同一帧网格）"
            f" + 冻帧静音 {silence.shape[1] / rate:.3f}s，合计 {fed / rate:.3f}s")
+    return sfx_info
 
 
 # ====================================================================== 主流程
 def render_highlight(video: Path, spec: HighlightSpec, target: Path,
                      on_log: LogFn | None = None,
-                     on_progress: ProgressFn | None = None) -> dict[str, Any]:
-    """按 spec 生成高光 MP4，返回统计信息。on_progress 每写一帧回报一次进度。"""
+                     on_progress: ProgressFn | None = None,
+                     sfx: SfxPlan | None = None) -> dict[str, Any]:
+    """按 spec 生成高光 MP4，返回统计信息。on_progress 每写一帧回报一次进度。
+
+    sfx 是冻帧音效（见 highlight/sfx.py），混在冻帧那一刻原本静音的那段；None = 不加。
+    """
     log = on_log or (lambda line: logger.info("%s", line))
     report = on_progress or (lambda done, total, stage: None)
     info = probe_video(video)
@@ -602,7 +638,7 @@ def render_highlight(video: Path, spec: HighlightSpec, target: Path,
         report(written_play + i + 1, total_frames, "冻帧特效")
 
     report(total_frames, total_frames, "写音频并封装")
-    _write_audio(writer, video, grid_start, live_seconds, total_seconds, log)
+    sfx_info = _write_audio(writer, video, grid_start, live_seconds, total_seconds, log, sfx)
     writer.close()
     log(f"[{spec.clip_end:.2f}] END CLIP")
 
@@ -626,4 +662,5 @@ def render_highlight(video: Path, spec: HighlightSpec, target: Path,
         "freeze_at_output_seconds": round(live_seconds, 4),
         "char_step_seconds": round(step, 3),
         "pop_seconds": round(pop, 3),
+        "sfx": sfx_info,
     }

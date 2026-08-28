@@ -33,6 +33,9 @@ input/*
 *.wmv
 *.ts
 
+# 音效库（CC0 素材，几十 MB，用 tools/fetch_sfx.py 重新下载归类）
+assets/sfx/
+
 # 工具与编辑器
 .comate/
 .idea/

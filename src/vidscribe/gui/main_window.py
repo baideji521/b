@@ -171,9 +171,12 @@ class HighlightDialog(QDialog):
     
 
     offsetsChanged = pyqtSignal(float, float, float)
+    sfxChanged = pyqtSignal(str, float)
 
     def __init__(self, parent, text: str, offsets: tuple[float, float, float],
-                 peaks: list[dict] | None = None):
+                 peaks: list[dict] | None = None,
+                 sfx: tuple[str, float] = ("", -6.0),
+                 sfx_categories: list[str] | None = None):
         super().__init__(parent)
         self.setWindowTitle("剪辑高光")
         self.resize(720, 560)
@@ -198,6 +201,33 @@ class HighlightDialog(QDialog):
             grid.addWidget(QLabel(label), row, 0)
             grid.addWidget(spin, row, 1)
             grid.addWidget(QLabel(tip), row, 2)
+
+        # 冻帧音效：冻帧段原本是纯静音，这里选混哪一类（自动 = 按冻帧点的表情查配置映射）
+        self.combo_sfx = QComboBox()
+        self.combo_sfx.addItem("自动（按表情）", "")
+        self.combo_sfx.addItem("不加音效", "none")
+        for name in (sfx_categories or []):
+            self.combo_sfx.addItem(name, name)
+        index = self.combo_sfx.findData(sfx[0])
+        self.combo_sfx.setCurrentIndex(index if index >= 0 else 0)
+        self.combo_sfx.currentIndexChanged.connect(self._emit_sfx)
+        self.spin_gain = QDoubleSpinBox()
+        self.spin_gain.setDecimals(1)
+        self.spin_gain.setRange(-40.0, 6.0)
+        self.spin_gain.setSingleStep(1.0)
+        self.spin_gain.setSuffix(" dB")
+        self.spin_gain.setValue(float(sfx[1]))
+        self.spin_gain.valueChanged.connect(self._emit_sfx)
+
+        row = grid.rowCount()
+        grid.addWidget(QLabel("冻帧音效"), row, 0)
+        sfx_row = QHBoxLayout()
+        sfx_row.addWidget(self.combo_sfx, 1)
+        sfx_row.addWidget(self.spin_gain)
+        grid.addLayout(sfx_row, row, 1)
+        hint = ("混在冻帧那一刻（原本是静音）；音效库为空就跑 tools/fetch_sfx.py"
+                if sfx_categories else "音效库为空，先跑 tools/fetch_sfx.py 下载 CC0 音效")
+        grid.addWidget(QLabel(hint), row, 2)
         grid.setColumnStretch(2, 1)
 
         self.edit = QPlainTextEdit(text)
@@ -241,6 +271,13 @@ class HighlightDialog(QDialog):
     def _emit_offsets(self, *_args) -> None:
         self.offsetsChanged.emit(*self.offsets())
 
+    def _emit_sfx(self, *_args) -> None:
+        self.sfxChanged.emit(*self.sfx())
+
+    def sfx(self) -> tuple[str, float]:
+        """(类别, 增益dB)。类别空串 = 自动按表情选，"none" = 不加音效。"""
+        return (str(self.combo_sfx.currentData() or ""), round(self.spin_gain.value(), 1))
+
     def offsets(self) -> tuple[float, float, float]:
         return (round(self.spin_start.value(), 2), round(self.spin_end.value(), 2),
                 round(self.spin_text.value(), 2))
@@ -259,14 +296,43 @@ class HighlightWorker(QThread):
     done = pyqtSignal(bool, str)
 
     def __init__(self, cfg, payload_text: str, fallback: Path | None,
-                 export_dir: Path | None, offsets: tuple[float, float, float] = (0.0, 0.0, 0.0)):
+                 export_dir: Path | None, offsets: tuple[float, float, float] = (0.0, 0.0, 0.0),
+                 sfx: tuple[str, float] = ("", -6.0)):
         super().__init__()
         self.cfg = cfg
         self.payload_text = payload_text
         self.fallback = fallback
         self.export_dir = export_dir
         self.offsets = offsets
+        self.sfx = sfx
         self.output: Path | None = None
+
+    def _sfx_plan(self, video: Path, freeze_time: float):
+        """按冻帧点的表情挑一条音效。表情来自该视频的 timeline.json，读不到就走兜底类别。"""
+        from ..highlight import plan as plan_sfx  # noqa: PLC0415
+
+        category, gain_db = self.sfx
+        cfg_sfx = dict(self.cfg.highlight.get("sfx") or {})
+        cfg_sfx["gain_db"] = gain_db
+        root = Path(cfg_sfx.get("dir") or "assets/sfx")
+        if not root.is_absolute():
+            root = self.cfg.root / root
+
+        timeline = None
+        path = self.cfg.path("output_dir") / video.stem / "timeline.json"
+        if path.is_file():
+            try:
+                timeline = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001 - 读不到就当没有表情数据
+                self.log.emit(f"[SFX] timeline.json 读取失败，改用兜底类别：{exc}")
+        else:
+            self.log.emit(f"[SFX] 找不到 {path}，没有表情数据，改用兜底类别")
+
+        chosen = plan_sfx(cfg_sfx, root, timeline, freeze_time,
+                          key=f"{video.stem}|{freeze_time:.2f}", category=category)
+        if chosen.path is None:
+            self.log.emit(f"[SFX] 不混音效：{chosen.reason}")
+        return chosen
 
     def run(self) -> None:
         try:
@@ -291,7 +357,8 @@ class HighlightWorker(QThread):
                          else self.cfg.path("output_dir") / video.stem)
             target = default_target(directory, video)
             result = render_highlight(video, spec, target, on_log=self.log.emit,
-                                      on_progress=self.progress.emit)
+                                      on_progress=self.progress.emit,
+                                      sfx=self._sfx_plan(video, spec.freeze_time))
             write_json(target.with_suffix(".json"),
                        {"spec": spec.raw,
                         "offsets": {"start": start_delta, "end": end_delta,
@@ -343,6 +410,8 @@ class MainWindow(QMainWindow):
         # 剪辑高光的三个加减秒数（起始 / 结束 / 文本），从设置里带回来
 
         self._highlight_offsets = (0.0, 0.0, 0.0)
+        # 冻帧音效：(类别, 增益dB)，类别空串 = 自动按表情选
+        self._highlight_sfx = ("", float((cfg.highlight.get("sfx") or {}).get("gain_db", -6.0)))
         self.show_translated = False
         self._translate_request: dict[str, str] = {}
         self._translate_result: Path | None = None
@@ -431,6 +500,10 @@ class MainWindow(QMainWindow):
         if (isinstance(offsets, list) and len(offsets) == 3
                 and all(isinstance(v, (int, float)) for v in offsets)):
             self._highlight_offsets = tuple(round(float(v), 2) for v in offsets)
+        saved_sfx = s.get("highlight_sfx")
+        if (isinstance(saved_sfx, list) and len(saved_sfx) == 2
+                and isinstance(saved_sfx[0], str) and isinstance(saved_sfx[1], (int, float))):
+            self._highlight_sfx = (saved_sfx[0], round(float(saved_sfx[1]), 1))
         geo = s.get("window")
         if isinstance(geo, list) and len(geo) == 4 and all(isinstance(v, int) for v in geo):
             self.setGeometry(*geo)
@@ -464,6 +537,7 @@ class MainWindow(QMainWindow):
                                  for c in range(self.table.columnCount())],
             "timeline_row_height": self.table.verticalHeader().defaultSectionSize(),
             "highlight_offsets": list(self._highlight_offsets),
+            "highlight_sfx": list(self._highlight_sfx),
         })
         for splitter, key in self._splitters():
             self.settings[key] = splitter.sizes()
@@ -1259,12 +1333,15 @@ class MainWindow(QMainWindow):
         if self.busy():
             return
         dialog = HighlightDialog(self, self._last_highlight_json, self._highlight_offsets,
-                                 (self.speech_doc or {}).get("emotion_peaks"))
+                                 (self.speech_doc or {}).get("emotion_peaks"),
+                                 self._highlight_sfx, self.sfx_categories())
         dialog.offsetsChanged.connect(self.on_highlight_offsets_changed)
+        dialog.sfxChanged.connect(self.on_highlight_sfx_changed)
         if dialog.exec_() != QDialog.Accepted:
             return
         text = dialog.payload()
         self._highlight_offsets = dialog.offsets()
+        self._highlight_sfx = dialog.sfx()
         self.schedule_save()  # 加减秒数存进 gui_settings.json，下次打开自动带回来
         if not text.strip():
             return
@@ -1275,7 +1352,7 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("正在渲染高光片段…")
         self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, self.export_dir,
-                                           self._highlight_offsets)
+                                           self._highlight_offsets, self._highlight_sfx)
         self.clip_worker.log.connect(self.append_log)
         self.clip_worker.progress.connect(self.on_highlight_progress)
         self.clip_worker.done.connect(self.on_highlight_done)
@@ -1310,6 +1387,20 @@ class MainWindow(QMainWindow):
         """对话框里一改加减秒数就存盘（400ms 防抖），点取消也留着。"""
         self._highlight_offsets = (round(start, 2), round(end, 2), round(text, 2))
 
+        self.schedule_save()
+
+    def sfx_categories(self) -> list[str]:
+        """音效库里现有的类别目录名，给对话框的下拉用；库不在就返回空列表。"""
+        from ..highlight import library  # noqa: PLC0415 - 只在开对话框时才用
+
+        root = Path((self.cfg.highlight.get("sfx") or {}).get("dir") or "assets/sfx")
+        if not root.is_absolute():
+            root = self.cfg.root / root
+        return list(library(root))
+
+    def on_highlight_sfx_changed(self, category: str, gain_db: float) -> None:
+        """音效类别 / 音量一改就存盘，和加减秒数一样点取消也留着。"""
+        self._highlight_sfx = (category, round(float(gain_db), 1))
         self.schedule_save()
 
     def on_highlight_done(self, ok: bool, message: str) -> None:
