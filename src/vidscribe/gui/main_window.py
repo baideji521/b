@@ -1907,7 +1907,8 @@ class MainWindow(QMainWindow):
                 count = write_merged_txt(path, self.video_path.name, self.speech,
                                         self._events_for_export(), self.show_translated, lang,
                                         actions=self.timeline_doc.get("action_track"),
-                                        emotions=self.timeline_doc.get("expression_track"))
+                                        emotions=self.timeline_doc.get("expression_track"),
+                                        duration=float(self.timeline_doc.get("duration") or 0.0))
         except Exception as exc:
             QMessageBox.warning(self, "导出失败", f"{type(exc).__name__}: {exc}")
             return

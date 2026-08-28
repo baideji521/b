@@ -152,6 +152,7 @@ MIN_SRT_SECONDS = 0.3
 # 导出文本里的固定用词：整份文件跟着内容语言走，不能中文表头配英文正文
 _TXT_WORDS: dict[str, dict[str, str]] = {
     "zh": {"video": "视频", "speech_count": "语音段", "event_count": "画面事件",
+           "duration": "时长",
            "merged_count": "画面事件 {events} 条，语音 {speech} 段",
            "translated": "（译文）", "ocr": "画面文字", "sep": "：",
            "speech_file": "语音", "events_file": "事件", "merged_file": "合并",
@@ -162,6 +163,7 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
 
            "translated_file": "译文"},
     "en": {"video": "Video", "speech_count": "Speech segments", "event_count": "Visual events",
+           "duration": "Duration",
            "merged_count": "{events} visual events, {speech} speech segments",
            "translated": " (translated)", "ocr": "On-screen text", "sep": ": ",
            "speech_file": "speech", "events_file": "events", "merged_file": "merged",
@@ -383,7 +385,8 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
                      events: list[dict[str, Any]], translated: bool = False,
                      language: str = "zh",
                      actions: list[dict[str, Any]] | None = None,
-                     emotions: list[dict[str, Any]] | None = None) -> int:
+                     emotions: list[dict[str, Any]] | None = None,
+                     duration: float = 0.0) -> int:
     """合并导出：按时间把画面事件和语音段穿插在一条时间线上。
 
     每行带各自来源的情绪：画面行跟画面情绪，语音行跟语音情绪，两者不混。
@@ -395,14 +398,18 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
     w = txt_words(language)
     labels = labels_for(language)
     multi = multi_speaker(segments)
-    rows: list[tuple[float, float, str, str]] = []
+    rows: list[tuple[float, float, str, str, list[str]]] = []
     for ev in events:
         text = event_text_of(ev, translated).strip()
         if text:
             kind = labels["visual"] + emotion_tag(ev.get("emotion_en"),
                                                  ev.get("emotion_intensity"), language,
                                                  ev.get("emotion"))
-            rows.append((float(ev["start"]), float(ev["end"]), kind, text))
+            # importance 是判定用的既有标签（摔倒/碰撞/场景剧变 -> high/critical），带出来省得下游重推
+            if ev.get("importance"):
+                kind += f" [{ev['importance']}]"
+            extra = [f"    {labels['ocr']}{w['sep']}{ev['ocr_text']}"] if ev.get("ocr_text") else []
+            rows.append((float(ev["start"]), float(ev["end"]), kind, text, extra))
     for seg in segments:
         text = speech_text_of(seg, translated).strip()
         if text:
@@ -410,18 +417,23 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
             kind = labels["speech"] + who + emotion_tag(seg.get("emotion_en"),
                                                  seg.get("emotion_intensity"), language,
                                                  seg.get("emotion"))
-            rows.append((float(seg["start"]), float(seg["end"]), kind, text))
+            rows.append((float(seg["start"]), float(seg["end"]), kind, text, []))
     rows.sort(key=lambda r: (r[0], r[2]))
 
     lines = [
         f"{w['video']}{w['sep']}{video_name}",
+    ]
+    if duration:
+        lines.append(f"{w['duration']}{w['sep']}{duration:.2f}s")
+    lines += [
         w["merged_count"].format(events=len(events), speech=len(segments))
         + (w["translated"] if translated else ""),
         "=" * 60,
         "",
     ]
-    for start, end, kind, text in rows:
+    for start, end, kind, text, extra in rows:
         lines.append(f"[{fmt_time(start)} - {fmt_time(end)}] {kind}{w['sep']}{text}")
+        lines += extra
 
     # 两条独立时间戳轨：动作（事件粒度归并）和表情（人脸模型 2fps 归并）。
     # actions 没传就从事件里现算；表情段只能由调用方给（来自 visual meta 的 face.segments）。
