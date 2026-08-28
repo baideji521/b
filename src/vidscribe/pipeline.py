@@ -13,11 +13,16 @@ from typing import Any
 from . import benchmark as bench
 from .checkpoint import Checkpoint
 from .config import Config
+from .emotions import label_for as emotion_label
 from .events import SpeechEvent, SpeechWord, VisualEvent, finalize
 from .language import LanguageRenderer, decide_output_language, labels_for
 from .logging_setup import get_logger
 from .progress import report as report_progress
+from .speech.emotion import EmotionRecognizer, emotion_peaks, relabel
+from .speech.sentences import split_sentences
+from .speech.speakers import SpeakerTagger
 from .speech.whisper_asr import WhisperASR
+
 from .timeline.engine import build_timeline, filter_timeline
 from .timeline.exporters import write_json, write_srt, write_timeline_txt
 from .video_io import VideoInfo, detect_scene_cuts, plan_windows, probe_video
@@ -36,16 +41,19 @@ class Pipeline:
         self.model_dir = model_dir
         self.analyzer = create_analyzer(cfg.visual, model_dir, cfg.mirrors)
         self.asr = WhisperASR(cfg.speech, model_dir, cfg.mirrors)
+        self.emotion = EmotionRecognizer(cfg.speech.get("emotion", {}), model_dir, cfg.mirrors)
+        self.speaker = SpeakerTagger(cfg.speech.get("speaker", {}), model_dir, cfg.mirrors)
         self.env = bench.environment_snapshot()
         logger.info("视觉后端：%s（%s）", self.analyzer.backend, self.analyzer.model_id)
 
 
     # --------------------------------------------------------------- 对外入口
     def run_video(self, video_path: str | Path, force: bool = False,
-                  skip_visual: bool = False, skip_speech: bool = False) -> dict[str, Any]:
+                  skip_visual: bool = False, skip_speech: bool = False,
+                  force_speech: bool = False, translate: bool = False) -> dict[str, Any]:
         video_path = Path(video_path).resolve()
         timer = bench.Timer()
-        ckpt = Checkpoint(self.cfg.path("work_dir"), video_path)
+        ckpt = Checkpoint(self.cfg.path("cache_dir"), video_path)
         if force:
             ckpt.reset()
         out_dir = self.cfg.path("output_dir") / video_path.stem
@@ -88,11 +96,31 @@ class Pipeline:
             speech_payload = {"available": False, "reason": "skipped", "language": None, "segments": []}
             logger.warning("按要求跳过语音识别")
             report_progress("speech", 1.0, "已跳过语音识别", video=info.name)
-        elif ckpt.done("speech"):
+        elif ckpt.done("speech") and not force_speech:
             speech_payload = ckpt.load("speech")
-            logger.info("复用已有语音识别结果：%d 段", len(speech_payload.get("segments", [])))
+            # 老缓存是"一段多句"的，这里补切一刀，不用为了断句重跑 whisper
+            before = speech_payload.get("segments") or []
+            # 老缓存里常常整片没标点（whisper 对口语素材就这样），先用 ct-punc 补上再切。
+            # 标点直接贴到 words 上，时间戳还是 whisper 的原生精度，不用重跑识别。
+            punctuation = self.asr.punctuate(before)
+            after = split_sentences(before)
+            if punctuation.get("available") or len(after) != len(before):
+                speech_payload["segments"] = after
+                if punctuation.get("available"):
+                    speech_payload["punctuation"] = punctuation
+                # 情绪是按老边界判的，套到子句上不对，删掉让下面重判一次
+                speech_payload.pop("emotion", None)
+                speech_payload.pop("emotion_peaks", None)
+                # 说话人同理：声纹是按老句子边界取的，边界变了就重判
+                speech_payload.pop("speaker", None)
+                ckpt.save("speech", speech_payload)
+                logger.info("已有语音结果重排：%d 段 -> %d 句（补标点 %d 段）", len(before),
+                            len(after), punctuation.get("restored_segments") or 0)
+
+            logger.info("复用已有语音识别结果：%d 句", len(speech_payload.get("segments", [])))
             report_progress("speech", 1.0,
-                            f"复用已有语音结果（{len(speech_payload.get('segments', []))} 段）", video=info.name)
+                            f"复用已有语音结果（{len(speech_payload.get('segments', []))} 句）", video=info.name)
+
         else:
             with timer.stage("speech_seconds"):
                 try:
@@ -107,6 +135,9 @@ class Pipeline:
             report_progress("speech", 1.0,
                             f"语音识别完成（{len(speech_payload.get('segments', []))} 段）", video=info.name)
 
+        # 2.5) 说话人分离：跟语言无关，紧接着语音识别做，句子边界就是刚切出来的这批
+        self._annotate_speaker(info, speech_payload, ckpt, timer)
+
         # 3) 语言判定：程序决定 output_language，不交给视觉模型自己选
         lcfg = self.cfg.language
         decision = decide_output_language(
@@ -115,6 +146,9 @@ class Pipeline:
             min_confidence=float(lcfg.get("min_language_confidence", 0.4)),
         )
         renderer = LanguageRenderer(decision.output_language)
+        # 3.5) 语音情绪：用 whisper 已经切好的句子边界，时间轴天然对齐。
+        # 放在语言判定之后：情绪显示名要跟 output_language 一致（英文视频出 happy，中文出开心）。
+        self._annotate_emotion(info, speech_payload, ckpt, timer, decision.output_language)
         speech_payload["language_decision"] = decision.to_dict()
         _ensure_speech_originals(speech_payload)
         write_json(out_dir / "speech_events.json", speech_payload)
@@ -132,8 +166,23 @@ class Pipeline:
         if cached_visual is not None and cached_model and cached_model != self.analyzer.model_id:
             logger.info("已有视觉结果来自 %s，本次要用 %s，重新分析", cached_model, self.analyzer.model_id)
             cached_visual = None
+        # 画面情绪开关变了就得重跑：情绪是视觉模型在同一次推理里给的，缓存里补不出来。
+        # 只重跑语音（skip_visual）时不做这个判断，否则会把已有画面结果白白丢掉。
+        want_visual_emotion = bool(self.cfg.visual.get("emotion_enabled", True))
+        if (not skip_visual and cached_visual is not None
+                and bool(cached_visual.get("emotion_enabled")) != want_visual_emotion):
+            logger.info("画面情绪开关变了（缓存 %s，本次 %s），重新分析",
+                        cached_visual.get("emotion_enabled"), want_visual_emotion)
+            cached_visual = None
 
-        if skip_visual:
+        if skip_visual and cached_visual is not None:
+            # "只重跑语音"这种用法不该把已有画面结果清掉：有缓存就照常复用
+            visual_events = [VisualEvent(**e) for e in cached_visual["events"]]
+            visual_meta = cached_visual.get("meta", {})
+            logger.info("跳过视觉分析，复用已有结果：%d 个事件", len(visual_events))
+            report_progress("visual", 1.0,
+                            f"跳过画面分析，复用已有结果（{len(visual_events)} 事件）", video=info.name)
+        elif skip_visual:
             logger.warning("按要求跳过视觉分析")
             report_progress("visual", 1.0, "已跳过画面分析", video=info.name)
         elif cached_visual is not None:
@@ -150,11 +199,17 @@ class Pipeline:
                 "events": [e.to_dict() for e in visual_events],
                 "meta": visual_meta,
                 "output_language": decision.output_language,
+                "emotion_enabled": want_visual_emotion,
             })
+        # 复用缓存时情绪显示名可能还是上一次的语言：标签固定英文存着，按需重渲，不用重跑模型
+        for ev in visual_events:
+            if ev.emotion_en:
+                ev.emotion = emotion_label(ev.emotion_en, decision.output_language)
         write_json(out_dir / "visual_events.json", {
             "video": info.name,
             "duration": info.duration,
             "output_language": decision.output_language,
+            "emotion_enabled": want_visual_emotion,
             "meta": visual_meta,
             "events": [e.to_dict() for e in visual_events],
         })
@@ -207,6 +262,13 @@ class Pipeline:
                         "source_frames": e["source_frames"],
                         "visual_confidence": e["visual_confidence"],
                         "speech_confidence": e["speech_confidence"],
+                        "speech_speakers": e["speech_speakers"],
+                        "speech_emotion": e["speech_emotion"],
+                        "speech_emotion_en": e["speech_emotion_en"],
+                        "speech_emotion_intensity": e["speech_emotion_intensity"],
+                        "visual_emotion": e["visual_emotion"],
+                        "visual_emotion_en": e["visual_emotion_en"],
+                        "visual_emotion_intensity": e["visual_emotion_intensity"],
                         "quality": e["quality"],
                     }
                     for e in filtered
@@ -223,7 +285,14 @@ class Pipeline:
             ckpt.save("timeline", {"entries": len(filtered), "srt_kind": srt_kind})
             report_progress("timeline", 1.0, f"导出完成（timeline {len(filtered)} 条）", video=info.name)
 
-        # 5) Benchmark
+        # 5) 顺手翻译（可选）：模型还在显存里，这时候翻最便宜，省掉单独跑一次约 15s 的加载
+        translation: dict[str, Any] | None = None
+        if translate:
+            with timer.stage("translate_seconds"):
+                translation = self._translate_stage(out_dir, info.name)
+
+        # 6) Benchmark
+
         benchmark = {
             "video": info.to_dict(),
             "environment": self.env,
@@ -270,10 +339,42 @@ class Pipeline:
             "language_decision": decision.to_dict(),
             "language_render": renderer.stats(),
             "speech_available": bool(speech_payload.get("available")),
+            "translation": translation,
             "benchmark": benchmark,
         }
 
+    # --------------------------------------------------------------- 翻译阶段
+    def _translate_stage(self, out_dir: Path, video_name: str) -> dict[str, Any] | None:
+        """分析结束、模型还在显存里的时候把没有译文的行补上（增量，原文不覆盖）。
+
+        单独点"翻译"要重开进程加载模型（实测约 15s）；这里直接复用，
+        所以只剩解码时间。翻译失败不影响已经导出的结果，只记日志。
+        """
+        from .translate import translate_output  # noqa: PLC0415
+
+        def on_progress(done: int, total: int) -> None:
+            # 分析部分已经 100% 了，这里只更新文字，不把总进度条拉回去
+            report_progress("translate", 1.0, f"翻译 {done}/{total} 行",
+                            video=video_name, done=done, total=total)
+
+        try:
+            result = translate_output(self.cfg, out_dir, analyzer=self.analyzer,
+                                      on_progress=on_progress)
+        except Exception as exc:
+            logger.warning("顺手翻译失败（已导出的结果不受影响）：%s: %s",
+                           type(exc).__name__, str(exc)[:200])
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+        if result.get("ok"):
+            logger.info("翻译完成：语音 %s/%s 段、事件 %s/%s 个 -> %s",
+                        result.get("speech_translated", 0), result.get("speech_total", 0),
+                        result.get("event_translated", 0), result.get("event_total", 0),
+                        result.get("target_language"))
+        else:
+            logger.warning("翻译未完成：%s %s", result.get("reason"), result.get("detail") or "")
+        return result
+
     # --------------------------------------------------------------- 视觉阶段
+
     def _run_visual(self, info: VideoInfo, cuts: list[float], ckpt: Checkpoint,
                     output_language: str, renderer: LanguageRenderer) -> tuple[list[VisualEvent], dict]:
         vcfg = self.cfg.visual
@@ -297,11 +398,12 @@ class Pipeline:
 
         bench.reset_peak_vram()
         cache = ckpt.load_window_cache()
-        # 缓存键带上输出语言 + 模型：换语言或换模型重跑时不能复用旧描述
+        # 缓存键带上输出语言 + 模型 + 画面情绪开关：换语言、换模型、开关情绪重跑时都不能复用旧描述
         model_tag = self.analyzer.model_id.split("/")[-1]
+        emotion_tag = "em1" if vcfg.get("emotion_enabled", True) else "em0"
 
         def key_of(idx: int, s: float, e: float) -> str:
-            return f"{model_tag}|{output_language}|{idx}:{s:.3f}-{e:.3f}"
+            return f"{model_tag}|{output_language}|{emotion_tag}|{idx}:{s:.3f}-{e:.3f}"
 
 
         all_cached = all(key_of(i, s, e) in cache for i, (s, e) in enumerate(windows))
@@ -315,6 +417,8 @@ class Pipeline:
             # （驱动把权重换页到共享内存）。重新加载 whisper 只要 ~20s，明显划算。
             if self.cfg.runtime.get("unload_speech_before_visual", True):
                 self.asr.unload()
+                self.emotion.unload()
+                self.speaker.unload()
             self._load_visual_model()
 
         done_windows = 0
@@ -488,9 +592,105 @@ class Pipeline:
         self.analyzer.set_output_language(language)
 
 
+    def _annotate_speaker(self, info: VideoInfo, speech_payload: dict[str, Any],
+                          ckpt: Checkpoint, timer: bench.Timer) -> None:
+        """给每句补 speaker / speaker_confidence（谁说的），结果一起进断点缓存。
+
+        人数是声纹自己定的，不固定几人：cam++ 声纹 + 谱聚类扫 k，用余弦轮廓系数挑。
+        分不出来时老实判成 1 人（宁可少判，不给错答案）——同卵双胞胎那种音色就是这种情况。
+        用哪个声纹模型看配置（界面「声纹」下拉：英文 / 中文），换了模型缓存作废重判。
+        """
+        segments = speech_payload.get("segments") or []
+        if not self.speaker.enabled or not segments:
+            return
+        language = speech_payload.get("language")
+        wanted = self.speaker.model_id
+        cached = speech_payload.get("speaker")
+        if cached is not None:
+            if (cached.get("model") or {}).get("id") == wanted:
+                logger.info("复用已有说话人结果：%s 人 / %d 句", cached.get("speakers", "?"), len(segments))
+                return
+            # 换了声纹模型，旧结论不能留：编号和人数都可能变
+            logger.info("已有说话人结果来自 %s，本次要用 %s，重新判一次",
+                        (cached.get("model") or {}).get("id"), wanted)
+
+        with timer.stage("speaker_seconds"):
+            try:
+                report_progress("speech", 0.85, "加载声纹模型 / 解码音频", video=info.name)
+                meta = self.speaker.annotate(info, segments, language)
+            except Exception as exc:  # noqa: BLE001 - 声纹是增强项，不能连累转写
+                logger.error("说话人分离失败：%s", exc)
+                logger.debug(traceback.format_exc())
+                meta = {"available": False, "reason": f"error: {exc}"[:300]}
+
+        speech_payload["speaker"] = meta
+        ckpt.save("speech", speech_payload)
+        if meta.get("available"):
+            report_progress("speech", 0.9, f"说话人分离完成（{meta.get('speakers')} 人）",
+                            video=info.name)
+        else:
+            logger.info("本条没做说话人分离：%s", meta.get("reason"))
+
+    def _annotate_emotion(self, info: VideoInfo, speech_payload: dict[str, Any],
+                          ckpt: Checkpoint, timer: bench.Timer,
+                          output_language: str) -> None:
+        """给每句语音补情绪标签，并挑出情绪最强的几句作为高光冻帧候选。
+
+        情绪一起进断点缓存：复用已有语音结果时若缓存里没有情绪，这里会补判一次；
+        缓存有情绪但语言变了，只重渲显示名（emotion_en 是稳定标签），不重跑模型。
+        """
+        segments = speech_payload.get("segments") or []
+        if not self.emotion.enabled or not segments:
+            return
+        ecfg = self.cfg.speech.get("emotion", {})
+        # 判过就不重判：注意不能看段里有没有 emotion 键——SpeechEvent 现在总会带这个字段
+        # （值是 None），所以用 payload 级别的 emotion 元信息当标记。
+        cached = speech_payload.get("emotion")
+        if cached is not None:
+            if cached.get("language") == output_language:
+                logger.info("复用已有语音情绪结果：%d 段", len(segments))
+                return
+            count = relabel(segments, output_language)
+            cached["language"] = output_language
+            speech_payload["emotion_peaks"] = emotion_peaks(
+                segments,
+                top_n=int(ecfg.get("peak_top_n", 5)),
+                min_intensity=float(ecfg.get("peak_min_intensity", 0.5)),
+            )
+            ckpt.save("speech", speech_payload)
+            logger.info("语音情绪换成 %s 显示：%d 段（没有重跑模型）", output_language, count)
+            return
+
+        with timer.stage("emotion_seconds"):
+            try:
+                report_progress("speech", 0.9, "加载情绪模型 / 解码音频", video=info.name)
+                meta = self.emotion.annotate(info, segments, output_language)
+            except Exception as exc:
+                logger.error("语音情绪识别失败：%s", exc)
+                logger.debug(traceback.format_exc())
+                meta = {"available": False, "reason": f"error: {exc}"[:300],
+                        "language": output_language}
+
+        speech_payload["emotion"] = meta
+        speech_payload["emotion_peaks"] = emotion_peaks(
+            segments,
+            top_n=int(ecfg.get("peak_top_n", 5)),
+            min_intensity=float(ecfg.get("peak_min_intensity", 0.5)),
+        )
+        ckpt.save("speech", speech_payload)
+        peaks = speech_payload["emotion_peaks"]
+        if peaks:
+            logger.info("情绪最强的 %d 句（可作高光冻帧点）：%s", len(peaks),
+                        "; ".join(f"{p['freeze_at']:.2f}s {p['emotion']}({p['intensity']:.2f})"
+                                  for p in peaks))
+        report_progress("speech", 1.0, f"语音情绪完成（{meta.get('annotated', 0)} 段）",
+                        video=info.name)
+
     def close(self) -> None:
         self.analyzer.unload()
         self.asr.unload()
+        self.emotion.unload()
+        self.speaker.unload()
 
 
 def _looks_like_oom(exc: BaseException) -> bool:

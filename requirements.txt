@@ -13,5 +13,12 @@ tqdm>=4.66.0
 PyQt5==5.15.11
 # MiniCPM-V-4.5 int4 后端需要（bnb nf4 预量化权重）；只用 Qwen3-VL 时可不装
 bitsandbytes==0.48.1
+# 语音情绪识别（emotion2vec+）。funasr 的 load_utils 会无条件 import torchaudio，
+# 所以 torchaudio 必须装，且版本要跟 torch 对齐（由 setup_and_test.bat 走 CUDA index）
+funasr==1.4.4
+# 说话人分离（pyannote 分段 + cam++ 声纹，纯 onnx / CPU），见 speech/diarization.py
+sherpa-onnx==1.13.6
+
+
 
 

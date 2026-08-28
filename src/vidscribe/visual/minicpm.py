@@ -172,6 +172,7 @@ class MiniCPMAnalyzer:
         prompt = prompts.build_user_prompt(
             start, end, batch.timestamps, previous_summary,
             output_language=self.output_language, timestamp_mode="list",
+            with_emotion=bool(self.cfg.get("emotion_enabled", True)),
         )
         system = prompts.system_prompt(self.output_language)
         # 官方 chat() 里 assert role in ["user","assistant"]，system 必须走 system_prompt 参数
@@ -204,7 +205,7 @@ class MiniCPMAnalyzer:
         self._free()
 
         text = raw if isinstance(raw, str) else str(raw)
-        events = parse_events(text)
+        events = parse_events(text, self.output_language)
         events = calibrate_events(
             events, batch, scene_cuts or [], start, end,
             tolerance=float(self.cfg.get("snap_tolerance_seconds", 1.0)),

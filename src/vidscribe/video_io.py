@@ -221,7 +221,6 @@ def sample_frames(info: VideoInfo, frame_indices: Iterable[int], max_pixels: int
         cap.release()
         raise RuntimeError(f"无法打开视频进行采样: {info.path}")
     try:
-        frame_msec = 1000.0 / max(info.fps, 1e-6)
         current = -1
         for idx in wanted:
             if idx != current + 1:
@@ -232,12 +231,13 @@ def sample_frames(info: VideoInfo, frame_indices: Iterable[int], max_pixels: int
                 current = -1
                 continue
             current = pos_frames
-            # POS_MSEC 必须在 read() 之后读：seek 之后读到的是垃圾值（实测 43 帧处返回 2.79ms）。
-            # read() 之后它指向“下一帧”的时间，所以要减去一帧时长。
-            next_msec = float(cap.get(cv2.CAP_PROP_POS_MSEC))
-            this_msec = next_msec - frame_msec
-            if next_msec > 0.0 and this_msec > -1.0:
-                ts = max(this_msec, 0.0) / 1000.0
+            # POS_MSEC 必须在 read() 之后读：seek 之后、read() 之前读到的是垃圾值
+            # （实测 43 帧处返回 2.79ms）。read() 之后它就是刚读出这一帧自己的 PTS
+            # ——用 PyAV 的 frame.pts*time_base 逐帧比对过：idx=620 时 POS_MSEC=20666.7ms
+            # 正好等于第 620 帧的 pts，所以不能再减一帧时长（早期版本减了，导致时间戳整体早一帧）。
+            this_msec = float(cap.get(cv2.CAP_PROP_POS_MSEC))
+            if this_msec >= 0.0:
+                ts = this_msec / 1000.0
             else:
                 ts = pos_frames / max(info.fps, 1e-6)
             resized = cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_AREA)

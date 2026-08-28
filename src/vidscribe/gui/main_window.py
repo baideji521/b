@@ -1,7 +1,10 @@
-"""PyQt5 GUI：左侧视频播放器，右侧事件时间轴，底部语音文本。
+"""PyQt5 GUI：左侧视频播放器，右侧事件时间轴，底部语音文本 + 日志。
 
 点击时间轴条目或语音行 -> 播放器跳到对应真实秒数。
 数据全部来自 output/<视频名>/ 下的 JSON，GUI 不做任何时间推算。
+
+三个列表（事件时间轴 / 语音 / 日志）都支持右键：全选、复制、编辑、删除、清空。
+编辑和删除会即时写回对应的 JSON，原文另有 original_text 兜底，重新分析可复原。
 """
 
 from __future__ import annotations
@@ -13,20 +16,26 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import QEvent, Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QFont
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDoubleSpinBox,
     QFileDialog,
+    QGridLayout,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QProgressBar,
@@ -42,9 +51,29 @@ from PyQt5.QtWidgets import (
 
 from ..config import Config
 from ..constants import VIDEO_SUFFIXES
+from ..emotions import display_name as emotion_display
+from . import flow
+from .flow import FlowLayout
 from ..progress import parse as parse_progress
-from ..timeline.exporters import fmt_time
+from ..speech.sentences import split_sentences
+from ..translate import needs_translation
+
+from ..timeline.exporters import (
+    fmt_time,
+    multi_speaker,
+    speaker_tag,
+    txt_words,
+    words_of,
+    write_capcut_srt,
+    write_events_txt,
+    write_json,
+    write_merged_txt,
+    write_speech_txt,
+    write_words_txt,
+)
+
 from . import theme
+from . import settings as gui_settings
 from .player import FramePlayer
 
 IMPORTANCE_COLOR = {
@@ -53,37 +82,47 @@ IMPORTANCE_COLOR = {
     "high": QColor("#ffb454"),
     "critical": QColor("#ff5f5f"),
 }
+PLAYING_COLOR = QColor(theme.PLAYING)   # 正在播放的字幕
+NORMAL_TEXT_COLOR = QColor(theme.TEXT)  # 播过去恢复的原色
+
+
+def _emotion_cell(emotion_en: Any, intensity: Any, language: str, stored: Any = None) -> str:
+    """情绪单元格文本：按当前显示语言现渲，没判到就显示 -。
+
+    切「翻译」看译文时显示名要跟着译文语言变，所以不能直接用 JSON 里存的显示名。
+    老结果没有英文标签时用存的显示名反查（emotions.display_name 认中英两种写法）。
+    """
+    name = emotion_display(emotion_en, stored, language)
+    if not name:
+        return "-"
+    if isinstance(intensity, (int, float)):
+        return f"{name} {float(intensity):.2f}"
+    return str(name)
 
 
 class AnalyzeWorker(QThread):
-    """用子进程跑分析流水线。
+    """用子进程跑分析流水线 / 翻译。
 
-    刻意不在 GUI 进程里 import torch/cv2：opencv 会改写 Qt 插件路径，
-    torch 也会占住显存，分开进程更稳，而且日志/进度可以实时回传。
+    刻意不在 GUI 进程里 import torch：torch 会占住显存，分开进程更稳，
+    而且日志/进度可以实时回传。
     """
 
     log = pyqtSignal(str)
     progress = pyqtSignal(dict)
     done = pyqtSignal(bool, str)
 
-    def __init__(self, root: Path, video: Path, force: bool = False,
-                 visual_model: str | None = None):
+    def __init__(self, root: Path, argv: list[str], label: str = "分析"):
         super().__init__()
         self.root = root
-        self.video = video
-        self.force = force
-        self.visual_model = visual_model
+        self.argv = argv
+        self.label = label
         self._proc: subprocess.Popen | None = None
 
     def run(self) -> None:
         python = self.root / ".venv" / "Scripts" / "python.exe"
         if not python.is_file():
             python = Path(sys.executable)
-        cmd = [str(python), str(self.root / "run.py"), "run", str(self.video)]
-        if self.force:
-            cmd.append("--force")
-        if self.visual_model:
-            cmd += ["--visual-model", self.visual_model]
+        cmd = [str(python), str(self.root / "run.py"), *self.argv]
         env = dict(os.environ)
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONUTF8"] = "1"
@@ -118,6 +157,176 @@ class AnalyzeWorker(QThread):
             self._proc.terminate()
 
 
+class HighlightDialog(QDialog):
+    """剪辑高光的输入窗：上面三个加减秒数（默认 0.00），下面粘贴 AI JSON。
+
+    起剪点 = clip.start + 起始加减
+    冻帧点 = clip.end   + 结束加减
+    片尾   = 冻帧点     + 文本加减（冻帧+字幕这段的时长）
+    overlay.time 不参与计算，只从 overlay 里取字幕文本。
+    值会存进 gui_settings.json，下次打开自动带回来。
+    """
+
+
+    
+
+    offsetsChanged = pyqtSignal(float, float, float)
+
+    def __init__(self, parent, text: str, offsets: tuple[float, float, float],
+                 peaks: list[dict] | None = None):
+        super().__init__(parent)
+        self.setWindowTitle("剪辑高光")
+        self.resize(720, 560)
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(10)
+        self.spin_start = self._spin(offsets[0])
+        self.spin_end = self._spin(offsets[1])
+        self.spin_text = self._spin(offsets[2])
+        self.spin_text.setMinimum(0.0)   # 片尾 = 冻帧点 + 本值，负数会让片尾跑到冻帧点之前
+
+
+        for row, (label, spin, tip) in enumerate((
+            ("起始 加减秒数", self.spin_start, "起剪点 = clip.start + 本值；负数提前起剪"),
+            ("结束 加减秒数", self.spin_end, "冻帧点 = clip.end + 本值；正数晚一点冻结"),
+            ("文本 加减秒数", self.spin_text, "冻帧+字幕这段的时长；0 只留一帧，不能填负数"),
+
+        )):
+            spin.setToolTip(tip)
+            # 改一下就往外抛一次，交给主窗口存盘，取消也不会丢
+            spin.valueChanged.connect(self._emit_offsets)
+            grid.addWidget(QLabel(label), row, 0)
+            grid.addWidget(spin, row, 1)
+            grid.addWidget(QLabel(tip), row, 2)
+        grid.setColumnStretch(2, 1)
+
+        self.edit = QPlainTextEdit(text)
+        self.edit.setPlaceholderText("在这里粘贴 AI JSON")
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, self)
+        buttons.button(QDialogButtonBox.Ok).setText("开始剪辑")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+
+        layout = QVBoxLayout(self)
+        layout.addLayout(grid)
+        if peaks:
+            # 语音情绪最强的几句：情绪爆点通常就是想冻住的那一瞬间，这里只给参考不自动改 JSON
+            # 这个对话框的文案本来就是中文，情绪也统一按中文显示名渲，别混英文标签
+            tips = "　".join(
+                f"{p.get('freeze_at', 0):.2f}s "
+                f"{emotion_display(p.get('emotion_en'), p.get('emotion'), 'zh') or '?'}"
+                f"({float(p.get('intensity') or 0):.2f})" for p in peaks[:5])
+            hint = QLabel(f"情绪高光候选（冻帧点参考）：{tips}")
+            hint.setWordWrap(True)
+            hint.setToolTip("来自语音情绪识别，按情绪强度排序；时间是该句说完的时刻")
+            layout.addWidget(hint)
+        layout.addWidget(self.edit, 1)
+        layout.addWidget(buttons)
+
+    @staticmethod
+    def _spin(value: float) -> QDoubleSpinBox:
+        spin = QDoubleSpinBox()
+        spin.setDecimals(2)
+        spin.setRange(-600.0, 600.0)
+        spin.setSingleStep(0.05)
+        spin.setSuffix(" 秒")
+        spin.setValue(float(value))
+        return spin
+
+    def payload(self) -> str:
+        return self.edit.toPlainText()
+
+    def _emit_offsets(self, *_args) -> None:
+        self.offsetsChanged.emit(*self.offsets())
+
+    def offsets(self) -> tuple[float, float, float]:
+        return (round(self.spin_start.value(), 2), round(self.spin_end.value(), 2),
+                round(self.spin_text.value(), 2))
+
+
+
+class HighlightWorker(QThread):
+    """剪辑高光：按 AI JSON 起剪 -> 到冻帧点抓帧冻结 -> 冻帧特效 + 逐字字幕 -> 片尾收尾。
+
+
+    渲染是纯 CPU 的解码/画图/编码，放线程里跑，日志逐行发回界面。
+    """
+
+    log = pyqtSignal(str)
+    progress = pyqtSignal(int, int, str)  # (已完成帧, 总帧, 阶段)
+    done = pyqtSignal(bool, str)
+
+    def __init__(self, cfg, payload_text: str, fallback: Path | None,
+                 export_dir: Path | None, offsets: tuple[float, float, float] = (0.0, 0.0, 0.0)):
+        super().__init__()
+        self.cfg = cfg
+        self.payload_text = payload_text
+        self.fallback = fallback
+        self.export_dir = export_dir
+        self.offsets = offsets
+        self.output: Path | None = None
+
+    def run(self) -> None:
+        try:
+            from ..highlight import (  # noqa: PLC0415 - 重依赖（av/cv2/PIL）延迟导入
+                default_target, parse_spec, render_highlight, resolve_video,
+            )
+            from ..timeline.exporters import write_json  # noqa: PLC0415
+
+            spec = parse_spec(json.loads(self.payload_text))
+            start_delta, end_delta, text_delta = self.offsets
+            self.log.emit(f"[OFFSET] JSON 原始 clip.start={spec.clip_start:.2f} "
+                          f"clip.end={spec.clip_end:.2f}")
+            spec = spec.shifted(start_delta, end_delta, text_delta)
+            self.log.emit(f"[OFFSET] 起始{start_delta:+.2f} / 结束{end_delta:+.2f} / "
+                          f"文本{text_delta:+.2f} 秒 → 起剪={spec.clip_start:.2f} "
+                          f"冻帧={spec.freeze_time:.2f} 片尾={spec.clip_end:.2f}")
+
+            video = resolve_video(spec, self.cfg.path("output_dir"),
+                                  self.cfg.path("input_dir"), self.fallback)
+            # 和文本导出共用「导出目录」；没设过就退回该视频的结果目录
+            directory = (self.export_dir if self.export_dir and self.export_dir.is_dir()
+                         else self.cfg.path("output_dir") / video.stem)
+            target = default_target(directory, video)
+            result = render_highlight(video, spec, target, on_log=self.log.emit,
+                                      on_progress=self.progress.emit)
+            write_json(target.with_suffix(".json"),
+                       {"spec": spec.raw,
+                        "offsets": {"start": start_delta, "end": end_delta,
+                                    "text": text_delta},
+
+                        "result": result})
+        except Exception as exc:
+            self.log.emit(f"[错误] {type(exc).__name__}: {exc}")
+            self.done.emit(False, f"{type(exc).__name__}: {exc}")
+            return
+        self.output = target
+        self.done.emit(True, str(target))
+
+
+class AudioWorker(QThread):
+    """把音轨解成 wav（PyAV），供播放器出声。耗时很短但仍放线程里，避免卡界面。"""
+
+    done = pyqtSignal(str, str)  # (wav 路径或空, 错误说明)
+
+    def __init__(self, video: Path, target: Path):
+        super().__init__()
+        self.video = video
+        self.target = target
+
+    def run(self) -> None:
+        try:
+            from ..audio import extract_wav  # noqa: PLC0415
+
+            path = extract_wav(self.video, self.target)
+        except Exception as exc:
+            self.done.emit("", f"{type(exc).__name__}: {exc}")
+            return
+        self.done.emit(str(path) if path else "", "" if path else "这个视频没有可用音轨")
+
+
 class MainWindow(QMainWindow):
     def __init__(self, cfg: Config, video: Path | None = None):
         super().__init__()
@@ -125,15 +334,198 @@ class MainWindow(QMainWindow):
         self.video_path: Path | None = None
         self.timeline: list[dict[str, Any]] = []
         self.speech: list[dict[str, Any]] = []
+        self.timeline_doc: dict[str, Any] = {}
+        self.speech_doc: dict[str, Any] = {}
         self.worker: AnalyzeWorker | None = None
+        self.audio_worker: AudioWorker | None = None
+        self.clip_worker: HighlightWorker | None = None
+        self._last_highlight_json = ""
+        # 剪辑高光的三个加减秒数（起始 / 结束 / 文本），从设置里带回来
+
+        self._highlight_offsets = (0.0, 0.0, 0.0)
+        self.show_translated = False
+        self._translate_request: dict[str, str] = {}
+        self._translate_result: Path | None = None
+        # 启动时先把上次的设置读出来，_build_ui 之后再套到控件上
+        self.settings = gui_settings.load(cfg)
+        self._loading_settings = True
+        saved_export = self.settings.get("export_dir")
+        self.export_dir: Path | None = Path(saved_export) if saved_export else None
+        self._columns_user_sized = False
+        self._suppress_column_signal = False
+        self._playing_speech = -1  # 当前标绿的那句字幕在列表里的行号
+        self._playing_row = -1     # 当前标绿的画面事件在表格里的行号
+        # 拖分隔条、拉列宽会连着触发几十次，攒一下再写设置文件
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self.save_settings)
+
 
         self.setWindowTitle(theme.APP_TITLE)
         self.setWindowIcon(theme.app_icon())
         self.resize(1500, 900)
+        self.setAcceptDrops(True)  # 支持把视频文件直接拖进窗口
         self._build_ui()
+        self.apply_settings()
+        self.check_cache()
+
 
         if video:
             self.load_video(video)
+
+    # --------------------------------------------------------------- 设置
+    def _splitters(self) -> tuple[tuple[QSplitter, str], ...]:
+        """三块可拖的分区：左右（播放器/时间轴）、底部（语音/日志）、上下。"""
+        return ((self.split_main, "split_main"),
+                (self.split_bottom, "split_bottom"),
+                (self.split_vertical, "split_vertical"))
+
+    def schedule_save(self, *_args) -> None:
+        """拖动分隔条或列宽时连续触发，攒 400ms 只写一次设置文件。"""
+        if self._loading_settings:
+            return
+        self._save_timer.start(400)
+
+    def apply_settings(self) -> None:
+        """把上次退出时的参数套回控件。坏值一律忽略，不让设置文件把界面弄崩。"""
+        s = self.settings
+        model = s.get("visual_model")
+        if model:
+            idx = self.cmb_model.findData(model)
+            if idx >= 0:
+                self.cmb_model.setCurrentIndex(idx)
+        speaker = s.get("speaker_model")
+        if speaker:
+            idx = self.cmb_speaker.findData(speaker)
+            if idx >= 0:
+                self.cmb_speaker.setCurrentIndex(idx)
+        index = s.get("importance_index")
+        if isinstance(index, int) and 0 <= index < self.cmb_importance.count():
+            self.cmb_importance.setCurrentIndex(index)
+        conf = s.get("confidence")
+        if isinstance(conf, (int, float)):
+            self.spin_conf.setValue(float(conf))
+        if isinstance(s.get("auto_translate"), bool):
+            self.chk_auto_translate.setChecked(bool(s["auto_translate"]))
+        if isinstance(s.get("emotion_audio"), bool):
+            self.chk_emotion_audio.setChecked(bool(s["emotion_audio"]))
+        if isinstance(s.get("emotion_visual"), bool):
+            self.chk_emotion_visual.setChecked(bool(s["emotion_visual"]))
+        if isinstance(s.get("play_sound"), bool):
+            # 这时还没打开视频，prepare_audio 会自己跳过；等 load_video 再解音轨
+            self.chk_sound.setChecked(bool(s["play_sound"]))
+        for splitter, key in self._splitters():
+            sizes = s.get(key)
+            if (isinstance(sizes, list) and len(sizes) == splitter.count()
+                    and all(isinstance(v, int) and v >= 0 for v in sizes) and sum(sizes) > 0):
+                splitter.setSizes(sizes)
+        widths = s.get("timeline_columns")
+        # 存过的列宽只在“看起来正常”时才用：画面列窄于 160px 的状态没法看，宁可重新自适应
+        if (isinstance(widths, list) and len(widths) == self.table.columnCount()
+                and all(isinstance(v, int) and v >= 60 for v in widths) and widths[2] >= 160):
+            self._set_widths(widths, mark_user=True)
+        row_height = s.get("timeline_row_height")
+        if isinstance(row_height, int) and row_height > 0:
+            self.set_row_height(row_height)
+        offsets = s.get("highlight_offsets")
+        if (isinstance(offsets, list) and len(offsets) == 3
+                and all(isinstance(v, (int, float)) for v in offsets)):
+            self._highlight_offsets = tuple(round(float(v), 2) for v in offsets)
+        geo = s.get("window")
+        if isinstance(geo, list) and len(geo) == 4 and all(isinstance(v, int) for v in geo):
+            self.setGeometry(*geo)
+        if s.get("maximized"):
+            self.showMaximized()
+        self._loading_settings = False
+        self.refresh_export_hint()
+
+    def save_settings(self) -> None:
+        if self._loading_settings:  # 启动套用设置时别把默认值写回去
+            return
+        # 最大化时 geometry() 是全屏尺寸，存 normalGeometry 才能还原成还原后的窗口
+        rect = self.normalGeometry() if self.isMaximized() else self.geometry()
+        if rect.width() <= 0 or rect.height() <= 0:
+            rect = self.geometry()
+        self.settings.update({
+            "visual_model": self.cmb_model.currentData(),
+            "speaker_model": self.cmb_speaker.currentData(),
+            "importance_index": self.cmb_importance.currentIndex(),
+            "confidence": round(float(self.spin_conf.value()), 3),
+            "play_sound": bool(self.chk_sound.isChecked()),
+            "auto_translate": bool(self.chk_auto_translate.isChecked()),
+            "emotion_audio": bool(self.chk_emotion_audio.isChecked()),
+            "emotion_visual": bool(self.chk_emotion_visual.isChecked()),
+            "export_dir": str(self.export_dir) if self.export_dir else None,
+            "last_video_dir": str(self.video_path.parent) if self.video_path else
+                              self.settings.get("last_video_dir"),
+            "window": [rect.x(), rect.y(), rect.width(), rect.height()],
+            "maximized": bool(self.isMaximized()),
+            "timeline_columns": [self.table.columnWidth(c)
+                                 for c in range(self.table.columnCount())],
+            "timeline_row_height": self.table.verticalHeader().defaultSectionSize(),
+            "highlight_offsets": list(self._highlight_offsets),
+        })
+        for splitter, key in self._splitters():
+            self.settings[key] = splitter.sizes()
+        gui_settings.save(self.cfg, self.settings)
+
+
+    # ------------------------------------------------------------- 导出目录
+    def export_root(self) -> Path:
+        """导出文件默认放哪儿：用户选过就用它，没选过就用当前视频的结果目录。"""
+        if self.export_dir is not None and self.export_dir.is_dir():
+            return self.export_dir
+        out = self.output_dir()
+        return out if out is not None else self.cfg.path("output_dir")
+
+    def refresh_export_hint(self) -> None:
+        self.btn_export_dir.setToolTip(f"导出文件放到：{self.export_root()}")
+
+    def on_pick_export_dir(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(self, "选择导出目录", str(self.export_root()))
+        if not chosen:
+            return
+        self.export_dir = Path(chosen)
+        self.save_settings()
+        self.refresh_export_hint()
+        self.append_log(f"[导出目录] {self.export_dir}")
+        self.statusBar().showMessage(f"导出目录：{self.export_dir}")
+
+    # --------------------------------------------------------------- 缓存
+    def cache_dir_for_video(self) -> Path:
+        """当前视频的缓存目录（cache/videos/<视频标识>/），没打开视频时用 _gui。"""
+        from .. import cache as cache_mod  # noqa: PLC0415
+
+        root = self.cfg.path("cache_dir")
+        if self.video_path is None:
+            path = cache_mod.videos_root(root) / "_gui"
+            path.mkdir(parents=True, exist_ok=True)
+            return path
+        return cache_mod.video_dir_in(root, self.video_path)
+
+
+
+    def check_cache(self) -> None:
+        """开软件先看一眼缓存：固定目录 cache/ + logs/，超过 3 天的自动清掉。
+
+        只删缓存（断点、预览音频、日志），output/ 的分析结果和 models/ 的权重不碰。
+        """
+        from .. import cache as cache_mod  # noqa: PLC0415
+
+        rt = self.cfg.runtime
+        interval = float(rt.get("cache_cleanup_interval_days", 3))
+        max_age = float(rt.get("cache_max_age_days", 3))
+        try:
+            if rt.get("auto_clean_cache", True):
+                info = cache_mod.check_on_start(self.cfg, interval_days=interval,
+                                                max_age_days=max_age)
+            else:
+                info = cache_mod.status(self.cfg, interval_days=interval, max_age_days=max_age)
+        except Exception as exc:  # 缓存检查失败不该挡着用软件
+            self.append_log(f"缓存检查失败（不影响使用）：{type(exc).__name__}: {exc}")
+            return
+        self.append_log(cache_mod.summary_line(info))
+
 
     # ------------------------------------------------------------------ UI
     @staticmethod
@@ -144,8 +536,8 @@ class MainWindow(QMainWindow):
         return label
 
     def _build_ui(self) -> None:
-        top = QHBoxLayout()
-        top.setSpacing(8)
+        # 工具栏用自动换行布局：窗口拖窄时按钮往下折行，不再把最小宽度顶死（见 gui/flow.py）
+        top = FlowLayout(spacing=8)
         top.setContentsMargins(2, 2, 2, 6)
         self.btn_open = QPushButton("打开视频")
         self.btn_open.clicked.connect(self.on_open)
@@ -154,12 +546,47 @@ class MainWindow(QMainWindow):
         self.btn_analyze.clicked.connect(lambda: self.on_analyze(False))
         self.btn_reanalyze = QPushButton("重新分析（忽略缓存）")
         self.btn_reanalyze.clicked.connect(lambda: self.on_analyze(True))
-        self.btn_outdir = QPushButton("打开输出目录")
+        self.btn_speech_only = QPushButton("单独解析视频声音")
+        self.btn_speech_only.setToolTip("只重跑语音识别，画面事件结果保留（run --skip-visual --force-speech）")
+        self.btn_speech_only.clicked.connect(self.on_analyze_speech_only)
+        self.btn_translate = QPushButton("翻译")
+        self.btn_translate.setToolTip("只翻译界面上还没有译文的行（英->中 / 中->英），"
+                                      "不会重新分析视频；译好后按钮变成“回译”，切回原文")
+        self.btn_translate.clicked.connect(self.on_translate)
+        self.btn_outdir = QPushButton("打开导出目录")
+        self.btn_outdir.setToolTip("打开导出文件所在的目录（分析结果目录由 config.json 固定，界面不改它）")
         self.btn_outdir.clicked.connect(self.on_open_outdir)
+
+        # 分析结束时模型还在显存里，顺手翻译只花解码时间；单独点"翻译"要重新加载模型（约 15s）
+        self.chk_auto_translate = QCheckBox("分析后自动翻译")
+        self.chk_auto_translate.setChecked(True)
+        self.chk_auto_translate.setToolTip("分析结束时模型还在显存里，这时候翻译最快（省掉约 15s 模型加载）")
+        self.chk_auto_translate.toggled.connect(self.save_settings)
+
+        # 两路情绪各自一个开关：勾选状态实时存盘，分析时透传成 CLI 参数
+        ecfg = self.cfg.speech.get("emotion", {})
+        self.chk_emotion_audio = QCheckBox("音频情绪")
+        self.chk_emotion_audio.setChecked(bool(ecfg.get("enabled", True)))
+        self.chk_emotion_audio.setToolTip(
+            "听声音判情绪（emotion2vec+），按语音的每句话逐段判。"
+            "要额外加载一个约 1.8GB 的模型，实测多花十几秒"
+        )
+        self.chk_emotion_audio.toggled.connect(self.save_settings)
+
+        self.chk_emotion_visual = QCheckBox("画面情绪")
+        self.chk_emotion_visual.setChecked(bool(self.cfg.visual.get("emotion_enabled", True)))
+        self.chk_emotion_visual.setToolTip(
+            "看画面判情绪（表情/姿态），由视觉模型在描述画面的同一次推理里顺便给出，"
+            "不额外加载模型；改这个开关后要重新分析才会生效"
+        )
+        self.chk_emotion_visual.toggled.connect(self.save_settings)
+
+
 
         self.cmb_importance = QComboBox()
         self.cmb_importance.addItems(["全部", "normal 以上", "high 以上", "仅 critical"])
         self.cmb_importance.currentIndexChanged.connect(self.refresh_timeline_table)
+        self.cmb_importance.currentIndexChanged.connect(self.save_settings)
 
         # 视觉模型切换：只影响下一次分析，不动已有结果
         from ..visual.factory import known_models  # noqa: PLC0415
@@ -173,6 +600,36 @@ class MainWindow(QMainWindow):
         if idx >= 0:
             self.cmb_model.setCurrentIndex(idx)
         self.cmb_model.setToolTip("切换视觉模型，切换后点“重新分析”生效")
+        # 下拉框默认按最长条目算最小宽度（实测 863px），窗口就被顶死拉不窄了；限宽 + 文字省略
+        self.cmb_model.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
+        self.cmb_model.setMinimumContentsLength(16)
+        self.cmb_model.setMaximumWidth(260)
+        self.cmb_model.currentIndexChanged.connect(self.save_settings)
+
+        # 声纹模型（说话人分离）：只有英文/中文两个选择，默认英文。
+        # 「英文」用的是中英双语那份 cam++ —— 3D-Speaker 的纯英文 VoxCeleb 权重 funasr 加载不了。
+        scfg = self.cfg.speech.get("speaker", {})
+        self.cmb_speaker = QComboBox()
+        entries = scfg.get("models") or [
+            {"label": "英文", "model_id": "iic/speech_campplus_sv_zh_en_16k-common_advanced"},
+            {"label": "中文", "model_id": "iic/speech_campplus_sv_zh-cn_16k-common"},
+        ]
+        for entry in entries:
+            self.cmb_speaker.addItem(str(entry.get("label") or entry.get("model_id")),
+                                     str(entry.get("model_id")))
+        idx = self.cmb_speaker.findData(str(scfg.get("model_id") or ""))
+        if idx >= 0:
+            self.cmb_speaker.setCurrentIndex(idx)
+        self.cmb_speaker.setToolTip(
+            "给每句语音标「这是谁说的」用的声纹模型，按素材语言选。"
+            "人数由声纹自己定，不固定几人；分不出来时判成 1 人而不是给假答案。"
+            "切换后要重新分析才生效"
+        )
+        self.cmb_speaker.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLength)
+        self.cmb_speaker.setMinimumContentsLength(4)
+        self.cmb_speaker.setMaximumWidth(120)
+        self.cmb_speaker.currentIndexChanged.connect(self.save_settings)
+
 
         self.spin_conf = QDoubleSpinBox()
         self.spin_conf.setRange(0.0, 1.0)
@@ -180,39 +637,74 @@ class MainWindow(QMainWindow):
         self.spin_conf.setValue(0.0)
         self.spin_conf.setPrefix("置信度≥ ")
         self.spin_conf.valueChanged.connect(self.refresh_timeline_table)
+        self.spin_conf.valueChanged.connect(self.save_settings)
 
-        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_outdir):
+        for w in (self.btn_open, self.btn_analyze, self.btn_reanalyze, self.btn_speech_only,
+                  self.btn_translate, self.btn_outdir):
             top.addWidget(w)
-        top.addStretch(1)
+        top.addWidget(self.chk_auto_translate)
+        top.addWidget(self.chk_emotion_audio)
+        top.addWidget(self.chk_emotion_visual)
         top.addWidget(self._section("视觉模型"))
         top.addWidget(self.cmb_model)
+        top.addWidget(self._section("声纹"))
+        top.addWidget(self.cmb_speaker)
         top.addWidget(self._section("重要性"))
         top.addWidget(self.cmb_importance)
         top.addWidget(self.spin_conf)
 
-        # --- 左侧播放器（OpenCV 逐帧渲染，无声音）---
+        # 导出行
+        export_row = FlowLayout(spacing=8)
+        export_row.setContentsMargins(2, 0, 2, 4)
+        self.btn_export_speech = QPushButton("导出语音文本")
+        self.btn_export_speech.setToolTip("默认存成剪映可用的 SRT，对话框里可以改存 .txt")
+        self.btn_export_speech.clicked.connect(lambda: self.export_text("speech"))
+        self.btn_export_events = QPushButton("导出事件文本")
+        self.btn_export_events.setToolTip("默认存成剪映可用的 SRT，对话框里可以改存 .txt")
+        self.btn_export_events.clicked.connect(lambda: self.export_text("events"))
+        self.btn_export_merged = QPushButton("合并导出")
+        self.btn_export_merged.setToolTip("画面事件 + 语音按时间穿插的可读文本（txt）")
+        self.btn_export_merged.clicked.connect(lambda: self.export_text("merged"))
+        self.btn_export_dir = QPushButton("导出目录…")
+        self.btn_export_dir.clicked.connect(self.on_pick_export_dir)
+        self.btn_highlight = QPushButton("剪辑高光")
+        self.btn_highlight.setToolTip("粘贴 AI JSON：clip.start 起剪，clip.end 抓帧冻结，"
+                                     "冻帧上做特效 + 逐字字幕，片尾由「文本 加减秒数」决定；"
+                                     "输出到导出目录，文件名带 _高光时刻")
+
+        self.btn_highlight.clicked.connect(self.on_highlight)
+        export_row.addWidget(self._section("导出"))
+        for w in (self.btn_export_speech, self.btn_export_events, self.btn_export_merged,
+                  self.btn_highlight, self.btn_export_dir):
+            export_row.addWidget(w)
+
+
+        # --- 左侧播放器（OpenCV 逐帧渲染画面，音轨走 QMediaPlayer）---
         self.player = FramePlayer()
-        self.player.setMinimumSize(420, 420)
+        self.player.setMinimumSize(240, 180)  # 给小一点，左侧画面才能被真正拖窄
         self.player.positionChanged.connect(self.on_position_changed)
         self.player.durationChanged.connect(self.on_duration_changed)
         self.player.stateChanged.connect(
             lambda playing: self.btn_play.setText("暂停" if playing else "播放")
         )
+        self.player.audioFailed.connect(self.on_audio_failed)
 
         self.btn_play = QPushButton("播放")
         self.btn_play.clicked.connect(self.toggle_play)
         self.slider = QSlider(Qt.Horizontal)
         self.slider.sliderMoved.connect(lambda ms: self.player.seek(ms / 1000.0))
         self.lbl_time = QLabel("00:00.00 / 00:00.00")
-        self.lbl_time.setMinimumWidth(160)
-        self.lbl_mute = QLabel("（预览无声音，语音见下方面板）")
-        self.lbl_mute.setProperty("role", "hint")
+        self.lbl_time.setMinimumWidth(110)  # 别占太宽，否则左侧整块拖不窄
+        self.chk_sound = QCheckBox("播放声音")
+        self.chk_sound.setToolTip("勾选后预览带声音（首次勾选会先从视频里解出音轨）")
+        self.chk_sound.toggled.connect(self.on_sound_toggled)
+        self.chk_sound.toggled.connect(self.save_settings)
 
         controls = QHBoxLayout()
         controls.addWidget(self.btn_play)
         controls.addWidget(self.slider, 1)
         controls.addWidget(self.lbl_time)
-        controls.addWidget(self.lbl_mute)
+        controls.addWidget(self.chk_sound)
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
@@ -221,36 +713,67 @@ class MainWindow(QMainWindow):
         left_layout.addLayout(controls)
 
         # --- 右侧时间轴 ---
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["时间", "重要性", "画面", "时间来源"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["时间", "重要性", "画面", "时间来源", "语音情绪", "画面情绪"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setDragDropMode(QAbstractItemView.NoDragDrop)
+        self.table.viewport().setAcceptDrops(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        # 行高可调 + 自动折行：行拉高后「画面」长文本会换行显示，不再只剩一行省略号
+        self.table.setWordWrap(True)
+        self._default_row_height = self.table.verticalHeader().defaultSectionSize()
+        # 画面列拉宽到超出可视区时，横向按像素滚，而不是一整列一整列地跳
+        self.table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)  # 每列都能拖，宽度存进设置
+        header.setStretchLastSection(False)
+        header.setSectionsMovable(True)  # 列顺序也能拖
+        header.sectionResized.connect(self.on_section_resized)
+        # 表头右键：不想拖那 4px 边界的话，直接从菜单里选列宽方案
+        header.setContextMenuPolicy(Qt.CustomContextMenu)
+        header.customContextMenuRequested.connect(self.on_header_menu)
         self.table.cellClicked.connect(self.on_timeline_clicked)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.on_timeline_menu)
+        # Ctrl+滚轮 调画面列宽，Ctrl+Shift+滚轮 调行高：不用去掐表头那 4px 边界
+        self.table.viewport().installEventFilter(self)
+        header.installEventFilter(self)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
-        right_layout.addWidget(self._section("事件时间轴（点击跳转）"))
+        right_layout.addWidget(self._section("事件时间轴（点击跳转，右键更多操作）"))
         right_layout.addWidget(self.table, 1)
 
         split = QSplitter(Qt.Horizontal)
         split.addWidget(left)
         split.addWidget(right)
         split.setSizes([760, 740])
+        self.split_main = split
 
         # --- 底部语音 + 日志 ---
         self.speech_list = QListWidget()
+        self.speech_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.speech_list.setDragDropMode(QAbstractItemView.NoDragDrop)
+        self.speech_list.viewport().setAcceptDrops(False)
         self.speech_list.itemClicked.connect(self.on_speech_clicked)
+        self.speech_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.speech_list.customContextMenuRequested.connect(self.on_speech_menu)
+
         self.log_view = QPlainTextEdit()
         self.log_view.setReadOnly(True)
         self.log_view.setMaximumBlockCount(2000)
         self.log_view.setFont(QFont("Consolas", 9))
+        # 文本框默认会把拖进来的文件路径当文本插入，关掉它，让拖拽事件冒泡到窗口
+        self.log_view.setAcceptDrops(False)
+        self.log_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.log_view.customContextMenuRequested.connect(self.on_log_menu)
 
         # 进度：阶段名 + 明细 + 总进度条（数据来自子进程的 @@PROGRESS 行）
         self.lbl_stage = QLabel("空闲")
-        self.lbl_stage.setMinimumWidth(220)
+        self.lbl_stage.setMinimumWidth(120)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 1000)
         self.progress_bar.setValue(0)
@@ -263,30 +786,39 @@ class MainWindow(QMainWindow):
         speech_box = QWidget()
         sb = QVBoxLayout(speech_box)
         sb.setContentsMargins(0, 0, 0, 0)
-        sb.addWidget(self._section("语音（点击跳转）"))
+        sb.addWidget(self._section("语音（点击跳转，右键更多操作）"))
         sb.addWidget(self.speech_list)
         log_box = QWidget()
         lb = QVBoxLayout(log_box)
         lb.setContentsMargins(0, 0, 0, 0)
-        lb.addWidget(self._section("运行日志"))
+        lb.addWidget(self._section("运行日志（右键更多操作）"))
         lb.addLayout(progress_row)
         lb.addWidget(self.log_view)
         bottom.addWidget(speech_box)
         bottom.addWidget(log_box)
         bottom.setSizes([900, 600])
+        self.split_bottom = bottom
 
         vertical = QSplitter(Qt.Vertical)
         vertical.addWidget(split)
         vertical.addWidget(bottom)
         vertical.setSizes([600, 280])
+        self.split_vertical = vertical
+        for splitter, _key in self._splitters():
+            splitter.setHandleWidth(8)              # 分隔条给宽一点，好抓
+            splitter.setChildrenCollapsible(False)  # 不许拖到 0 宽，免得面板消失找不回来
+            splitter.splitterMoved.connect(self.schedule_save)
+            # 面板宽度变了，没手动调过列宽的话顺手重新自适应一次
+            splitter.splitterMoved.connect(lambda *_: self.autosize_columns())
 
         central = QWidget()
         layout = QVBoxLayout(central)
-        layout.addLayout(top)
+        layout.addWidget(flow.wrap(top))
+        layout.addWidget(flow.wrap(export_row))
         layout.addWidget(vertical, 1)
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
-        self.statusBar().showMessage("请打开一个视频")
+        self.statusBar().showMessage("把视频拖进窗口，或点左上角“打开视频”")
 
         self._follow_timer = QTimer(self)
         self._follow_timer.setInterval(250)
@@ -304,11 +836,20 @@ class MainWindow(QMainWindow):
         if not self.player.open(self.video_path):
             self.append_log(f"[播放器] 无法解码 {self.video_path.name}")
         self.setWindowTitle(f"{theme.APP_TITLE} — {self.video_path.name}")
+        # 换视频后重新准备音轨：勾着声音就直接解，没勾就等勾选时再解
+        self.player.set_audio_file(None)
+        self.chk_sound.setEnabled(True)
+        if self.chk_sound.isChecked():
+            self.prepare_audio()
         self.load_results()
+        self.save_settings()  # 记住这次是从哪个目录打开的
+        self.refresh_export_hint()
 
     def load_results(self) -> None:
         out = self.output_dir()
         self.timeline, self.speech = [], []
+        self.timeline_doc, self.speech_doc = {}, {}
+        self.show_translated = False
         if out is None:
             return
         timeline_file = out / "timeline.json"
@@ -326,12 +867,12 @@ class MainWindow(QMainWindow):
         if timeline_file.is_file():
             try:
                 with open(timeline_file, "r", encoding="utf-8") as fh:
-                    doc = json.load(fh)
-                self.timeline = doc.get("timeline", [])
+                    self.timeline_doc = json.load(fh)
+                self.timeline = self.timeline_doc.get("timeline", [])
                 self.statusBar().showMessage(
                     f"{self.video_path.name}：{len(self.timeline)} 条时间轴，"
-                    f"音频语言 {doc.get('original_language') or doc.get('language') or '无语音'}"
-                    f" -> 输出语言 {doc.get('output_language') or '-'}{used_model}"
+                    f"音频语言 {self.timeline_doc.get('original_language') or self.timeline_doc.get('language') or '无语音'}"
+                    f" -> 输出语言 {self.timeline_doc.get('output_language') or '-'}{used_model}"
                 )
             except Exception as exc:
                 self.append_log(f"[警告] 读取 timeline.json 失败: {exc}")
@@ -340,11 +881,51 @@ class MainWindow(QMainWindow):
         if speech_file.is_file():
             try:
                 with open(speech_file, "r", encoding="utf-8") as fh:
-                    self.speech = json.load(fh).get("segments", [])
+                    self.speech_doc = json.load(fh)
+                segments = self.speech_doc.get("segments", [])
+                # 老结果是"一段多句"的：读进来就按标点切成一句一行，不用重跑分析。
+                # 只切显示用的这份，不回写文件；要落盘走「保存语音结果」。
+                self.speech = split_sentences(segments)
+                if len(self.speech) != len(segments):
+                    self.append_log(f"[断句] 已有结果按标点重排：{len(segments)} 段 -> "
+                                    f"{len(self.speech)} 行（译文需重新翻译）")
             except Exception as exc:
                 self.append_log(f"[警告] 读取 speech_events.json 失败: {exc}")
+
+        self.update_translate_button()
         self.refresh_timeline_table()
         self.refresh_speech_list()
+
+    # ------------------------------------------------------------ 译文/原文
+    def has_translation(self) -> bool:
+        if any(s.get("text_translated") for s in self.speech):
+            return True
+        return any(e.get("visual_translated") for e in self.timeline)
+
+    def update_translate_button(self) -> None:
+        if self.show_translated:
+            self.btn_translate.setText("回译")
+            self.btn_translate.setToolTip("切回原文")
+            return
+        self.btn_translate.setText("翻译")
+        pending = len(self.pending_translations())
+        if pending:
+            self.btn_translate.setToolTip(f"翻译界面上还没有译文的 {pending} 行"
+                                          f"（英->中 / 中->英），不会重新分析视频")
+        elif self.has_translation():
+            self.btn_translate.setToolTip("所有条目都有译文了，点一下直接切到译文显示")
+        else:
+            self.btn_translate.setToolTip("界面上没有可翻译的文本")
+
+    def speech_display(self, seg: dict[str, Any]) -> str:
+        if self.show_translated and seg.get("text_translated"):
+            return str(seg["text_translated"])
+        return str(seg.get("text") or "")
+
+    def visual_display(self, entry: dict[str, Any]) -> str:
+        if self.show_translated and entry.get("visual_translated"):
+            return str(entry["visual_translated"])
+        return str(entry.get("visual") or "")
 
     def refresh_timeline_table(self) -> None:
         min_rank = {0: -1, 1: 1, 2: 2, 3: 3}[self.cmb_importance.currentIndex()]
@@ -363,15 +944,31 @@ class MainWindow(QMainWindow):
             rows.append(entry)
 
         self._rows = rows
+        self._playing_row = -1  # 表格重建了，上一次标绿的行号作废
         self.table.setRowCount(len(rows))
         for i, entry in enumerate(rows):
             time_text = f"{fmt_time(entry['start'])} - {fmt_time(entry['end'])}"
-            visual = entry.get("visual") or f"（无画面事件）{entry.get('speech') or ''}"[:60]
+            if entry.get("visual"):
+                visual = self.visual_display(entry)
+            else:
+                speech = self.speech_display({"text": entry.get("speech"),
+                                              "text_translated": entry.get("speech_translated")})
+                visual = f"（无画面事件）{speech}"[:60]
+            # 情绪显示名跟当前视图语言走（看译文就出译文语言），旧结果没有英文标签时兜底用存的显示名
+            lang = self.export_language()
+            speech_emotion = _emotion_cell(entry.get("speech_emotion_en"),
+                                           entry.get("speech_emotion_intensity"), lang,
+                                           entry.get("speech_emotion") or entry.get("emotion"))
+            visual_emotion = _emotion_cell(entry.get("visual_emotion_en"),
+                                           entry.get("visual_emotion_intensity"), lang,
+                                           entry.get("visual_emotion"))
             cells = [
                 time_text,
                 entry.get("importance", "-") if entry.get("visual") else "-",
                 visual,
                 entry.get("timestamp_source", "-"),
+                speech_emotion,
+                visual_emotion,
             ]
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -381,79 +978,574 @@ class MainWindow(QMainWindow):
                     if color:
                         item.setForeground(QBrush(color))
                 self.table.setItem(i, col, item)
-        self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.autosize_columns()
+
+    def autosize_columns(self) -> None:
+        """按内容 + 剩余宽度排列宽。用户自己拖过或菜单调过之后就不再自动动它。"""
+        if self._columns_user_sized or not self.table.rowCount():
+            return
+        self.fit_columns(mark_user=False)
+
+    def _set_widths(self, widths: list[int], mark_user: bool) -> None:
+        """统一改列宽：改的过程里屏蔽 sectionResized，免得被当成用户手动拖动。"""
+        self._suppress_column_signal = True
+        try:
+            for col, width in enumerate(widths):
+                self.table.setColumnWidth(col, max(40, width))
+        finally:
+            self._suppress_column_signal = False
+        if mark_user:
+            self._columns_user_sized = True
+        self.schedule_save()
+
+    def fit_columns(self, mark_user: bool = True) -> None:
+        """按内容自适应，"画面"列吃掉剩下的宽度。"""
+        self._suppress_column_signal = True
+        try:
+            self.table.resizeColumnsToContents()
+        finally:
+            self._suppress_column_signal = False
+        header = self.table.horizontalHeader()
+        widths = [header.sectionSize(c) for c in range(self.table.columnCount())]
+        rest = self.table.viewport().width() - sum(widths) + widths[2] - 4
+        widths[2] = max(200, rest)
+        self._set_widths(widths, mark_user)
+
+    def step_visual_column(self, delta: int) -> None:
+        """「画面」列按固定步长加宽/变窄，不用去掐表头那 4px 边界。"""
+        widths = [self.table.columnWidth(c) for c in range(self.table.columnCount())]
+        widths[2] = max(120, widths[2] + delta)
+        self._set_widths(widths, mark_user=True)
+
+    def set_row_height(self, height: int) -> None:
+        """统一改行高：行高归 verticalHeader 管，表格重建后依然生效。"""
+        height = min(400, max(self._default_row_height, height))
+        self.table.verticalHeader().setDefaultSectionSize(height)
+        self.schedule_save()
+
+    def step_row_height(self, delta: int) -> None:
+        """行高按固定步长增减，配合自动折行让长文本多显示几行。"""
+        self.set_row_height(self.table.verticalHeader().defaultSectionSize() + delta)
+
+    def reset_row_height(self) -> None:
+        self.set_row_height(self._default_row_height)
+
+    def eventFilter(self, obj, event):
+        """Ctrl+滚轮 = 画面列宽，Ctrl+Shift+滚轮 = 行高。表格区和表头上都生效。"""
+        if event.type() == QEvent.Wheel and event.modifiers() & Qt.ControlModifier:
+            delta = event.angleDelta().y()
+            if delta:
+                if event.modifiers() & Qt.ShiftModifier:
+                    self.step_row_height(8 if delta > 0 else -8)
+                else:
+                    self.step_visual_column(40 if delta > 0 else -40)
+            return True  # 吃掉事件，别让表格顺带滚动
+        return super().eventFilter(obj, event)
+
+    def _add_size_actions(self, menu: QMenu) -> None:
+        """列宽/行高调节项：表头右键和表格右键挂的是同一份。"""
+        menu.addAction("画面列加宽 (+80)　Ctrl+滚轮↑", lambda: self.step_visual_column(80))
+        menu.addAction("画面列变窄 (-80)　Ctrl+滚轮↓", lambda: self.step_visual_column(-80))
+        menu.addSeparator()
+        menu.addAction("行高增高 (+16)　Ctrl+Shift+滚轮↑", lambda: self.step_row_height(16))
+        menu.addAction("行高降低 (-16)　Ctrl+Shift+滚轮↓", lambda: self.step_row_height(-16))
+        menu.addSeparator()
+        menu.addAction("按内容自适应列宽", self.fit_columns)
+        menu.addAction("平均分配列宽", self.spread_columns)
+        menu.addAction("恢复默认列宽", self.reset_columns)
+        menu.addAction("恢复默认行高", self.reset_row_height)
+
+
+
+    def spread_columns(self) -> None:
+        """平均分配列宽。"""
+        count = self.table.columnCount()
+        each = max(60, (self.table.viewport().width() - 4) // count)
+        self._set_widths([each] * count, mark_user=True)
+
+    def reset_columns(self) -> None:
+        """回到默认列宽，并允许之后再次自动排版。"""
+        rest = max(200, self.table.viewport().width() - 130 - 90 - 110 - 4)
+        self._set_widths([130, 90, rest, 110], mark_user=False)
+        self._columns_user_sized = False
+
+    def on_section_resized(self, *_args) -> None:
+        if self._suppress_column_signal:
+            return
+        self._columns_user_sized = True  # 用户拖过就别再自动重排
+        self.schedule_save()
+
+    def on_header_menu(self, pos) -> None:
+        menu = QMenu(self)
+        self._add_size_actions(menu)
+        menu.exec_(self.table.horizontalHeader().mapToGlobal(pos))
+
 
     def refresh_speech_list(self) -> None:
         self.speech_list.clear()
+        self._playing_speech = -1  # 列表重建了，上一次标绿的行号作废
+        # 判出 2 人以上才在每行标说话人，单人素材不加这个前缀
+        multi = multi_speaker(self.speech)
         for seg in self.speech:
             conf = seg.get("confidence")
             suffix = f"  (conf {conf:.2f})" if isinstance(conf, (int, float)) else ""
-            item = QListWidgetItem(f"[{fmt_time(seg['start'])} - {fmt_time(seg['end'])}] {seg['text']}{suffix}")
+            emotion = emotion_display(seg.get("emotion_en"), seg.get("emotion"),
+                                      self.export_language())
+            intensity = seg.get("emotion_intensity")
+            if emotion:
+                suffix += f"  [{emotion}"
+                suffix += f" {intensity:.2f}]" if isinstance(intensity, (int, float)) else "]"
+            text = self.speech_display(seg)
+            who = speaker_tag(seg.get("speaker"), self.export_language()) if multi else ""
+            item = QListWidgetItem(
+                f"[{fmt_time(seg['start'])} - {fmt_time(seg['end'])}]{who} {text}{suffix}")
             item.setData(Qt.UserRole, float(seg["start"]))
             self.speech_list.addItem(item)
 
+    # ------------------------------------------------------------------ 落盘
+    def save_speech(self) -> None:
+        out = self.output_dir()
+        if out is None or not self.speech_doc:
+            return
+        self.speech_doc["segments"] = self.speech
+        write_json(out / "speech_events.json", self.speech_doc)
+        self.append_log(f"[保存] speech_events.json（{len(self.speech)} 段）")
+
+    def save_timeline(self) -> None:
+        out = self.output_dir()
+        if out is None or not self.timeline_doc:
+            return
+        self.timeline_doc["timeline"] = self.timeline
+        counts = self.timeline_doc.get("counts")
+        if isinstance(counts, dict):
+            counts["timeline_entries"] = len(self.timeline)
+        write_json(out / "timeline.json", self.timeline_doc)
+        self.append_log(f"[保存] timeline.json（{len(self.timeline)} 条）")
+
     # ------------------------------------------------------------------ 交互
+    def input_root(self) -> Path:
+        """打开视频对话框从哪儿开：当前视频的上一层目录优先，其次上次用过的目录。"""
+        if self.video_path is not None and self.video_path.parent.is_dir():
+            return self.video_path.parent
+        last = self.settings.get("last_video_dir")
+        if last and Path(last).is_dir():
+            return Path(last)
+        return self.cfg.path("input_dir") if self.cfg.path("input_dir").is_dir() else self.cfg.root
+
     def on_open(self) -> None:
         patterns = " ".join(f"*{s}" for s in sorted(VIDEO_SUFFIXES))
-        start_dir = str(self.cfg.path("input_dir") if self.cfg.path("input_dir").is_dir() else self.cfg.root)
-        path, _ = QFileDialog.getOpenFileName(self, "选择视频", start_dir, f"视频文件 ({patterns})")
+        path, _ = QFileDialog.getOpenFileName(self, "选择视频", str(self.input_root()),
+                                              f"视频文件 ({patterns})")
         if path:
             self.load_video(Path(path))
+
+    # ------------------------------------------------------------- 拖拽打开
+    @staticmethod
+    def _videos_in(mime) -> list[Path]:
+        """从拖拽数据里挑出视频文件（按扩展名，不猜内容）。"""
+        if not mime.hasUrls():
+            return []
+        found = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.lower() in VIDEO_SUFFIXES:
+                found.append(path)
+        return found
+
+    def dragEnterEvent(self, event) -> None:  # noqa: N802
+        if self._videos_in(event.mimeData()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:  # noqa: N802
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:  # noqa: N802
+        videos = self._videos_in(event.mimeData())
+        if not videos:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        if len(videos) > 1:
+            # 界面一次只放一个视频；多选时取第一个，其余提示走命令行批处理
+            self.append_log(f"[拖入] 收到 {len(videos)} 个视频，先打开 {videos[0].name}；"
+                            f"批量处理请用命令行 run")
+        self.load_video(videos[0])
+
+    def busy(self) -> bool:
+        if self.worker is not None and self.worker.isRunning():
+            QMessageBox.information(self, "提示", "已有任务在运行")
+            return True
+        if self.clip_worker is not None and self.clip_worker.isRunning():
+            QMessageBox.information(self, "提示", "高光剪辑还在渲染，等它跑完")
+            return True
+        return False
+
+    def on_highlight(self) -> None:
+        """剪辑高光：粘贴 AI JSON，起剪 / 冻帧 / 收尾三个时间照 JSON 执行，另可再加减秒数。"""
+        if self.busy():
+            return
+        dialog = HighlightDialog(self, self._last_highlight_json, self._highlight_offsets,
+                                 (self.speech_doc or {}).get("emotion_peaks"))
+        dialog.offsetsChanged.connect(self.on_highlight_offsets_changed)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        text = dialog.payload()
+        self._highlight_offsets = dialog.offsets()
+        self.schedule_save()  # 加减秒数存进 gui_settings.json，下次打开自动带回来
+        if not text.strip():
+            return
+        self._last_highlight_json = text
+        self.btn_highlight.setEnabled(False)
+        self.set_progress(0.0)
+        self.lbl_stage.setText("剪辑高光｜准备中")
+
+        self.statusBar().showMessage("正在渲染高光片段…")
+        self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, self.export_dir,
+                                           self._highlight_offsets)
+        self.clip_worker.log.connect(self.append_log)
+        self.clip_worker.progress.connect(self.on_highlight_progress)
+        self.clip_worker.done.connect(self.on_highlight_done)
+        self.clip_worker.start()
+
+    def set_progress(self, ratio: float, text: str | None = None) -> None:
+        """刷进度条。跑满时整条变绿（theme 里的 `QProgressBar[done="true"]`）。
+
+        Qt 的样式表按属性选择器命中之后不会自己重绘，setProperty 后必须
+        unpolish/polish 一次，否则颜色不变。
+        """
+        ratio = min(1.0, max(0.0, float(ratio)))
+        self.progress_bar.setValue(int(round(ratio * 1000)))
+        self.progress_bar.setFormat(text if text is not None else f"{ratio * 100:.1f}%")
+        done = "true" if ratio >= 1.0 else "false"
+        if self.progress_bar.property("done") != done:
+            self.progress_bar.setProperty("done", done)
+            self.progress_bar.style().unpolish(self.progress_bar)
+            self.progress_bar.style().polish(self.progress_bar)
+
+    def on_highlight_progress(self, done: int, total: int, stage: str) -> None:
+
+        """按已写入帧数推进进度条（渲染在子线程里跑，信号回主线程刷界面）。"""
+        total = max(total, 1)
+        ratio = min(1.0, max(0.0, done / total))
+        self.set_progress(ratio)
+        self.lbl_stage.setText(f"剪辑高光｜{stage} {done}/{total} 帧")
+
+
+    def on_highlight_offsets_changed(self, start: float, end: float, text: float) -> None:
+
+        """对话框里一改加减秒数就存盘（400ms 防抖），点取消也留着。"""
+        self._highlight_offsets = (round(start, 2), round(end, 2), round(text, 2))
+
+        self.schedule_save()
+
+    def on_highlight_done(self, ok: bool, message: str) -> None:
+        self.btn_highlight.setEnabled(True)
+        if ok:
+            self.set_progress(1.0, "100%")
+            self.lbl_stage.setText("完成")
+
+            self.statusBar().showMessage(f"高光片段已生成：{message}", 10000)
+            self.append_log(f"[剪辑高光] 已生成 {message}")
+        else:
+            self.lbl_stage.setText("失败")
+            self.append_log(f"[剪辑高光] 失败：{message}")
+            QMessageBox.warning(self, "剪辑高光失败", message)
+
+
+    def start_worker(self, argv: list[str], label: str) -> None:
+        self.btn_analyze.setEnabled(False)
+        self.btn_reanalyze.setEnabled(False)
+        self.btn_speech_only.setEnabled(False)
+        self.btn_translate.setEnabled(False)
+        self.set_progress(0.0)
+        self.lbl_stage.setText(f"{label}｜启动子进程")
+
+        self.worker = AnalyzeWorker(self.cfg.root, argv, label)
+        self.worker.log.connect(self.append_log)
+        self.worker.progress.connect(self.on_progress)
+        self.worker.done.connect(self.on_worker_done)
+        self.worker.start()
+
+    def _emotion_argv(self) -> list[str]:
+        """两个情绪开关 + 声纹模型透传给 run：显式给参数，不让子进程去猜 config.json。"""
+        argv = [
+            "--audio-emotion" if self.chk_emotion_audio.isChecked() else "--no-audio-emotion",
+            "--visual-emotion" if self.chk_emotion_visual.isChecked() else "--no-visual-emotion",
+        ]
+        speaker = self.cmb_speaker.currentData()
+        if speaker:
+            argv += ["--speaker-model", str(speaker)]
+        return argv
 
     def on_analyze(self, force: bool) -> None:
         if self.video_path is None:
             QMessageBox.information(self, "提示", "请先打开一个视频")
             return
-        if self.worker is not None and self.worker.isRunning():
-            QMessageBox.information(self, "提示", "已有分析任务在运行")
+        if self.busy():
             return
         model_id = self.cmb_model.currentData()
-        self.append_log(f"开始分析 {self.video_path.name}（force={force}，视觉模型={model_id}）…")
-        self.btn_analyze.setEnabled(False)
-        self.btn_reanalyze.setEnabled(False)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setFormat("0.0%")
-        self.lbl_stage.setText("准备中｜启动子进程")
-        self.worker = AnalyzeWorker(self.cfg.root, self.video_path, force, visual_model=model_id)
-        self.worker.log.connect(self.append_log)
-        self.worker.progress.connect(self.on_progress)
-        self.worker.done.connect(self.on_analyze_done)
-        self.worker.start()
+        argv = ["run", str(self.video_path)]
+        if force:
+            argv.append("--force")
+        if model_id:
+            argv += ["--visual-model", model_id]
+        argv += self._emotion_argv()
+        auto = self.chk_auto_translate.isChecked()
+        if auto:
+            argv.append("--translate")
+        self.append_log(f"开始分析 {self.video_path.name}（force={force}，视觉模型={model_id}，"
+                        f"音频情绪={'开' if self.chk_emotion_audio.isChecked() else '关'}，"
+                        f"画面情绪={'开' if self.chk_emotion_visual.isChecked() else '关'}，"
+                        f"声纹={self.cmb_speaker.currentText()}，"
+                        f"顺手翻译={'是' if auto else '否'}）…")
+        self.start_worker(argv, "分析")
+
+    def on_analyze_speech_only(self) -> None:
+        if self.video_path is None:
+            QMessageBox.information(self, "提示", "请先打开一个视频")
+            return
+        if self.busy():
+            return
+        self.append_log(f"只解析声音：{self.video_path.name}（画面事件结果保留）…")
+        self.start_worker(["run", str(self.video_path), "--skip-visual", "--force-speech",
+                           *self._emotion_argv()], "语音识别")
+
+    def source_language(self) -> str | None:
+        """界面上这批文本的语言：优先用 whisper 判定的音频语言。"""
+        for key in ("language", "original_language"):
+            value = self.speech_doc.get(key) or self.timeline_doc.get(key)
+            if value:
+                return str(value)
+        return None
+
+    def export_language(self) -> str:
+        """导出文本该用哪种语言的表头/标签：跟当前显示的内容一致。
+
+        看译文时用译文语言，看原文时用输出语言（= 原始音频语言），
+        这样整份文件不会出现"中文表头 + 英文正文"这种混排。
+        """
+        if self.show_translated:
+            for doc in (self.speech_doc, self.timeline_doc):
+                meta = doc.get("translation") or {}
+                if meta.get("target_language"):
+                    return str(meta["target_language"])
+            for seg in self.speech:
+                if seg.get("translated_language"):
+                    return str(seg["translated_language"])
+        value = self.timeline_doc.get("output_language") or self.source_language()
+        return str(value or "zh")
+
+
+    def pending_translations(self) -> list[dict[str, str]]:
+        """界面上"还没有译文"的行。原文被编辑过的也算，旧译文视为失效。"""
+        items: list[dict[str, str]] = []
+        for i, seg in enumerate(self.speech):
+            text = str(seg.get("text") or "")
+            if needs_translation(text, seg.get("text_translated"), seg.get("text_translated_from")):
+                items.append({"key": f"s{i}", "text": text})
+        for i, entry in enumerate(self.timeline):
+            if not entry.get("visual"):
+                continue
+            text = str(entry.get("visual") or "")
+            if needs_translation(text, entry.get("visual_translated"),
+                                 entry.get("visual_translated_from")):
+                items.append({"key": f"v{i}", "text": text})
+        return items
+
+    def on_translate(self) -> None:
+        if self.show_translated:  # 回译：切回原文，不跑模型
+            self.set_translated_view(False)
+            self.append_log("已切回原文")
+            return
+
+        pending = self.pending_translations()
+        if not pending:
+            if self.has_translation():  # 全都译过了，直接切换显示
+                self.set_translated_view(True)
+                self.append_log("已切到译文（所有条目都有译文，没有重新翻译）")
+            else:
+                QMessageBox.information(self, "提示", "界面上没有可翻译的文本")
+            return
+        if self.busy():
+            return
+
+        out = self.output_dir()
+        work = self.cache_dir_for_video()
+        request_file = work / "translate_request.json"
+        result_file = work / "translate_result.json"
+        self._translate_request = {row["key"]: row["text"] for row in pending}
+        self._translate_result = result_file
+        write_json(request_file, {"source": self.source_language(), "items": pending,
+                                  "output_dir": str(out) if out else None})
+        argv = ["translate", "--items", str(request_file), "--result", str(result_file)]
+        model_id = self.cmb_model.currentData()
+        if model_id:
+            argv += ["--visual-model", model_id]
+        self.append_log(f"翻译界面上还没有译文的 {len(pending)} 行（纯文本，不重新分析视频）…")
+        self.start_worker(argv, "翻译")
+
+    def set_translated_view(self, translated: bool) -> None:
+        self.show_translated = bool(translated)
+        self.update_translate_button()
+        self.refresh_timeline_table()
+        self.refresh_speech_list()
+
+    def apply_translation_result(self) -> bool:
+        """把子进程的翻译结果贴回界面当前的数据，然后落盘。"""
+        result_file = getattr(self, "_translate_result", None)
+        if result_file is None or not Path(result_file).is_file():
+            self.append_log("[翻译] 找不到结果文件")
+            return False
+        try:
+            with open(result_file, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception as exc:
+            self.append_log(f"[翻译] 结果文件读不出来：{exc}")
+            return False
+
+        got = data.get("translations") or {}
+        target = data.get("target_language")
+        asked = getattr(self, "_translate_request", {})
+        speech_hit = event_hit = skipped = 0
+        for key, text in got.items():
+            if not text:
+                continue
+            try:
+                index = int(key[1:])
+            except ValueError:
+                continue
+            # 翻译期间用户可能删/改过行，原文对不上就跳过，不贴错位置
+            if key.startswith("s") and index < len(self.speech):
+                seg = self.speech[index]
+                if asked.get(key, str(seg.get("text") or "")) != str(seg.get("text") or ""):
+                    skipped += 1
+                    continue
+                seg["text_translated"] = text
+                seg["text_translated_from"] = str(seg.get("text") or "")
+                seg["translated_language"] = target
+                speech_hit += 1
+            elif key.startswith("v") and index < len(self.timeline):
+                entry = self.timeline[index]
+                if asked.get(key, str(entry.get("visual") or "")) != str(entry.get("visual") or ""):
+                    skipped += 1
+                    continue
+                entry["visual_translated"] = text
+                entry["visual_translated_from"] = str(entry.get("visual") or "")
+                event_hit += 1
+            else:
+                skipped += 1
+
+        # 时间轴里的语音条目是多段拼接的，用段 id 取译文重拼，不再翻译一次拼接串
+        by_id = {int(s["id"]): s["text_translated"] for s in self.speech
+                 if isinstance(s.get("id"), int) and s.get("text_translated")}
+        for entry in self.timeline:
+            ids = [i for i in (entry.get("speech_event_ids") or []) if isinstance(i, int)]
+            parts = [by_id[i] for i in ids if i in by_id]
+            if parts:
+                entry["speech_translated"] = " ".join(parts)
+
+        if speech_hit:
+            self.save_speech()
+        if event_hit or speech_hit:
+            self.save_timeline()
+        failed = len(data.get("failed") or [])
+        self.append_log(f"[翻译] 语音 {speech_hit} 行、画面 {event_hit} 条写入译文"
+                        + (f"，失败 {failed} 行" if failed else "")
+                        + (f"，跳过 {skipped} 行（翻译期间内容被改过）" if skipped else ""))
+        return bool(speech_hit or event_hit)
 
     def on_progress(self, payload: dict) -> None:
         overall = float(payload.get("overall") or 0.0)
-        self.progress_bar.setValue(int(round(overall * 1000)))
+        self.set_progress(overall)
         stage = payload.get("stage_label") or payload.get("stage") or ""
         detail = payload.get("detail") or ""
         self.lbl_stage.setText(f"{stage}｜{detail}" if detail else stage)
-        self.progress_bar.setFormat(f"{overall * 100:.1f}%")
 
-    def on_analyze_done(self, ok: bool, message: str) -> None:
-        self.btn_analyze.setEnabled(True)
-        self.btn_reanalyze.setEnabled(True)
+
+    def on_worker_done(self, ok: bool, message: str) -> None:
+        for btn in (self.btn_analyze, self.btn_reanalyze, self.btn_speech_only, self.btn_translate):
+            btn.setEnabled(True)
+        label = self.worker.label if self.worker is not None else "任务"
         if ok:
-            self.progress_bar.setValue(1000)
-            self.progress_bar.setFormat("100%")
+            self.set_progress(1.0, "100%")
             self.lbl_stage.setText("完成")
-            self.append_log(f"分析完成（{message}），重新加载结果")
-            self.load_results()
+
+            self.append_log(f"{label}完成（{message}）")
+            if label == "翻译":
+                # 翻译只补文本，不重读磁盘：界面上的手动编辑要保住
+                if self.apply_translation_result():
+                    self.set_translated_view(True)
+            else:
+                self.append_log("重新加载结果")
+                self.load_results()
         else:
             self.lbl_stage.setText("失败")
-            self.append_log(f"分析失败：{message}")
-            QMessageBox.warning(self, "分析失败", f"{message}\n详细日志见 logs/ 目录")
+            self.append_log(f"{label}失败：{message}")
+            QMessageBox.warning(self, f"{label}失败", f"{message}\n详细日志见 logs/ 目录")
+
+    # ------------------------------------------------------------------ 声音
+    def prepare_audio(self) -> None:
+        if self.video_path is None:
+            return
+        if self.audio_worker is not None and self.audio_worker.isRunning():
+            return
+        from ..audio import wav_path  # noqa: PLC0415
+
+        target = wav_path(self.cfg.path("cache_dir"), self.video_path)
+        self.statusBar().showMessage("正在从视频里解出音轨…")
+        self.audio_worker = AudioWorker(self.video_path, target)
+        self.audio_worker.done.connect(self.on_audio_ready)
+        self.audio_worker.start()
+
+    def on_audio_ready(self, path: str, error: str) -> None:
+        if not path:
+            self.chk_sound.blockSignals(True)
+            self.chk_sound.setChecked(False)
+            self.chk_sound.blockSignals(False)
+            self.chk_sound.setEnabled(False)
+            self.append_log(f"[声音] 不可用：{error}")
+            self.statusBar().showMessage(f"声音不可用：{error}")
+            return
+        if not self.player.set_audio_file(path):
+            self.chk_sound.setChecked(False)
+            self.append_log("[声音] Qt 无法加载这个音轨")
+            return
+        self.player.set_audio_enabled(self.chk_sound.isChecked())
+        self.append_log(f"[声音] 音轨就绪：{path}")
+        self.statusBar().showMessage("声音已就绪")
+
+    def on_sound_toggled(self, checked: bool) -> None:
+        if checked and not self.player.audio_available():
+            self.prepare_audio()
+            return
+        self.player.set_audio_enabled(checked)
+
+    def on_audio_failed(self, message: str) -> None:
+        self.chk_sound.blockSignals(True)
+        self.chk_sound.setChecked(False)
+        self.chk_sound.blockSignals(False)
+        self.append_log(f"[声音] 播放失败：{message}")
 
     def closeEvent(self, event) -> None:  # noqa: N802
+        self.save_settings()  # 退出时把界面参数存下来，下次启动自动加载
         if self.worker is not None and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(3000)
+        if self.audio_worker is not None and self.audio_worker.isRunning():
+            self.audio_worker.wait(3000)
+        if self.clip_worker is not None and self.clip_worker.isRunning():
+            self.clip_worker.wait(5000)  # 渲染没有中断点，给它一点时间收尾
         self.player.close_video()
         super().closeEvent(event)
 
     def on_open_outdir(self) -> None:
-        out = self.output_dir()
-        if out is None or not out.is_dir():
-            QMessageBox.information(self, "提示", "还没有输出目录")
+        out = self.export_root()
+        if not out.is_dir():
+            QMessageBox.information(self, "提示", f"目录还不存在：{out}")
             return
         if os.name == "nt":
             os.startfile(str(out))  # noqa: S606
@@ -488,28 +1580,386 @@ class MainWindow(QMainWindow):
     def highlight_current(self) -> None:
         seconds = self.player.position()
         rows = getattr(self, "_rows", [])
+        active_row = -1
         for i, entry in enumerate(rows):
             if entry["start"] - 0.01 <= seconds <= entry["end"] + 0.01:
-                if self.table.currentRow() != i:
-                    self.table.selectRow(i)
+                active_row = i
                 break
-        for i in range(self.speech_list.count()):
-            item = self.speech_list.item(i)
-            seg = self.speech[i] if i < len(self.speech) else None
-            if seg and seg["start"] - 0.01 <= seconds <= seg["end"] + 0.01:
-                font = item.font()
-                if not font.bold():
-                    font.setBold(True)
-                    item.setFont(font)
-                    self.speech_list.scrollToItem(item)
-            else:
-                font = item.font()
-                if font.bold():
-                    font.setBold(False)
-                    item.setFont(font)
+        if active_row != self._playing_row:  # 换行才重画，别每 250ms 刷整张表
+            self._paint_row(self._playing_row, playing=False)
+            self._paint_row(active_row, playing=True)
+            self._playing_row = active_row
+            if active_row >= 0:
+                if self.table.currentRow() != active_row and not self.table.hasFocus():
+                    self.table.selectRow(active_row)
+                self.table.scrollToItem(self.table.item(active_row, 0))
+        active = -1
+        for i, seg in enumerate(self.speech[:self.speech_list.count()]):
+            if seg["start"] - 0.01 <= seconds <= seg["end"] + 0.01:
+                active = i
+                break
+        if active == self._playing_speech:  # 每 250ms 跑一次，没换句就别重画
+            return
+        self._paint_speech(self._playing_speech, playing=False)
+        self._paint_speech(active, playing=True)
+        self._playing_speech = active
+        if active >= 0:
+            self.speech_list.scrollToItem(self.speech_list.item(active))
+
+    def _paint_speech(self, row: int, playing: bool) -> None:
+        """正在播放的那句标绿加粗，播过去就恢复原色。"""
+        item = self.speech_list.item(row) if row >= 0 else None
+        if item is None:
+            return
+        font = item.font()
+        font.setBold(playing)
+        item.setFont(font)
+        item.setForeground(QBrush(PLAYING_COLOR if playing else NORMAL_TEXT_COLOR))
+
+    def _paint_row(self, row: int, playing: bool) -> None:
+        """正在播放的画面事件整行标绿加粗，播过去恢复原来的重要性配色。"""
+        if row < 0 or row >= self.table.rowCount():
+            return
+        rows = getattr(self, "_rows", [])
+        entry = rows[row] if row < len(rows) else {}
+        for col in range(self.table.columnCount()):
+            item = self.table.item(row, col)
+            if item is None:
+                continue
+            font = item.font()
+            font.setBold(playing)
+            item.setFont(font)
+            if playing:
+                item.setForeground(QBrush(PLAYING_COLOR))
+                continue
+            color = None
+            if col == 2 and entry.get("visual"):
+                color = IMPORTANCE_COLOR.get(entry.get("importance", "normal"))
+            item.setForeground(QBrush(color or NORMAL_TEXT_COLOR))
 
     def append_log(self, text: str) -> None:
         self.log_view.appendPlainText(text)
+
+    # ------------------------------------------------------- 右键菜单：语音
+    def selected_speech(self) -> list[int]:
+        return sorted(self.speech_list.row(i) for i in self.speech_list.selectedItems())
+
+    def on_speech_menu(self, pos) -> None:
+        menu = QMenu(self)
+        act_all = menu.addAction("全选")
+        act_copy = menu.addAction("复制")
+        act_edit = menu.addAction("编辑")
+        act_del = menu.addAction("删除")
+        act_clear = menu.addAction("清空")
+        menu.addSeparator()
+        act_tr = menu.addAction("回译（切回原文）" if self.show_translated else "翻译")
+        menu.addSeparator()
+        act_txt = menu.addAction("导出（SRT 剪映可用 / txt）")
+        act_words = menu.addAction("逐词导出（一个词一个时间戳）")
+        chosen = menu.exec_(self.speech_list.mapToGlobal(pos))
+
+        if chosen is None:
+            return
+        if chosen is act_all:
+            self.speech_list.selectAll()
+        elif chosen is act_copy:
+            self.copy_lines([self.speech_list.item(i).text() for i in self.selected_speech()]
+                            or [self.speech_list.item(i).text() for i in range(self.speech_list.count())])
+        elif chosen is act_edit:
+            self.edit_speech()
+        elif chosen is act_del:
+            self.delete_speech()
+        elif chosen is act_clear:
+            self.clear_speech()
+        elif chosen is act_tr:
+            self.on_translate()
+        elif chosen is act_txt:
+            self.export_text("speech")
+        elif chosen is act_words:
+            self.export_words()
+
+
+    def edit_speech(self) -> None:
+        rows = self.selected_speech()
+        if len(rows) != 1:
+            QMessageBox.information(self, "提示", "编辑请只选中一行")
+            return
+        seg = self.speech[rows[0]]
+        field = "text_translated" if (self.show_translated and seg.get("text_translated")) else "text"
+        current = str(seg.get(field) or "")
+        text, ok = QInputDialog.getMultiLineText(self, "编辑语音文本", "内容：", current)
+        if not ok:
+            return
+        seg[field] = text.strip()
+        self.save_speech()
+        self.refresh_speech_list()
+
+    def delete_speech(self) -> None:
+        rows = self.selected_speech()
+        if not rows:
+            return
+        if QMessageBox.question(self, "删除", f"删除选中的 {len(rows)} 段语音？") != QMessageBox.Yes:
+            return
+        for row in reversed(rows):
+            if 0 <= row < len(self.speech):
+                self.speech.pop(row)
+        self.save_speech()
+        self.refresh_speech_list()
+
+    def clear_speech(self) -> None:
+        if not self.speech:
+            return
+        if QMessageBox.question(self, "清空", "清空全部语音段？") != QMessageBox.Yes:
+            return
+        self.speech = []
+        self.save_speech()
+        self.refresh_speech_list()
+
+    # --------------------------------------------------- 右键菜单：事件时间轴
+    def selected_entries(self) -> list[dict[str, Any]]:
+        rows = getattr(self, "_rows", [])
+        picked = sorted({i.row() for i in self.table.selectedIndexes()})
+        return [rows[r] for r in picked if 0 <= r < len(rows)]
+
+    def on_timeline_menu(self, pos) -> None:
+        menu = QMenu(self)
+        act_all = menu.addAction("全选")
+        act_copy = menu.addAction("复制")
+        act_edit = menu.addAction("编辑")
+        act_del = menu.addAction("删除")
+        act_clear = menu.addAction("清空")
+        menu.addSeparator()
+        act_tr = menu.addAction("回译（切回原文）" if self.show_translated else "翻译")
+        menu.addSeparator()
+        act_txt = menu.addAction("导出（SRT 剪映可用 / txt）")
+        menu.addSeparator()
+        self._add_size_actions(menu.addMenu("画面列宽 / 行高"))
+        chosen = menu.exec_(self.table.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_all:
+            self.table.selectAll()
+        elif chosen is act_copy:
+            entries = self.selected_entries() or getattr(self, "_rows", [])
+            self.copy_lines([
+                f"[{fmt_time(e['start'])} - {fmt_time(e['end'])}] "
+                f"{self.visual_display(e) or e.get('speech') or ''}" for e in entries
+            ])
+        elif chosen is act_edit:
+            self.edit_entry()
+        elif chosen is act_del:
+            self.delete_entries()
+        elif chosen is act_clear:
+            self.clear_entries()
+        elif chosen is act_tr:
+            self.on_translate()
+        elif chosen is act_txt:
+            self.export_text("events")
+
+    def edit_entry(self) -> None:
+        entries = self.selected_entries()
+        if len(entries) != 1:
+            QMessageBox.information(self, "提示", "编辑请只选中一行")
+            return
+        entry = entries[0]
+        if entry.get("visual"):
+            field = "visual_translated" if (self.show_translated and entry.get("visual_translated")) else "visual"
+            title = "编辑画面事件"
+        else:
+            field = "speech_translated" if (self.show_translated and entry.get("speech_translated")) else "speech"
+            title = "编辑语音条目"
+        text, ok = QInputDialog.getMultiLineText(self, title, "内容：", str(entry.get(field) or ""))
+        if not ok:
+            return
+        entry[field] = text.strip()
+        self.save_timeline()
+        self.refresh_timeline_table()
+
+    def delete_entries(self) -> None:
+        entries = self.selected_entries()
+        if not entries:
+            return
+        if QMessageBox.question(self, "删除", f"删除选中的 {len(entries)} 条时间轴条目？") != QMessageBox.Yes:
+            return
+        keep = [e for e in self.timeline if not any(e is x for x in entries)]
+        self.timeline = keep
+        self.timeline_doc["timeline"] = self.timeline
+        self.save_timeline()
+        self.refresh_timeline_table()
+
+    def clear_entries(self) -> None:
+        if not self.timeline:
+            return
+        if QMessageBox.question(self, "清空", "清空全部时间轴条目？") != QMessageBox.Yes:
+            return
+        self.timeline = []
+        self.save_timeline()
+        self.refresh_timeline_table()
+
+    # ------------------------------------------------------- 右键菜单：日志
+    def on_log_menu(self, pos) -> None:
+        menu = QMenu(self)
+        act_all = menu.addAction("全选")
+        act_copy = menu.addAction("复制")
+        act_edit = menu.addAction("只读" if not self.log_view.isReadOnly() else "编辑")
+        act_del = menu.addAction("删除（选中部分）")
+        act_clear = menu.addAction("清空")
+        chosen = menu.exec_(self.log_view.mapToGlobal(pos))
+        if chosen is None:
+            return
+        if chosen is act_all:
+            self.log_view.selectAll()
+        elif chosen is act_copy:
+            self.log_view.copy()
+            if not self.log_view.textCursor().hasSelection():
+                self.copy_lines([self.log_view.toPlainText()])
+        elif chosen is act_edit:
+            self.log_view.setReadOnly(not self.log_view.isReadOnly())
+            self.statusBar().showMessage("日志已切换为只读" if self.log_view.isReadOnly() else "日志可编辑")
+        elif chosen is act_del:
+            cursor = self.log_view.textCursor()
+            if cursor.hasSelection():
+                read_only = self.log_view.isReadOnly()
+                self.log_view.setReadOnly(False)
+                cursor.removeSelectedText()
+                self.log_view.setReadOnly(read_only)
+        elif chosen is act_clear:
+            self.log_view.clear()
+
+    # ------------------------------------------------------------------ 复制
+    def copy_lines(self, lines: list[str]) -> None:
+        text = "\n".join(l for l in lines if l)
+        if not text:
+            return
+        QApplication.clipboard().setText(text)
+        self.statusBar().showMessage(f"已复制 {len(text.splitlines())} 行")
+
+    # ------------------------------------------------------------------ 导出
+    def _events_for_export(self) -> list[dict[str, Any]]:
+        """把时间轴条目整理成导出用的事件结构（画面条目才算事件）。"""
+        out = []
+        for e in self.timeline:
+            if not e.get("visual"):
+                continue
+            out.append({
+                "start": e["start"], "end": e["end"],
+                "description": e.get("visual"),
+                "description_translated": e.get("visual_translated"),
+                "event": "", "importance": e.get("importance") or "",
+                "ocr_text": e.get("ocr_text"),
+                # 画面事件只带画面情绪，语音情绪由语音段自己带，导出时不会串行
+                "emotion": e.get("visual_emotion"),
+                "emotion_en": e.get("visual_emotion_en"),
+                "emotion_intensity": e.get("visual_emotion_intensity"),
+            })
+        return out
+
+    def _ask_path(self, default_name: str, filter_text: str) -> Path | None:
+        out = self.export_root()
+        path, _ = QFileDialog.getSaveFileName(self, "导出到", str(out / default_name), filter_text)
+        return Path(path) if path else None
+
+    def remember_export_dir(self, path: Path) -> None:
+        """记住这次导出去了哪儿，下次对话框直接开在那里。"""
+        if path.parent.is_dir():
+            self.export_dir = path.parent
+            self.save_settings()
+            self.refresh_export_hint()
+
+
+    def export_text(self, kind: str) -> None:
+        """导出语音 / 事件 / 合并。
+
+        语音和事件默认存成剪映可用的 SRT（对话框里可以改存成 .txt）；
+        合并导出是给人读的时间线，只出 txt。
+        """
+        if self.video_path is None:
+            QMessageBox.information(self, "提示", "请先打开一个视频")
+            return
+        stem = self.video_path.stem
+        lang = self.export_language()
+        w = txt_words(lang)
+        suffix = f"_{w['translated_file']}" if self.show_translated else ""
+        kind_word = {"speech": w["speech_file"], "events": w["events_file"],
+                     "merged": w["merged_file"]}[kind]
+        srt_ok = kind in ("speech", "events")
+        ext = ".srt" if srt_ok else ".txt"
+        filters = "字幕文件 (*.srt);;文本文件 (*.txt)" if srt_ok else "文本文件 (*.txt)"
+        path = self._ask_path(f"{stem}_{kind_word}{suffix}{ext}", filters)
+        if path is None:
+            return
+        if srt_ok and path.suffix.lower() == ".srt":
+            self._write_srt(path, kind)
+            return
+        try:
+            if kind == "speech":
+                count = write_speech_txt(path, self.video_path.name, self.speech,
+                                         self.show_translated, lang)
+            elif kind == "events":
+                count = write_events_txt(path, self.video_path.name, self._events_for_export(),
+                                        self.show_translated, lang)
+            else:
+                count = write_merged_txt(path, self.video_path.name, self.speech,
+                                        self._events_for_export(), self.show_translated, lang)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", f"{type(exc).__name__}: {exc}")
+            return
+        self.append_log(f"[导出] {path}（{count} 条）")
+        self.statusBar().showMessage(f"已导出 {count} 条到 {path.name}")
+        self.remember_export_dir(path)
+
+    def export_words(self) -> None:
+        """逐词导出：一个词一条，时间用 whisper 的 word_timestamps。
+
+        单独一份，不动句级那份——句级带译文和情绪，逐词只有原文（逐词翻译是词表，
+        情绪模型也要求至少 0.3s 音频，多数词达不到）。
+        SRT 走 `write_capcut_srt`，所以时间轴是标准化过的：升序、不重叠、不零长。
+        """
+        if self.video_path is None:
+            QMessageBox.information(self, "提示", "请先打开一个视频")
+            return
+        items = words_of(self.speech)
+        if not items:
+            QMessageBox.information(self, "提示", "没有可导出的词——这份结果没有词级时间戳")
+            return
+        lang = self.export_language()
+        name = txt_words(lang)["words_file"]
+        path = self._ask_path(f"{self.video_path.stem}_{name}.srt",
+                              "字幕文件 (*.srt);;文本文件 (*.txt)")
+        if path is None:
+            return
+        try:
+            if path.suffix.lower() == ".txt":
+                count = write_words_txt(path, self.video_path.name, self.speech, lang)
+            else:
+                count = write_capcut_srt(path, items)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", f"{type(exc).__name__}: {exc}")
+            return
+        self.append_log(f"[逐词导出] {path}（{count} 个词，一词一个时间戳）")
+        self.statusBar().showMessage(f"已导出 {count} 个词到 {path.name}")
+        self.remember_export_dir(path)
+
+    def _write_srt(self, path: Path, kind: str) -> None:
+
+        """写剪映可用的 SRT：UTF-8 无 BOM、序号连续、时间不重叠、不留空块。"""
+        if kind == "speech":
+            items = [(float(s["start"]), float(s["end"]), self.speech_display(s)) for s in self.speech]
+        else:
+            items = [(float(e["start"]), float(e["end"]), self.visual_display(e))
+                     for e in self.timeline if e.get("visual")]
+        if not items:
+            QMessageBox.information(self, "提示", "没有可导出的内容")
+            return
+        try:
+            count = write_capcut_srt(path, items)
+        except Exception as exc:
+            QMessageBox.warning(self, "导出失败", f"{type(exc).__name__}: {exc}")
+            return
+        self.append_log(f"[导出] {path}（{count} 个字幕块，剪映可用：UTF-8 无 BOM、时间已去重叠）")
+        self.statusBar().showMessage(f"已导出 {count} 个字幕块到 {path.name}")
+        self.remember_export_dir(path)
+
 
 
 def launch(cfg: Config, video: str | Path | None = None) -> int:

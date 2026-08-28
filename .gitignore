@@ -14,9 +14,11 @@ libs/
 
 # 运行产物
 output/
+cache/
 work/
 logs/
 FINAL_REPORT.txt
+gui_settings.json
 
 # 输入与测试素材
 input/*

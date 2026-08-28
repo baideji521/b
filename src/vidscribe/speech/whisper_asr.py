@@ -17,6 +17,10 @@ from ..events import SpeechEvent, SpeechWord
 from ..logging_setup import get_logger
 from ..progress import report as report_progress
 from ..video_io import VideoInfo
+from .punctuate import Punctuator
+from .sentences import split_sentences
+
+
 
 logger = get_logger(__name__)
 
@@ -57,6 +61,9 @@ class WhisperASR:
         self.compute_type: str = cfg.get("compute_type", "float16")
         self.load_seconds = 0.0
         self.model_path: str | None = None
+        # 标点恢复：whisper 在口语素材上经常整段不给标点，靠 ct-punc 补，补完再断句
+        self.punctuator = Punctuator(cfg.get("punctuation", {}), model_dir, mirrors)
+
 
     def _resolve(self, size: str) -> str:
         """优先用国内镜像把官方 Systran 权重拉到本地，返回本地目录。"""
@@ -130,8 +137,10 @@ class WhisperASR:
         """
         import gc  # noqa: PLC0415
 
+        self.punctuator.unload()      # 标点模型也一起放掉，别占着显存等视觉模型
         if self.model is None:
             return
+
         self.model = None
         gc.collect()
         try:
@@ -144,7 +153,64 @@ class WhisperASR:
         logger.info("已释放语音模型显存")
 
     # ------------------------------------------------------------------ 识别
+    def _language_and_prompt(self, info: VideoInfo,
+                            vad_filter: bool) -> tuple[str | None, str]:
+        """定下解码语言，并挑同一语言的示范 prompt。
+
+        `initial_prompt` 支持两种写法：一个字符串（不管什么语言都用它），或者
+        `{"en": "...", "zh": "..."}` 按语言挑。**强烈建议用后者**：prompt 里混进
+        另一种语言，whisper 会顺着 prompt 把语音"翻译"过去——实测一条纯英文视频
+        被一段中英混排的 prompt 带出 27/43 行中文，还伴随重复幻听。
+
+        用字典时先跑一次 `detect_language` 拿到语言，再把这个语言显式传给 transcribe，
+        保证"prompt 的语言 == 解码的语言"，不给模型留切语言的口子。
+        """
+        raw = self.cfg.get("initial_prompt")
+        language = self.cfg.get("language") or None
+        if isinstance(raw, str):
+            return language, raw.strip()
+        if not isinstance(raw, dict) or not raw:
+            return language, ""
+
+        if not language:
+            try:
+                from faster_whisper.audio import decode_audio  # noqa: PLC0415
+
+                audio = decode_audio(info.path, sampling_rate=16000)
+                detected, prob, _ = self.model.detect_language(audio=audio)
+                language = str(detected)
+                logger.info("语言预检：%s(%.2f)，据此挑 initial_prompt", language, prob or 0.0)
+            except Exception as exc:  # noqa: BLE001 - 检测失败就不给 prompt，别赌语言
+                logger.warning("语言预检失败，本次不喂 initial_prompt：%s", str(exc)[:160])
+                return None, ""
+
+        code = str(language).lower().split("-")[0]
+        prompt = str(raw.get(code) or raw.get("default") or "").strip()
+        if not prompt:
+            logger.info("语言 %s 没有对应的 initial_prompt，本次不喂", code)
+        return language, prompt
+
+    def _warn_script_mismatch(self, segments: list[dict[str, Any]],
+                             language: str | None) -> None:
+        """非中文语音里冒出大量汉字 = 模型在翻译或幻听，出个警告。
+
+        不自动删——用户的素材真的有中英混说的句子，删了就是丢内容。只是把可疑比例
+        报出来，好让人一眼看出"这条得重跑"。
+        """
+        code = str(language or "").lower().split("-")[0]
+        if code in ("zh", "ja", "yue", ""):
+            return
+        import re  # noqa: PLC0415
+
+        cjk = re.compile(r"[\u4e00-\u9fff]")
+        hits = sum(1 for seg in segments if cjk.search(str(seg.get("text") or "")))
+        if hits and hits >= max(2, len(segments) * 0.1):
+            logger.warning("语言=%s 却有 %d/%d 段含汉字，疑似 initial_prompt 把模型带去翻译了，"
+                           "建议检查 speech.initial_prompt 是否混了别的语言", code, hits, len(segments))
+
     def transcribe(self, info: VideoInfo) -> dict[str, Any]:
+
+
         if not info.has_audio:
             logger.warning("%s 没有音轨，跳过语音识别", info.name)
             return {"available": False, "reason": "no_audio_stream", "language": None, "segments": []}
@@ -152,14 +218,21 @@ class WhisperASR:
         self.load()
         started = time.perf_counter()
         vad_filter = bool(self.cfg.get("vad_filter", True))
+        # 先定语言，再挑对应语言的示范 prompt。混语言的 prompt 会把模型带跑：
+        # 实测一段"英文+中文"的 prompt 让一条纯英文视频吐出 27/43 行中文（模型顺手翻译了）。
+        language, prompt = self._language_and_prompt(info, vad_filter)
         kwargs: dict[str, Any] = {
-            "language": self.cfg.get("language"),
+            "language": language,
             "task": "transcribe",  # 第一版不做翻译，保留原始语言
             "beam_size": int(self.cfg.get("beam_size", 5)),
             "word_timestamps": bool(self.cfg.get("word_timestamps", True)),
             "condition_on_previous_text": bool(self.cfg.get("condition_on_previous_text", False)),
             "vad_filter": vad_filter,
         }
+        if prompt:
+            kwargs["initial_prompt"] = prompt
+
+
         if vad_filter:
             kwargs["vad_parameters"] = {"min_silence_duration_ms": 500, "speech_pad_ms": 200}
 
@@ -211,9 +284,16 @@ class WhisperASR:
             )
 
         elapsed = round(time.perf_counter() - started, 2)
+        raw = [e.to_dict() for e in events]
+        self._warn_script_mismatch(raw, tr_info.language)
+        # 先补标点（标点直接贴到 words 上，时间戳不动），再按句切分
+
+        punctuation = self.punctuate(raw)
+        # whisper 一段常常含好几句话，这里按停顿和句末标点切成一句一段（时间取词级时间戳）
+        sentences = split_sentences(raw)
         logger.info(
-            "语音识别完成：%d 段，语言=%s(%.2f)，耗时 %.1fs",
-            len(events), tr_info.language, tr_info.language_probability or 0.0, elapsed,
+            "语音识别完成：%d 段 -> %d 句，语言=%s(%.2f)，耗时 %.1fs",
+            len(events), len(sentences), tr_info.language, tr_info.language_probability or 0.0, elapsed,
         )
         return {
             "available": True,
@@ -223,5 +303,21 @@ class WhisperASR:
             "duration_after_vad": round(float(getattr(tr_info, "duration_after_vad", 0.0) or 0.0), 3),
             "model": {"size": self.model_size, "device": self.device, "compute_type": self.compute_type},
             "elapsed_seconds": elapsed,
-            "segments": [e.to_dict() for e in events],
+            "punctuation": punctuation,
+            "segments": sentences,
         }
+
+    def punctuate(self, segments: list[dict[str, Any]]) -> dict[str, Any]:
+        """给缺标点的段补标点。标点模型挂了不能连累转写，所以整段兜住异常。
+
+        也给 pipeline 复用老缓存时调——那条路上不重跑 whisper，只补标点再重切。
+        """
+        if not self.punctuator.enabled:
+            return {"available": False, "reason": "disabled"}
+        try:
+            return self.punctuator.restore(segments)
+        except Exception as exc:  # noqa: BLE001 - 标点是增强项，失败就退回原文
+            logger.warning("标点恢复整体失败，保留原始转写：%s", str(exc)[:200])
+            return {"available": False, "reason": f"error: {str(exc)[:200]}"}
+
+

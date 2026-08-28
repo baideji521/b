@@ -12,7 +12,8 @@ DEFAULTS: dict[str, Any] = {
     "paths": {
         "input_dir": "input",
         "output_dir": "output",
-        "work_dir": "work",
+        # 缓存根目录（断点、窗口缓存、预览音轨），见 vidscribe/cache.py
+        "cache_dir": "cache",
         "log_dir": "logs",
         "model_dir": "models",
     },
@@ -81,6 +82,8 @@ DEFAULTS: dict[str, Any] = {
         "min_event_seconds": 0.4,
         "merge_similarity": 0.82,
         "dedup_similarity": 0.72,
+        # 画面情绪：视觉模型在同一次推理里顺便判人物情绪，只多两个输出字段，不额外加载模型
+        "emotion_enabled": True,
     },
     "speech": {
         "model_size": "large-v3",
@@ -92,6 +95,18 @@ DEFAULTS: dict[str, Any] = {
         "vad_filter": True,
         "word_timestamps": True,
         "condition_on_previous_text": False,
+        "emotion": {
+            # 语音情绪识别（FunASR emotion2vec+），按 whisper 的句子边界逐段判
+            "enabled": True,
+            "model_id": "iic/emotion2vec_plus_large",
+            "fallback_model_ids": ["iic/emotion2vec_plus_base"],
+            "device": "auto",
+            "batch_size": 8,
+            "min_segment_seconds": 0.3,   # 更短的段声学特征不够，不判
+            "top_k": 3,                   # 每段保留概率最高的几类
+            "peak_top_n": 5,              # 给高光剪辑推荐几个冻帧点
+            "peak_min_intensity": 0.5,    # 情绪强度低于此不算高光候选
+        },
     },
     "language": {
         # 最终自然语言由原始音频语言决定；这里只配置兜底与判定门槛
@@ -110,6 +125,10 @@ DEFAULTS: dict[str, Any] = {
         "keep_models_loaded": True,
         # 语音跑完就释放 whisper 显存再加载视觉模型（12GB 卡上必须开，否则会换页）
         "unload_speech_before_visual": True,
+        # 缓存（cache/ 断点与预览音频 + logs/ 日志）：开软件时检查，超过 3 天自动清一次
+        "auto_clean_cache": True,
+        "cache_cleanup_interval_days": 3,
+        "cache_max_age_days": 3,
     },
     "mirrors": {
         # 优先国内镜像，只加速下载，仓库仍是官方仓库
@@ -142,6 +161,12 @@ DEFAULTS: dict[str, Any] = {
             "Systran/faster-whisper-medium": "Systran/faster-whisper-medium",
             "Systran/faster-whisper-small": "Systran/faster-whisper-small",
         },
+        "emotion_modelscope_map": {
+            # FunASR 语音情绪模型（权重是 model.pt + config.yaml）
+            "iic/emotion2vec_plus_large": "iic/emotion2vec_plus_large",
+            "iic/emotion2vec_plus_base": "iic/emotion2vec_plus_base",
+            "iic/SenseVoiceSmall": "iic/SenseVoiceSmall",
+        },
     },
 }
 
@@ -168,6 +193,10 @@ class Config:
         if path.is_file():
             with open(path, "r", encoding="utf-8") as fh:
                 _deep_update(data, json.load(fh))
+        # 兼容老配置：paths.work_dir 是 cache_dir 的旧名字
+        legacy = data["paths"].pop("work_dir", None)
+        if legacy and data["paths"].get("cache_dir") == DEFAULTS["paths"]["cache_dir"]:
+            data["paths"]["cache_dir"] = legacy
         return cls(root=root, data=data)
 
     # --- 分节访问 ---

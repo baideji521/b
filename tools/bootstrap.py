@@ -23,7 +23,7 @@ SRC = ROOT / "src"
 LOG_DIR = ROOT / "logs"
 sys.path.insert(0, str(SRC))
 
-TORCH_SPEC = ["torch==2.8.0", "torchvision==0.23.0"]
+TORCH_SPEC = ["torch==2.8.0", "torchvision==0.23.0", "torchaudio==2.8.0"]
 MAX_RETRIES = 3
 
 # 默认值；实际取 config.json 的 mirrors 段（优先国内镜像）

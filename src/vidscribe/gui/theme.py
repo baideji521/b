@@ -35,6 +35,10 @@ TEXT = "#e7e9ec"
 TEXT_DIM = "#98a0a8"
 ACCENT = "#d9a441"      # 琥珀：选中、进度、播放位置
 ACCENT_DIM = "#8a6a2c"
+PLAYING = "#5fd38d"     # 绿色：正在播放的那句字幕，播过去就恢复原色
+DONE = "#4ec97a"        # 绿色：进度条跑满时整条变绿
+DONE_DIM = "#2f8a52"
+
 VIDEO_BG = "#1b1d20"    # 播放器背板
 
 QSS = f"""
@@ -49,6 +53,18 @@ QMainWindow, QDialog {{ background: {BG}; }}
 QLabel {{ background: transparent; color: {TEXT}; }}
 QLabel[role="section"] {{ color: {TEXT_DIM}; font-weight: 600; padding: 2px 0 4px 2px; }}
 QLabel[role="hint"] {{ color: {TEXT_DIM}; }}
+
+QCheckBox {{ background: transparent; color: {TEXT}; spacing: 6px; }}
+QCheckBox::indicator {{
+    width: 14px; height: 14px;
+    border: 1px solid {LINE};
+    border-radius: 3px;
+    background: {PANEL};
+}}
+QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
+QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
+QCheckBox:disabled {{ color: {TEXT_DIM}; }}
+
 
 QPushButton {{
     background: {PANEL};
@@ -139,6 +155,14 @@ QProgressBar::chunk {{
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT_DIM}, stop:1 {ACCENT});
     border-radius: 6px;
 }}
+/* 跑满了整条变绿：一眼看出"跑完了"，不用去读百分比。
+   靠 done 这个动态属性切换，代码里 setProperty 之后要 unpolish/polish 才会重绘。 */
+QProgressBar[done="true"] {{ color: {TEXT}; }}
+QProgressBar[done="true"]::chunk {{
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {DONE_DIM}, stop:1 {DONE});
+    border-radius: 6px;
+}}
+
 
 QSlider::groove:horizontal {{
     background: #23262a; height: 5px; border-radius: 3px; border: 1px solid #3a3f45;
@@ -150,10 +174,12 @@ QSlider::handle:horizontal {{
 }}
 QSlider::handle:horizontal:hover {{ background: #ffffff; }}
 
-QSplitter::handle {{ background: {BG}; }}
-QSplitter::handle:horizontal {{ width: 6px; }}
-QSplitter::handle:vertical {{ height: 6px; }}
-QSplitter::handle:hover {{ background: {PANEL_ALT}; }}
+/* 分隔条：默认就画出一条能看见的线，否则用户根本不知道这儿能拖 */
+QSplitter::handle {{ background: {LINE}; }}
+QSplitter::handle:horizontal {{ width: 8px; margin: 0 1px; border-radius: 3px; }}
+QSplitter::handle:vertical {{ height: 8px; margin: 1px 0; border-radius: 3px; }}
+QSplitter::handle:hover {{ background: {ACCENT}; }}
+QSplitter::handle:pressed {{ background: {ACCENT}; }}
 
 QStatusBar {{ background: #222528; color: {TEXT_DIM}; border-top: 1px solid {LINE}; }}
 QStatusBar::item {{ border: none; }}

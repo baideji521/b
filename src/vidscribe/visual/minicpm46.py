@@ -176,6 +176,7 @@ class MiniCPM46Analyzer:
             prompt = prompts.build_user_prompt(
                 start, end, batch.timestamps, previous_summary,
                 output_language=self.output_language, timestamp_mode="list",
+                with_emotion=bool(self.cfg.get("emotion_enabled", True)),
             )
             system = prompts.system_prompt(self.output_language)
         window_fps = batch.sample_fps or max(len(batch) / max(end - start, 1e-6), 0.1)
@@ -209,12 +210,12 @@ class MiniCPM46Analyzer:
             parse_mode = "frame_lines"
             if not events:
                 # 行格式也没解析出来时，退一步试 JSON，避免整窗口丢空
-                events = calibrate_events(parse_events(raw), batch, scene_cuts or [], start, end,
-                                          tolerance=tolerance)
+                events = calibrate_events(parse_events(raw, self.output_language), batch,
+                                          scene_cuts or [], start, end, tolerance=tolerance)
                 parse_mode = "frame_lines_fallback_json"
         else:
-            events = calibrate_events(parse_events(raw), batch, scene_cuts or [], start, end,
-                                      tolerance=tolerance)
+            events = calibrate_events(parse_events(raw, self.output_language), batch,
+                                      scene_cuts or [], start, end, tolerance=tolerance)
             parse_mode = "json"
         meta = {
             "window": [round(start, 3), round(end, 3)],

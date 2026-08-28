@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 HF_OFFICIAL = "https://huggingface.co"
 VISUAL_ALLOW = ["*.json", "*.safetensors", "*.txt", "*.py", "*.jinja", "*.model", "*.md"]
 WHISPER_ALLOW = None  # faster-whisper 仓库很小，整仓下载
+EMOTION_ALLOW = None  # emotion2vec / SenseVoice 权重是 model.pt，整仓下载
 
 
 def _cache_file(model_dir: Path) -> Path:
@@ -50,6 +51,18 @@ def _looks_complete(path: Path, kind: str) -> bool:
         return False
     if kind == "whisper":
         return (path / "model.bin").is_file()
+    if kind == "speaker":
+        # 3D-Speaker 的声纹仓库只有一个裸权重（campplus_voxceleb.bin），没有 config.yaml，
+        # 所以只要有权重文件就算下全了
+        return any(path.glob("*.bin")) or any(path.glob("*.pt"))
+    if kind == "emotion":
+        # FunASR 系模型的权重文件名各家不同：emotion2vec 是 model.pt，
+        # cam++ 声纹是 campplus_cn_common.bin。只认 model.pt 会把下好的 cam++
+        # 判成"内容不完整"，一路试完所有镜像再报错。所以看 config.yaml + 任一权重文件。
+        if not (path / "config.yaml").is_file():
+            return False
+        return (path / "model.pt").is_file() or any(path.glob("*.bin")) \
+            or any(path.glob("*.pt"))
     return (path / "config.json").is_file() and any(path.glob("*.safetensors"))
 
 
@@ -89,9 +102,13 @@ def resolve_model(repo_id: str, model_dir: Path, mirrors: dict[str, Any],
 
     sources = mirrors.get("whisper_sources" if kind == "whisper" else "model_sources") \
         or ["modelscope", "hf_mirror", "hf"]
-    ms_map = mirrors.get("whisper_modelscope_map" if kind == "whisper" else "modelscope_map") or {}
+    map_key = {"whisper": "whisper_modelscope_map",
+               "emotion": "emotion_modelscope_map",
+               "speaker": "emotion_modelscope_map"}.get(kind, "modelscope_map")
+    ms_map = mirrors.get(map_key) or {}
     endpoint = mirrors.get("hf_endpoint") or "https://hf-mirror.com"
-    allow = WHISPER_ALLOW if kind == "whisper" else VISUAL_ALLOW
+    allow = {"whisper": WHISPER_ALLOW, "emotion": EMOTION_ALLOW,
+             "speaker": EMOTION_ALLOW}.get(kind, VISUAL_ALLOW)
 
     errors: list[str] = []
     for source in sources:

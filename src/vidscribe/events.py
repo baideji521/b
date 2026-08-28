@@ -27,6 +27,10 @@ class VisualEvent:
     action: str | None = None
     scene: str | None = None
     subjects: list[str] = field(default_factory=list)
+    # --- 画面情绪（视觉模型在同一次推理里顺便给出；未开启时全为 None）---
+    emotion: str | None = None            # 中文显示名
+    emotion_en: str | None = None         # 英文小写标签，取自 prompts.VISUAL_EMOTIONS
+    emotion_intensity: float | None = None
     # --- 最终自然语言层的记录 ---
     description_language: str | None = None
     language_fallback: bool = False
@@ -64,6 +68,23 @@ class SpeechEvent:
     original_language: str | None = None
     no_speech_prob: float | None = None
     avg_logprob: float | None = None
+    # 按句切分时拿不到词级时间戳，时间是按字数摊出来的（正常路径都是 False）
+    time_estimated: bool = False
+    # ct-punc 给这一段补过标点（punctuate.py 写入）。字段必须在这儿声明：
+    # pipeline 复用缓存时会 SpeechEvent(**seg)，多一个键就直接 TypeError。
+    punctuation_restored: bool = False
+
+    # 说话人（speech/speakers.py 写入；未开启声纹或判不出时为 None）。
+    # speaker 从 1 开始，按首次开口时间编号；speaker_confidence 的含义见 SpeakerTagger.annotate。
+    speaker: int | None = None
+    speaker_confidence: float | None = None
+
+    # 语音情绪（speech/emotion.py 写入；未开启情绪识别时全为 None）
+    emotion: str | None = None
+    emotion_en: str | None = None
+    emotion_confidence: float | None = None
+    emotion_intensity: float | None = None
+    emotion_scores: dict | None = None
     words: list[SpeechWord] = field(default_factory=list)
 
     def __post_init__(self) -> None:
@@ -131,6 +152,13 @@ def _absorb(keep: VisualEvent, other: VisualEvent) -> VisualEvent:
         keep.scene = other.scene
     if other.subjects:
         keep.subjects = sorted(set(keep.subjects) | set(other.subjects))
+    # 画面情绪：合并后的这一段取更强烈的那个（合并的前提是两段本来就是同一状态）
+    other_i = other.emotion_intensity if other.emotion_intensity is not None else -1.0
+    keep_i = keep.emotion_intensity if keep.emotion_intensity is not None else -1.0
+    if other.emotion and other_i > keep_i:
+        keep.emotion = other.emotion
+        keep.emotion_en = other.emotion_en
+        keep.emotion_intensity = other.emotion_intensity
     keep.language_fallback = keep.language_fallback or other.language_fallback
     frames = sorted(set(keep.source_frames) | set(other.source_frames))
     keep.source_frames = frames

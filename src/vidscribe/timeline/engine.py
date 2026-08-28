@@ -65,6 +65,21 @@ def _entry(ev: VisualEvent | None, speech: list[SpeechEvent]) -> dict[str, Any]:
     if confs:
         speech_conf = round(sum(confs) / len(confs), 3)
 
+    # 一条时间轴可能挂着好几句语音，取情绪最强的那句代表这一条
+    speech_emotion = speech_emotion_en = speech_intensity = None
+    scored = [s for s in speech if s.emotion and s.emotion_intensity is not None]
+    if scored:
+        top = max(scored, key=lambda s: float(s.emotion_intensity))
+        speech_emotion = top.emotion
+        speech_emotion_en = top.emotion_en
+        speech_intensity = round(float(top.emotion_intensity), 3)
+
+    # 说话人：一条时间轴可能挂着好几句，按出现顺序去重记下来（可能真是两个人对话）
+    speakers: list[int] = []
+    for s in speech:
+        if s.speaker is not None and int(s.speaker) not in speakers:
+            speakers.append(int(s.speaker))
+
     return {
         "id": 0,
         "start": round(start, 3),
@@ -80,6 +95,15 @@ def _entry(ev: VisualEvent | None, speech: list[SpeechEvent]) -> dict[str, Any]:
         "source_frames": ev.source_frames if ev else [],
         "visual_confidence": ev.confidence if ev else None,
         "speech_confidence": speech_conf,
+        "speech_speakers": speakers,
+        # 情绪分两路：语音情绪来自 emotion2vec，画面情绪来自视觉模型，各自独立。
+        # 同时给英文标签：切到译文视图时显示名要按译文语言重渲，不能拿写死的显示名。
+        "speech_emotion": speech_emotion,
+        "speech_emotion_en": speech_emotion_en,
+        "speech_emotion_intensity": speech_intensity,
+        "visual_emotion": ev.emotion if ev else None,
+        "visual_emotion_en": ev.emotion_en if ev else None,
+        "visual_emotion_intensity": ev.emotion_intensity if ev else None,
         "quality": confidence_level(ev.confidence if ev else speech_conf),
     }
 

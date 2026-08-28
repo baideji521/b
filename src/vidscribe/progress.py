@@ -25,6 +25,8 @@ STAGE_WEIGHTS: dict[str, float] = {
     "speech": 0.12,
     "visual": 0.80,
     "timeline": 0.04,
+    # translate 不在 STAGE_ORDER 里：它是独立命令，进度就等于自身完成度
+    "translate": 1.0,
 }
 STAGE_ORDER = ("probe", "speech", "visual", "timeline")
 
@@ -33,6 +35,7 @@ STAGE_LABELS = {
     "speech": "语音识别",
     "visual": "画面事件分析",
     "timeline": "时间轴合并导出",
+    "translate": "翻译",
 }
 
 

@@ -15,6 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any
 
+from ..emotions import label_for as emotion_label
 from ..events import VisualEvent
 from ..logging_setup import get_logger
 from ..video_io import PIXEL_FACTOR, FrameBatch, VideoInfo, plan_frame_indices, sample_frames
@@ -144,6 +145,31 @@ class QwenVLAnalyzer:
         self.output_language = code or "zh"
 
     # ------------------------------------------------------------------ 模型
+    def _quantization_config(self, model_id: str, dtype: Any) -> Any:
+        """按配置返回 bitsandbytes 量化配置，"none"/缺省时返回 None。
+
+        8B 在 12GB 卡上装不下 bf16（权重就 16GB），官方也没出 int4 权重
+        （ModelScope 上只有 bf16 和 FP8，而 FP8 要 Ada/Hopper，3060 是 sm_86 用不了），
+        所以走 bitsandbytes 在加载时量化：下载的还是官方 bf16 仓库，显存降到 6GB 上下。
+        """
+        want = str(self.cfg.get("quantization") or "none").lower()
+        for entry in self.cfg.get("models") or []:
+            if str(entry.get("model_id") or "") == model_id and entry.get("quantization"):
+                want = str(entry["quantization"]).lower()
+                break
+        if want in ("", "none", "off", "no"):
+            return None
+
+        from transformers import BitsAndBytesConfig  # noqa: PLC0415
+
+        if want in ("int8", "8bit"):
+            return BitsAndBytesConfig(load_in_8bit=True)
+        if want in ("nf4", "int4", "4bit"):
+            return BitsAndBytesConfig(load_in_4bit=True, bnb_4bit_quant_type="nf4",
+                                      bnb_4bit_compute_dtype=dtype,
+                                      bnb_4bit_use_double_quant=True)
+        raise ValueError(f"未知量化方式: {want}（可选 none / nf4 / int8）")
+
     def load(self, model_id: str | None = None) -> None:
         import torch  # noqa: PLC0415
         from transformers import AutoProcessor  # noqa: PLC0415
@@ -171,6 +197,9 @@ class QwenVLAnalyzer:
         # 而且避免 accelerate 在显存紧张时偷偷把层放到 CPU 拖慢推理。
         device_map = {"": 0} if torch.cuda.is_available() else "cpu"
         kwargs: dict[str, Any] = {"dtype": dtype, "device_map": device_map}
+        quant = self._quantization_config(target, dtype)
+        if quant is not None:
+            kwargs["quantization_config"] = quant
         source = target
         if self.model_dir:
             from pathlib import Path  # noqa: PLC0415
@@ -284,7 +313,7 @@ class QwenVLAnalyzer:
         meta["raw_output"] = raw_text
 
 
-        events = parse_events(raw_text)
+        events = parse_events(raw_text, self.output_language)
         events = calibrate_events(events, batch, scene_cuts, start, end,
                                  tolerance=float(self.cfg.get("snap_tolerance_seconds", 1.0)))
         meta["event_count"] = len(events)
@@ -304,7 +333,9 @@ class QwenVLAnalyzer:
                     video_content,
                     {"type": "text",
                      "text": prompts.build_user_prompt(start, end, timestamps, previous_summary,
-                                                       output_language=self.output_language)},
+                                                       output_language=self.output_language,
+                                                       with_emotion=bool(
+                                                           self.cfg.get("emotion_enabled", True)))},
                 ],
             },
         ]
@@ -479,7 +510,7 @@ class QwenVLAnalyzer:
         tolerance = float(self.cfg.get("snap_tolerance_seconds", 1.0))
         results: list[tuple[list[VisualEvent], dict]] = []
         for (start, end), batch, raw in zip(windows, batches, raw_texts):
-            events = parse_events(raw)
+            events = parse_events(raw, self.output_language)
             events = calibrate_events(events, batch, scene_cuts, start, end, tolerance=tolerance)
             meta = {
                 "window": [start, end],
@@ -542,6 +573,61 @@ class QwenVLAnalyzer:
             return [None] * len(texts)
 
         return _parse_rewrite(raw, len(texts))
+
+    # -------------------------------------------------- 逐行翻译（batch 维度并行）
+    def translate_lines(self, texts: list[str], output_language: str,
+                        max_new_tokens: int = 96) -> list[str | None]:
+        """一行一条序列，整批一次解码。返回与输入等长的列表，失败位置为 None。
+
+        为什么不复用 rewrite_texts：那个把 N 行塞一个提示词、串行吐 JSON 数组，
+        译文 token 是一个接一个出来的。这台机器单 token 固定约 150ms（实测
+        6.7 tok/s，参数全在 GPU、矩阵乘 23.9 TFLOPS，瓶颈是逐步解码开销），
+        所以把 N 行摊到 batch 维度几乎不加时间：实测 20 行 35.5s -> 3.5s。
+        """
+        if not texts:
+            return []
+        if self.model is None or self.processor is None:
+            logger.warning("模型已卸载，无法翻译")
+            return [None] * len(texts)
+
+        system = prompts.build_line_prompt(output_language)
+        prompt_texts = [
+            self.processor.apply_chat_template(
+                [{"role": "system", "content": [{"type": "text", "text": system}]},
+                 {"role": "user", "content": [{"type": "text", "text": line}]}],
+                tokenize=False, add_generation_prompt=True,
+            )
+            for line in texts
+        ]
+        return self._generate_batch(prompt_texts, max_new_tokens)
+
+    def _generate_batch(self, prompt_texts: list[str], max_new_tokens: int) -> list[str | None]:
+        """一批提示词一次生成；OOM 就把批次减半递归，保证大列表也能跑完。"""
+        import torch  # noqa: PLC0415
+
+        try:
+            inputs = self.processor(text=prompt_texts, return_tensors="pt", padding=True).to(
+                self.model.device
+            )
+            with torch.inference_mode():
+                generated = self.model.generate(**inputs, max_new_tokens=max_new_tokens,
+                                                do_sample=False)
+            raw = self.processor.batch_decode(
+                generated[:, inputs["input_ids"].shape[1]:], skip_special_tokens=True
+            )
+            del inputs, generated
+            self._free()
+        except Exception as exc:
+            if _is_oom(exc) and len(prompt_texts) > 1:
+                self._free()
+                half = len(prompt_texts) // 2
+                logger.warning("翻译批次 %d 显存不足，拆成 %d + %d 重试",
+                               len(prompt_texts), half, len(prompt_texts) - half)
+                return (self._generate_batch(prompt_texts[:half], max_new_tokens)
+                        + self._generate_batch(prompt_texts[half:], max_new_tokens))
+            logger.warning("翻译调用失败：%s: %s", type(exc).__name__, str(exc)[:200])
+            return [None] * len(prompt_texts)
+        return [line.strip() or None for line in raw]
 
     def _free(self) -> None:
         try:
@@ -662,7 +748,26 @@ def _to_float(value: Any) -> float | None:
     return None
 
 
-def parse_events(raw_text: str) -> list[VisualEvent]:
+def _emotion(item: dict, output_language: str) -> tuple[str | None, str | None, float | None]:
+    """画面情绪：只认词表里的英文标签，返回 (显示名, 英文标签, 强度)。
+
+    显示名跟随 output_language（英文视频出 happy，中文视频出开心）。
+    模型偶尔会写中文情绪或词表外的词，一律按 None 处理——宁可没有，不要脏数据。
+    """
+    raw = item.get("emotion") or item.get("visual_emotion")
+    label = _label(raw)
+    if label not in prompts.VISUAL_EMOTIONS:
+        return None, None, None
+    intensity = _to_float(item.get("emotion_intensity"))
+    if intensity is None:
+        intensity = 0.0
+    intensity = max(0.0, min(1.0, intensity))
+    return emotion_label(label, output_language), label, round(intensity, 3)
+
+
+def parse_events(raw_text: str, output_language: str = "zh") -> list[VisualEvent]:
+
+
     try:
         data = _loads_lenient(raw_text)
     except Exception as exc:
@@ -700,6 +805,7 @@ def parse_events(raw_text: str) -> list[VisualEvent]:
         if isinstance(subjects_raw, str):
             subjects_raw = re.split(r"[,;/]| and ", subjects_raw)
         subjects = [s for s in (_label(x) for x in subjects_raw if x) if s][:5]
+        emotion_zh, emotion_en, emotion_intensity = _emotion(item, output_language)
         events.append(
             VisualEvent(
                 id=i + 1,
@@ -713,6 +819,9 @@ def parse_events(raw_text: str) -> list[VisualEvent]:
                 action=action,
                 scene=scene,
                 subjects=subjects,
+                emotion=emotion_zh,
+                emotion_en=emotion_en,
+                emotion_intensity=emotion_intensity,
             )
         )
     return events

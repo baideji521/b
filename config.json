@@ -2,7 +2,7 @@
   "paths": {
     "input_dir": "input",
     "output_dir": "output",
-    "work_dir": "work",
+    "cache_dir": "cache",
     "log_dir": "logs",
     "model_dir": "models"
   },
@@ -32,8 +32,15 @@
         "label": "MiniCPM-V-4.6 (1.3B/BF16, 隔离依赖 tf57)",
         "model_id": "openbmb/MiniCPM-V-4.6",
         "backend": "minicpm46"
+      },
+      {
+        "label": "Qwen3-VL-8B-Instruct nf4 (动作识别更强，bnb 4bit)",
+        "model_id": "Qwen/Qwen3-VL-8B-Instruct",
+        "backend": "qwen3vl",
+        "quantization": "nf4"
       }
     ],
+    "quantization": "none",
     "minicpm": {
       "packing_nums": 1,
       "max_slice_nums": 1,
@@ -68,7 +75,8 @@
     "snap_tolerance_seconds": 1.0,
     "min_event_seconds": 0.4,
     "merge_similarity": 0.82,
-    "dedup_similarity": 0.72
+    "dedup_similarity": 0.72,
+    "emotion_enabled": true
   },
   "speech": {
     "model_size": "large-v3",
@@ -82,7 +90,62 @@
     "beam_size": 5,
     "vad_filter": true,
     "word_timestamps": true,
-    "condition_on_previous_text": false
+    "condition_on_previous_text": true,
+    "initial_prompt": {
+      "en": "Hello, everyone! Today, we're doing a challenge. If this is pink, you have to pay. Really? Yes, of course. That's crazy!",
+      "zh": "大家好，今天我们来做个挑战。如果是粉色的，你得请客。真的吗？当然是真的。太夸张了！"
+    },
+
+    "punctuation": {
+      "enabled": true,
+      "model_id": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "device": "auto"
+    },
+    "speaker": {
+      "enabled": true,
+      "model_id": "iic/speech_campplus_sv_en_voxceleb_16k",
+      "models": [
+        {
+          "label": "英文",
+          "model_id": "iic/speech_campplus_sv_en_voxceleb_16k"
+        },
+        {
+          "label": "中文",
+          "model_id": "iic/speech_campplus_sv_zh-cn_16k-common"
+        }
+      ],
+      "device": "auto",
+      "min_speaker_seconds": 2.0,
+      "diarization": {
+        "threshold": null,
+        "min_duration_on": 0.3,
+        "min_duration_off": 0.5
+      },
+      "window_seconds": 1.0,
+      "hop_seconds": 0.25,
+      "min_sentences": 12,
+      "max_speakers": 6,
+      "min_silhouette": 0.25,
+      "min_silhouette_sentence": 0.33,
+      "min_cluster_share": 0.05
+    },
+
+
+
+
+    "emotion": {
+      "enabled": true,
+      "model_id": "iic/emotion2vec_plus_large",
+      "fallback_model_ids": [
+        "iic/emotion2vec_plus_base"
+      ],
+      "device": "auto",
+      "batch_size": 8,
+      "min_segment_seconds": 0.3,
+      "top_k": 3,
+      "peak_top_n": 5,
+      "peak_min_intensity": 0.5
+    }
   },
   "language": {
     "default_language": "zh",
@@ -97,7 +160,10 @@
   "runtime": {
     "max_auto_retries": 3,
     "keep_models_loaded": true,
-    "unload_speech_before_visual": true
+    "unload_speech_before_visual": true,
+    "auto_clean_cache": true,
+    "cache_cleanup_interval_days": 3,
+    "cache_max_age_days": 3
   },
   "mirrors": {
     "pypi": [
@@ -136,6 +202,14 @@
       "Systran/faster-whisper-large-v3": "Systran/faster-whisper-large-v3",
       "Systran/faster-whisper-medium": "Systran/faster-whisper-medium",
       "Systran/faster-whisper-small": "Systran/faster-whisper-small"
+    },
+    "emotion_modelscope_map": {
+      "iic/emotion2vec_plus_large": "iic/emotion2vec_plus_large",
+      "iic/emotion2vec_plus_base": "iic/emotion2vec_plus_base",
+      "iic/SenseVoiceSmall": "iic/SenseVoiceSmall",
+      "iic/punc_ct-transformer_cn-en-common-vocab471067-large": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
+      "iic/speech_campplus_sv_zh-cn_16k-common": "iic/speech_campplus_sv_zh-cn_16k-common",
+      "iic/speech_campplus_sv_en_voxceleb_16k": "iic/speech_campplus_sv_en_voxceleb_16k"
     }
   }
 }

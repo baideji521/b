@@ -26,7 +26,7 @@ if __package__ in (None, ""):
 from vidscribe import benchmark as bench  # noqa: E402
 from vidscribe.config import Config  # noqa: E402
 from vidscribe.logging_setup import get_logger, setup_logging  # noqa: E402
-from vidscribe.timeline.exporters import fmt_time  # noqa: E402
+from vidscribe.timeline.exporters import fmt_time, write_json  # noqa: E402
 from vidscribe.video_io import list_videos  # noqa: E402
 from vidscribe.visual.factory import BACKENDS  # noqa: E402
 
@@ -68,7 +68,23 @@ def _apply_visual_override(cfg: Config, args: argparse.Namespace) -> None:
         logger.info("视觉后端覆盖为: %s", cfg.visual["backend"])
 
 
+def _apply_emotion_override(cfg: Config, args: argparse.Namespace) -> None:
+    """命令行覆盖两路情绪识别的开关（GUI 的两个勾选框就是走这两个参数）。
+
+    不给参数就按 config.json 走，所以 None 和 False 必须分开判。
+    """
+    audio = getattr(args, "audio_emotion", None)
+    visual = getattr(args, "visual_emotion", None)
+    if audio is not None:
+        cfg.speech.setdefault("emotion", {})["enabled"] = bool(audio)
+        logger.info("语音情绪识别: %s", "开" if audio else "关")
+    if visual is not None:
+        cfg.visual["emotion_enabled"] = bool(visual)
+        logger.info("画面情绪识别: %s", "开" if visual else "关")
+
+
 # ------------------------------------------------------------------ 环境检查
+
 
 def cmd_check(cfg: Config, args: argparse.Namespace) -> int:
     snapshot = bench.environment_snapshot()
@@ -134,10 +150,42 @@ def cmd_download(cfg: Config, args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def _apply_speaker_override(cfg: Config, args: argparse.Namespace) -> None:
+    """命令行覆盖声纹（说话人分离）模型（GUI 的「声纹」下拉就走这个参数）。
+
+    取值：
+      - 不给 / "auto"：按 config.json 里的 speech.speaker.model_id
+      - "off" / "none"：这次不做说话人分离
+      - "en" / "zh"：界面上那两个选项的简写
+      - 其它：当成完整模型 id 用
+    """
+    want = getattr(args, "speaker_model", None)
+    if not want:
+        return
+    speaker = cfg.speech.setdefault("speaker", {})
+    value = str(want).strip()
+    if value.lower() in ("auto", ""):
+        logger.info("声纹模型: 按 config.json 的设置")
+        return
+    if value.lower() in ("off", "none", "no"):
+        speaker["enabled"] = False
+        logger.info("声纹模型: 关闭说话人分离")
+        return
+    # 两个别名必须跟 config.json 的 speech.speaker.models 对齐：一份纯英文、一份纯中文。
+    alias = {"en": "iic/speech_campplus_sv_en_voxceleb_16k",
+             "zh": "iic/speech_campplus_sv_zh-cn_16k-common"}
+    model_id = alias.get(value.lower(), value)
+    speaker["enabled"] = True
+    speaker["model_id"] = model_id
+    logger.info("声纹模型覆盖为: %s", model_id)
+
+
 # ------------------------------------------------------------------ 主流程
 def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     _apply_mirror(cfg)
     _apply_visual_override(cfg, args)
+    _apply_emotion_override(cfg, args)
+    _apply_speaker_override(cfg, args)
     from vidscribe.pipeline import Pipeline  # noqa: PLC0415
 
     videos: list[Path] = []
@@ -176,6 +224,8 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
                 results.append(pipeline.run_video(
                     video, force=args.force,
                     skip_visual=args.skip_visual, skip_speech=args.skip_speech,
+                    force_speech=getattr(args, "force_speech", False),
+                    translate=getattr(args, "translate", False),
                 ))
             except Exception as exc:  # 单个视频失败不影响其它视频
                 logger.error("处理 %s 失败: %s", video.name, exc)
@@ -198,7 +248,197 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     return 0 if all(r.get("status") == "OK" for r in results) else 1
 
 
+# ------------------------------------------------------------------ 翻译
+def cmd_translate(cfg: Config, args: argparse.Namespace) -> int:
+    """中英互译，纯文本，不解码视频。
+
+    两种用法：
+    - `translate <输出目录>`：翻译该目录里还没有译文的语音段与画面事件（增量）
+    - `translate --items 请求.json --result 结果.json`：GUI 用的模式，
+      只翻译请求文件里给出的那些行（也就是界面上当前显示、还没译文的行）
+    """
+    _apply_mirror(cfg)
+    _apply_visual_override(cfg, args)
+    from vidscribe import progress as progress_mod  # noqa: PLC0415
+    from vidscribe.translate import translate_items, translate_output  # noqa: PLC0415
+
+    def on_progress(done: int, total: int) -> None:
+        progress_mod.report("translate", done / max(total, 1), f"{done}/{total} 行")
+
+    # --- 模式一：只翻译请求文件里的行（GUI）---
+    if args.items:
+        request_path = Path(args.items)
+        if not request_path.is_file():
+            logger.error("找不到翻译请求文件: %s", request_path)
+            return 2
+        with open(request_path, "r", encoding="utf-8") as fh:
+            request = json.load(fh)
+        rows = request.get("items") or []
+        logger.info("按界面内容翻译 %d 行（不重新分析视频）", len(rows))
+        result = translate_items(cfg, rows, source=request.get("source"), on_progress=on_progress)
+        if args.result:
+            write_json(Path(args.result), result)
+        if not result.get("ok"):
+            logger.error("翻译失败：%s %s", result.get("reason"), result.get("detail") or "")
+            return 1
+        logger.info("翻译完成：%s -> %s，成功 %d 行，失败 %d 行，耗时 %.1fs",
+                    result.get("source_language"), result.get("target_language"),
+                    len(result.get("translations") or {}), len(result.get("failed") or []),
+                    result.get("elapsed_seconds") or 0.0)
+        return 0
+
+    # --- 模式二：翻译一个输出目录 ---
+    if not args.target:
+        logger.error("请给出输出目录，或用 --items 指定翻译请求文件")
+        return 2
+    target = Path(args.target)
+    if not target.is_absolute():
+        candidate = cfg.path("output_dir") / args.target
+        target = candidate if candidate.exists() else cfg.root / args.target
+    if target.is_file():  # 传视频路径时自动换成它的输出目录
+        target = cfg.path("output_dir") / target.stem
+    if not target.is_dir():
+        logger.error("找不到输出目录: %s", target)
+        return 2
+
+    # _apply_visual_override 已经把 --visual-model / --backend 写进 cfg.visual
+    # （短名也在那里补全成完整 id），所以这里不再单独传 model_id
+    result = translate_output(cfg, target, retranslate=args.retranslate, on_progress=on_progress)
+    if not result.get("ok"):
+        logger.error("翻译失败：%s %s", result.get("reason"), result.get("detail") or "")
+        return 1
+    if result.get("reason") == "already_translated":
+        logger.info("无需翻译：%s", result.get("detail"))
+        return 0
+    logger.info("翻译完成：%s -> %s，语音 %d/%d，事件 %d/%d",
+                result.get("source_language"), result.get("target_language"),
+                result.get("speech_translated"), result.get("speech_total"),
+                result.get("event_translated"), result.get("event_total"))
+    return 0
+
+
+# ------------------------------------------------------------------ 缓存
+def cmd_cache(cfg: Config, args: argparse.Namespace) -> int:
+    """看/清缓存：固定目录 cache/videos（断点、预览音频）+ logs/（日志）。
+
+    默认只报告；`--clean` 才真删，`--dry-run` 配合 `--clean` 只列出要删什么。
+    output/ 的分析结果和 models/ 的权重永远不动。
+    """
+    from vidscribe import cache as cache_mod  # noqa: PLC0415
+
+    cache_mod.migrate_layout(cfg)  # 顺手把旧的 work/<视频名>/ 布局搬过来
+    days = float(args.days if args.days is not None
+                 else cfg.runtime.get("cache_max_age_days", 3))
+    interval = float(cfg.runtime.get("cache_cleanup_interval_days", 3))
+    info = cache_mod.status(cfg, interval_days=interval, max_age_days=days)
+    logger.info("%s", cache_mod.summary_line(info))
+    logger.info("日志目录 %s；上次清理 %s（%s 天前）；本次是否到期：%s",
+                info["log_dir"], info["last_cleanup"] or "从未",
+                info["days_since_cleanup"] if info["days_since_cleanup"] is not None else "-",
+                "是" if info["due"] else "否")
+    if info["stale_names"]:
+        logger.info("超过 %g 天的缓存：%s", days, "，".join(info["stale_names"][:20])
+                    + (" ..." if len(info["stale_names"]) > 20 else ""))
+    if not args.clean:
+        return 0
+
+    result = cache_mod.cleanup(cfg, max_age_days=days, dry_run=args.dry_run)
+    verb = "将删除" if args.dry_run else "已删除"
+    logger.info("%s %d 项，%s %s", verb, len(result["removed"]),
+                "预计腾出" if args.dry_run else "腾出",
+                cache_mod.human_size(result["freed_bytes"]))
+    if result["failed"]:
+        logger.warning("删除失败 %d 项（可能正被占用）：%s",
+                       len(result["failed"]), "，".join(result["failed"][:10]))
+    return 0
+
+
+# ------------------------------------------------------------------ 高光剪辑
+def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
+    """按 AI JSON 剪高光：clip.start 起剪，clip.end 冻帧，片尾由 --text-offset 决定。"""
+
+    from vidscribe.highlight import default_target, parse_spec, render_highlight, resolve_video  # noqa: PLC0415
+
+    try:  # Windows 控制台默认 GBK，日志里的中文字幕会花屏
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+    if args.json:
+        source = Path(args.json)
+        if not source.is_absolute():
+            source = cfg.root / source
+        if not source.is_file():
+            logger.error("找不到 JSON 文件: %s", source)
+            return 2
+        raw = source.read_text(encoding="utf-8")
+    else:
+        raw = sys.stdin.read()
+    if not raw.strip():
+        logger.error("没有读到 JSON 内容（用 --json 指定文件，或从标准输入喂进来）")
+        return 2
+
+    try:
+        spec = parse_spec(json.loads(raw))
+        spec = spec.shifted(args.start_offset, args.end_offset, args.text_offset)
+    except json.JSONDecodeError as exc:
+        logger.error("JSON 解析失败: %s", exc)
+        return 2
+    except ValueError as exc:
+        logger.error("JSON 内容不合规: %s", exc)
+        return 2
+
+
+    fallback = None
+    if args.video:
+        candidate = Path(args.video)
+        fallback = candidate if candidate.is_absolute() else cfg.root / candidate
+    try:
+        video = resolve_video(spec, cfg.path("output_dir"), cfg.path("input_dir"), fallback)
+    except FileNotFoundError as exc:
+        logger.error("%s（可用 --video 指定源视频）", exc)
+        return 2
+
+    if args.out:
+        target = Path(args.out)
+        if not target.is_absolute():
+            target = cfg.root / target
+    else:
+        target = default_target(_export_dir(cfg, video), video)
+
+    try:
+        result = render_highlight(video, spec, target, on_log=lambda line: print(line, flush=True))
+    except Exception as exc:
+        logger.error("剪辑失败: %s", exc)
+        logger.debug(traceback.format_exc())
+        return 1
+    write_json(target.with_suffix(".json"),
+               {"spec": spec.raw,
+                "offsets": {"start": args.start_offset, "end": args.end_offset,
+                            "text": args.text_offset},
+                "result": result})
+
+    logger.info("高光片段已生成: %s", target)
+    return 0
+
+
+def _export_dir(cfg: Config, video: Path) -> Path:
+    """和 GUI 共用「导出目录」：读 gui_settings.json 的 export_dir，没设过就用该视频的结果目录。"""
+    settings_file = cfg.root / "gui_settings.json"
+    if settings_file.is_file():
+        try:
+            saved = json.loads(settings_file.read_text(encoding="utf-8")).get("export_dir")
+        except Exception:  # noqa: BLE001 - 设置文件坏了不该让剪辑失败
+            saved = None
+        if saved and Path(saved).is_dir():
+            return Path(saved)
+    return cfg.path("output_dir") / video.stem
+
+
 # ------------------------------------------------------------------ GUI
+
+
 def cmd_gui(cfg: Config, args: argparse.Namespace) -> int:
     _apply_mirror(cfg)
     try:
@@ -362,12 +602,63 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--force", action="store_true", help="忽略断点缓存，全部重跑")
     p_run.add_argument("--skip-visual", action="store_true")
     p_run.add_argument("--skip-speech", action="store_true")
+    p_run.add_argument("--force-speech", action="store_true",
+                       help="只重跑语音识别（画面结果有缓存就复用），配合 --skip-visual 使用")
     p_run.add_argument("--limit", type=int, default=0, help="最多处理几个视频")
+    p_run.add_argument("--translate", action="store_true",
+                       help="分析完顺手翻译（模型还在显存里，省掉单独翻译时约 15s 的加载）")
     p_run.add_argument("--visual-model", default=None,
                        help="覆盖视觉模型，如 openbmb/MiniCPM-V-4_5-int4（可只写 MiniCPM-V-4_5-int4）")
     p_run.add_argument("--backend", default=None, choices=["auto", *BACKENDS],
                        help="视觉后端，默认按模型名自动判断")
+    # 两路情绪各自可开可关；不给参数就按 config.json 里的设置走
+    p_run.add_argument("--audio-emotion", dest="audio_emotion", action="store_true", default=None,
+                       help="开启语音情绪识别（emotion2vec+，要额外加载模型）")
+    p_run.add_argument("--no-audio-emotion", dest="audio_emotion", action="store_false",
+                       help="关闭语音情绪识别")
+    p_run.add_argument("--visual-emotion", dest="visual_emotion", action="store_true", default=None,
+                       help="开启画面情绪识别（视觉模型同一次推理顺便判，不额外加载模型）")
+    p_run.add_argument("--no-visual-emotion", dest="visual_emotion", action="store_false",
+                       help="关闭画面情绪识别")
+    # 声纹模型：GUI 的「声纹」下拉透传到这里；不给就按 config.json 走
+    p_run.add_argument("--speaker-model", dest="speaker_model", default=None,
+                       help="声纹模型：en（英文，默认）/ zh（中文）/ off（不分说话人）/ 完整模型 id")
     p_run.set_defaults(func=cmd_run)
+
+    p_tr = sub.add_parser("translate", help="翻译已有结果（英->中 / 中->英），纯文本，不解码视频")
+    p_tr.add_argument("target", nargs="?", default=None,
+                      help="输出目录名、输出目录路径，或视频文件路径")
+    p_tr.add_argument("--items", default=None,
+                      help="只翻译这个 JSON 里给出的文本行（GUI 用：界面上还没译文的那些行）")
+    p_tr.add_argument("--result", default=None, help="把翻译结果写到这个 JSON（配合 --items）")
+    p_tr.add_argument("--retranslate", action="store_true",
+                      help="连已有译文的条目也重新翻译（默认只补没译文的）")
+    p_tr.add_argument("--visual-model", default=None, help="指定做翻译的模型，默认用配置里的视觉模型")
+    p_tr.add_argument("--backend", default=None, choices=["auto", *BACKENDS], help="视觉后端")
+    p_tr.set_defaults(func=cmd_translate)
+
+    p_cache = sub.add_parser("cache", help="查看/清理缓存（work 断点与预览音频、logs 日志）")
+    p_cache.add_argument("--clean", action="store_true", help="真的删除过期缓存")
+    p_cache.add_argument("--dry-run", action="store_true", help="配合 --clean：只列出要删什么")
+    p_cache.add_argument("--days", type=float, default=None,
+                         help="多少天没动过算过期，默认取 runtime.cache_max_age_days（3）")
+    p_cache.set_defaults(func=cmd_cache)
+
+    p_hl = sub.add_parser("highlight", help="按 AI JSON 剪高光片段（起剪 / 冻帧 / 收尾三个时间严格照做）")
+    p_hl.add_argument("--json", default=None, help="AI JSON 文件路径；不给则从标准输入读")
+    p_hl.add_argument("--video", default=None, help="源视频路径，JSON 的 video 字段找不到时用它兜底")
+    p_hl.add_argument("--out", default=None,
+                      help="输出 MP4 路径，默认放导出目录（gui_settings.json 的 export_dir），"
+                           "没设过就放 output/<视频名>/，文件名带 _高光时刻")
+    p_hl.add_argument("--start-offset", type=float, default=0.0,
+                      help="起剪点 = clip.start + 本值，秒；负数提前起剪")
+    p_hl.add_argument("--end-offset", type=float, default=0.0,
+                      help="冻帧点 = clip.end + 本值，秒；正数晚一点冻结")
+    p_hl.add_argument("--text-offset", type=float, default=0.0,
+                      help="冻帧+字幕这段的时长，秒；0 只留一帧，不能为负")
+
+    p_hl.set_defaults(func=cmd_highlight)
+
     p_gui = sub.add_parser("gui", help="启动 PyQt5 图形界面（左视频 / 右时间轴 / 底部语音）")
     p_gui.add_argument("video", nargs="?", default=None, help="启动时直接打开的视频")
     p_gui.set_defaults(func=cmd_gui)

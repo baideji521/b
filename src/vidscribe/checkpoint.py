@@ -1,4 +1,4 @@
-"""断点续跑：每个视频一个工作目录，各阶段产物独立落盘。"""
+"""断点续跑：每个视频在缓存目录下一份 `cache/videos/<视频标识>/`，各阶段产物独立落盘。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .cache import video_dir_in
 from .logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -14,9 +15,8 @@ STAGES = ("probe", "visual", "speech", "timeline")
 
 
 class Checkpoint:
-    def __init__(self, work_dir: Path, video_path: Path):
-        self.dir = work_dir / video_path.stem
-        self.dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, cache_root: Path, video_path: Path):
+        self.dir = video_dir_in(cache_root, video_path)
         self.state_file = self.dir / "state.json"
         self.state: dict[str, Any] = {"video": str(video_path.resolve()), "stages": {}}
         if self.state_file.is_file():
