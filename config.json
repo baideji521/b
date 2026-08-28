@@ -193,7 +193,8 @@
   "bridge": {
     "enabled": true,
     "port": 5998,
-    "port_fallbacks": 9,
+    "port_fallbacks": 0,
+
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",

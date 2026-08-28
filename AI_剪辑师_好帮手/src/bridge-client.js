@@ -9,6 +9,9 @@
 
 export const STORAGE_KEY_ENDPOINT = "bridge_endpoint";
 export const STORAGE_KEY_TOKEN = "bridge_token";
+// 用户在 popup 里手填过端口就置 true：之后一律用这个端口，不再自动探测顺延端口段。
+export const STORAGE_KEY_MANUAL = "bridge_endpoint_manual";
+
 // 端点迁移标记。默认端口改过几次（47720 段 -> 5999 -> 5998），而浏览器存储里
 // 的旧地址优先于 DEFAULT_ENDPOINT，所以换默认端口时必须主动清一次。
 const STORAGE_KEY_ENDPOINT_MIGRATED = "bridge_endpoint_migration";
@@ -23,13 +26,15 @@ const LEGACY_DEFAULT_PORTS = new Set([
 export const AUTOPAIR_ALARM_NAME = "AI剪辑师好帮手-autopair";
 const HEALTH_TIMEOUT_MS = 1500;
 // AI_剪辑师 的 Bridge 默认监听 5998（见 config.json 的 bridge.port）
-const DEFAULT_ENDPOINT = "http://127.0.0.1:5998";
-// 与 config.json 的 bridge.port / port_fallbacks 对齐：5998 起往后顺延 9 个
+export const DEFAULT_PORT = 5998;
+const DEFAULT_ENDPOINT = `http://127.0.0.1:${DEFAULT_PORT}`;
+// 没手填端口时自动探测的范围：5998 起往后 9 个
 export const DEFAULT_PORT_RANGE = [
   5998, 5999, 6000, 6001, 6002, 6003, 6004, 6005, 6006, 6007,
 ];
 
 export function trimEndpoint(value) {
+
   if (typeof value !== "string") return "";
   let trimmed = value.trim();
   if (!trimmed) return "";
@@ -39,7 +44,18 @@ export function trimEndpoint(value) {
   return trimmed;
 }
 
+/** 从端点里抠出端口号，抠不到就给默认端口。 */
+export function portOf(endpoint) {
+  try {
+    const port = Number(new URL(trimEndpoint(endpoint)).port);
+    return Number.isFinite(port) && port > 0 ? port : DEFAULT_PORT;
+  } catch {
+    return DEFAULT_PORT;
+  }
+}
+
 // 判断某个端点是否指向历史默认端口。用户手填的自定义端口不在名单里，不会被误清。
+
 function isLegacyDefaultEndpoint(value) {
   const trimmed = trimEndpoint(value);
   if (!trimmed) return false;
@@ -52,15 +68,17 @@ function isLegacyDefaultEndpoint(value) {
 
 export async function loadBridgeConfig({ storage = globalThis.chrome?.storage?.local } = {}) {
   if (!storage?.get) {
-    return { endpoint: "", token: "" };
+    return { endpoint: "", token: "", port: DEFAULT_PORT, manual: false };
   }
   return new Promise((resolve) => {
     storage.get(
-      [STORAGE_KEY_ENDPOINT, STORAGE_KEY_TOKEN, STORAGE_KEY_ENDPOINT_MIGRATED],
+      [STORAGE_KEY_ENDPOINT, STORAGE_KEY_TOKEN, STORAGE_KEY_ENDPOINT_MIGRATED,
+       STORAGE_KEY_MANUAL],
       (items) => {
         let stored = trimEndpoint(items?.[STORAGE_KEY_ENDPOINT]);
         const token =
           typeof items?.[STORAGE_KEY_TOKEN] === "string" ? items[STORAGE_KEY_TOKEN].trim() : "";
+        const manual = Boolean(items?.[STORAGE_KEY_MANUAL]);
 
         // 一次性迁移：存储里留着旧默认端口时清掉，让 DEFAULT_ENDPOINT 生效。
         const migrated = items?.[STORAGE_KEY_ENDPOINT_MIGRATED];
@@ -74,29 +92,47 @@ export async function loadBridgeConfig({ storage = globalThis.chrome?.storage?.l
           } catch {}
         }
 
-        resolve({ endpoint: stored || DEFAULT_ENDPOINT, token });
+        const endpoint = stored || DEFAULT_ENDPOINT;
+        resolve({ endpoint, token, port: portOf(endpoint), manual });
       }
     );
   });
 }
 
 export async function saveBridgeConfig(
-  { endpoint = "", token = "" },
+  { endpoint = "", token = "", manual = null },
   { storage = globalThis.chrome?.storage?.local } = {}
 ) {
   if (!storage?.set) return false;
+  const payload = {
+    [STORAGE_KEY_ENDPOINT]: trimEndpoint(endpoint),
+    [STORAGE_KEY_TOKEN]: typeof token === "string" ? token.trim() : "",
+    // 用户显式保存过的地址就是最终答案，打上标记避免之后被迁移逻辑清掉
+    [STORAGE_KEY_ENDPOINT_MIGRATED]: ENDPOINT_MIGRATION_ID,
+  };
+  // manual 给 null 表示别动这个标记（自动发现改地址时不该把手填状态抹掉）
+  if (manual !== null) payload[STORAGE_KEY_MANUAL] = Boolean(manual);
   return new Promise((resolve) => {
-    storage.set(
-      {
-        [STORAGE_KEY_ENDPOINT]: trimEndpoint(endpoint),
-        [STORAGE_KEY_TOKEN]: typeof token === "string" ? token.trim() : "",
-        // 用户显式保存过的地址就是最终答案，打上标记避免之后被迁移逻辑清掉
-        [STORAGE_KEY_ENDPOINT_MIGRATED]: ENDPOINT_MIGRATION_ID,
-      },
-      () => resolve(true)
-    );
+    storage.set(payload, () => resolve(true));
   });
 }
+
+/**
+ * popup 保存端口：只认 1-65535，存成 http://127.0.0.1:<port> 并锁定手填状态。
+ * 端口变了就把旧令牌丢掉——换端口通常就是换了另一个 AI_剪辑师 实例。
+ */
+export async function saveBridgePort(port, { storage = globalThis.chrome?.storage?.local } = {}) {
+  const value = Number(port);
+  if (!Number.isInteger(value) || value < 1 || value > 65535) {
+    return { ok: false, reason: "bad-port" };
+  }
+  const current = await loadBridgeConfig({ storage });
+  const endpoint = `http://127.0.0.1:${value}`;
+  const token = portOf(current.endpoint) === value ? current.token : "";
+  await saveBridgeConfig({ endpoint, token, manual: true }, { storage });
+  return { ok: true, endpoint, port: value, token_kept: Boolean(token) };
+}
+
 
 // 忘掉令牌但保留地址（地址通常还是对的）
 export async function clearStoredToken({ storage = globalThis.chrome?.storage?.local } = {}) {
@@ -204,9 +240,13 @@ export async function autoPair({
   if (current.token) return { ok: true, reason: "already-paired" };
 
   let endpoint = current.endpoint;
-  const discovered = await discoverBridgeEndpoint({ fetchImpl, timeoutMs });
-  if (discovered?.endpoint) endpoint = discovered.endpoint;
+  // 手填过端口就死守这个端口，不去探测端口段（不然自己指定的端口会被自动发现覆盖）
+  if (!current.manual) {
+    const discovered = await discoverBridgeEndpoint({ fetchImpl, timeoutMs });
+    if (discovered?.endpoint) endpoint = discovered.endpoint;
+  }
   endpoint = trimEndpoint(endpoint);
+
   if (!endpoint) return { ok: false, reason: "no-endpoint" };
 
   const controller = typeof AbortController !== "undefined" ? new AbortController() : null;

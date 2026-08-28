@@ -54,7 +54,34 @@ dd.bad {
   color: var(--bad);
 }
 
+.row {
+  display: grid;
+  grid-template-columns: 34px 1fr 56px;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.row label {
+  color: var(--dim);
+}
+
+.row input {
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #1c2027;
+  color: var(--fg);
+  font: inherit;
+}
+
+.row button {
+  width: auto;
+  padding: 6px 8px;
+}
+
 button {
+
   width: 100%;
   padding: 7px 10px;
   border: 1px solid var(--line);

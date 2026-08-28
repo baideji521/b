@@ -19,10 +19,18 @@
       <dd id="state">读取中…</dd>
     </dl>
 
+    <div class="row">
+      <label for="port">端口</label>
+      <input id="port" type="number" min="1" max="65535" step="1" placeholder="5998" />
+      <button id="savePort" type="button">保存</button>
+    </div>
+    <p class="hint" id="portHint">默认 5998，要和 AI_剪辑师 里显示的端口一致。</p>
+
     <button id="pair" type="button">重新配对</button>
     <p class="hint">
       先在 AI_剪辑师 里点「配对扩展」开配对窗口，再点这里。
     </p>
+
 
     <script src="popup.js" type="module"></script>
   </body>

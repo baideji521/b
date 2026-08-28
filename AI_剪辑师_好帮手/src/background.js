@@ -13,8 +13,11 @@ import {
   checkBridgeHealth,
   discoverBridgeEndpoint,
   saveBridgeConfig,
+  saveBridgePort,
+  DEFAULT_PORT,
   AUTOPAIR_ALARM_NAME,
 } from "./bridge-client.js";
+
 import { startAiPolling, resumeAiPolling, pollingStatus, AI_POLL_ALARM } from "./ai-task.js";
 
 const LOG_PREFIX = "[AI剪辑师好帮手]";
@@ -62,6 +65,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       const health = await checkBridgeHealth(config.endpoint);
       sendResponse({
         endpoint: config.endpoint,
+        port: config.port,
+        manual: config.manual,
+        default_port: DEFAULT_PORT,
         paired: Boolean(config.token),
         health,
         polling: pollingStatus(),
@@ -69,13 +75,21 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })();
     return true;
   }
+  if (message?.type === "setPort") {
+    (async () => {
+      const result = await saveBridgePort(message.port);
+      if (result.ok) log(`端口已改为 ${result.port}（手填，不再自动探测）`);
+      sendResponse(result);
+    })();
+    return true;
+  }
   if (message?.type === "pair") {
     (async () => {
-      const found = await discoverBridgeEndpoint();
-      if (found?.endpoint) {
-        const config = await loadBridgeConfig();
-        // 发现了新地址就先存下来，再走配对
-        if (found.endpoint !== config.endpoint) {
+      const config = await loadBridgeConfig();
+      // 手填过端口就守着它；没手填才去端口段里找一个活的
+      if (!config.manual) {
+        const found = await discoverBridgeEndpoint();
+        if (found?.endpoint && found.endpoint !== config.endpoint) {
           await saveBridgeConfig({ endpoint: found.endpoint, token: config.token });
         }
       }
@@ -83,6 +97,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     })();
     return true;
   }
+
   return false;
 });
 
