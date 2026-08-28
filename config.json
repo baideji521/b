@@ -1,6 +1,6 @@
 {
   "paths": {
-    "input_dir": "input",
+    "input_dir": "F:\\工具\\视频音频转文字\\input",
     "output_dir": "output",
     "cache_dir": "cache",
     "log_dir": "logs",
@@ -190,15 +190,23 @@
     "port": 5998,
     "port_fallbacks": 0,
     "mode": "extension",
+    "provider": "gemini",
     "api_key": "",
     "api_key_env": "GEMINI_API_KEY",
     "api_model": "gemini-2.5-flash",
     "api_timeout": 300,
+    "deepseek": {
+      "api_key": "",
+      "api_key_env": "DEEPSEEK_API_KEY",
+      "api_model": "deepseek-chat",
+      "base_url": "https://api.deepseek.com",
+      "ai_url": "https://chat.deepseek.com/"
+    },
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
     "upload_mode": "auto",
-    "focus_browser": false,
+    "focus_browser": true,
     "side_window": true,
     "keep_merged_file": false,
     "message": "Follow the rules in prm_en.txt and analyze the attached *_merged.txt. Reply with the JSON object only.",

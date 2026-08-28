@@ -168,9 +168,19 @@ DEFAULTS: dict[str, Any] = {
         "port": 5998,
         # 端口被占时往后顺延几个（扩展那边也按这个范围探测）
         "port_fallbacks": 9,
-        # 任务类型标识，扩展按它筛任务
+        # 任务类型标识，扩展按它筛任务（名字是历史遗留，两家提供方都走这一种）
         "task_type": "gemini_json",
+        # 找哪家 AI：gemini / deepseek。接口直连和网页版扩展都看这个
+        "provider": "gemini",
         "ai_url": "https://gemini.google.com/app",
+        # DeepSeek 的键单独一节，Gemini 的还平铺在 bridge 下（老配置照旧能跑）
+        "deepseek": {
+            "api_key": "",
+            "api_key_env": "DEEPSEEK_API_KEY",
+            "api_model": "deepseek-chat",
+            "base_url": "https://api.deepseek.com",
+            "ai_url": "https://chat.deepseek.com/",
+        },
         # 高光筛选提示词：相对项目根目录。这份和合并导出都是当附件上传给网页版 AI
         "prompt_file": "prm/prm_en.txt",
         # 合并导出临时落在项目根目录，任务结束就删（想留档改成 true）

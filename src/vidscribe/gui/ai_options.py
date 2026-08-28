@@ -1,8 +1,9 @@
-"""AI 选项对话框：AI 走哪条路、用哪个模型、目录放哪儿、扩展怎么跑，都在这儿改。
+"""AI 选项对话框：找哪家 AI、走哪条路、用哪个模型、目录放哪儿、扩展怎么跑，都在这儿改。
 
 改完直接写回 config.json（只写涉及的键，文件里其它内容不动），下次「发送_AI」立刻生效；
 只有端口要重启 GUI 才换得过去，因为 Bridge 服务在启动时就绑好了。
 输出目录跟第一行的「导出目录…」是同一个设置，改哪边都算数——存在 gui_settings.json 里。
+提供方（Gemini / DeepSeek）各有自己的 key 和模型，切换时这两栏会跟着换，互不覆盖。
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ from PyQt5.QtWidgets import (
     QSpinBox,
 )
 
-MODELS = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
+from ..bridge import providers
 
 
 class DropDirEdit(QLineEdit):
@@ -118,23 +119,29 @@ class AiOptionsDialog(QDialog):
         self.edit_input = DropDirEdit(str(cfg.path("input_dir")))
         self.edit_output = DropDirEdit(self._current_export_dir())
 
+        # --- 找哪家 AI ---
+        self.cmb_provider = QComboBox()
+        for name, spec in providers.PROVIDERS.items():
+            self.cmb_provider.addItem(spec["label"], name)
+        self._provider = providers.normalize(bridge.get("provider"))
+        self.cmb_provider.setCurrentIndex(max(0, self.cmb_provider.findData(self._provider)))
+        # 每家的 key / 模型各存一份，切来切去不会互相覆盖，保存时一起落盘
+        self._draft = {name: {"api_key": str(providers.node(bridge, name).get("api_key") or ""),
+                              "api_model": str(providers.settings(bridge, name)["api_model"])}
+                       for name in providers.PROVIDERS}
+
         # --- AI 怎么跑 ---
         self.cmb_mode = QComboBox()
         self.cmb_mode.addItem("接口直连（不开浏览器，要 API key）", "api")
-        self.cmb_mode.addItem("网页版扩展（用浏览器里的 Gemini）", "extension")
+        self.cmb_mode.addItem("网页版扩展（用浏览器里的对话页）", "extension")
         idx = self.cmb_mode.findData(str(bridge.get("mode") or "api"))
         self.cmb_mode.setCurrentIndex(max(0, idx))
 
-        self.edit_key = QLineEdit(str(bridge.get("api_key") or ""))
+        self.edit_key = QLineEdit()
         self.edit_key.setEchoMode(QLineEdit.Password)
-        self.edit_key.setPlaceholderText("留空则读环境变量 GEMINI_API_KEY")
-        self.edit_key.setToolTip("去 https://aistudio.google.com/apikey 领；"
-                                 "不想写进仓库就设环境变量")
 
         self.cmb_model = QComboBox()
         self.cmb_model.setEditable(True)
-        self.cmb_model.addItems(MODELS)
-        self.cmb_model.setCurrentText(str(bridge.get("api_model") or MODELS[0]))
 
         self.spin_timeout = QSpinBox()
         self.spin_timeout.setRange(30, 3600)
@@ -152,7 +159,7 @@ class AiOptionsDialog(QDialog):
         idx = self.cmb_upload.findData(str(bridge.get("upload_mode") or "auto"))
         self.cmb_upload.setCurrentIndex(max(0, idx))
 
-        self.chk_side = QCheckBox("Gemini 放到不抢焦点的小窗口")
+        self.chk_side = QCheckBox("对话页放到不抢焦点的小窗口")
         self.chk_side.setChecked(bool(bridge.get("side_window", True)))
         self.chk_side.setToolTip("后台标签页会被浏览器冻结，什么都干不了；独立窗口照常渲染")
         self.chk_focus = QCheckBox("允许浏览器跳到前台")
@@ -160,10 +167,9 @@ class AiOptionsDialog(QDialog):
         self.chk_clip = QCheckBox("拿到 JSON 就自动开剪")
         self.chk_clip.setChecked(bool(bridge.get("auto_clip", True)))
 
-        hint = QLabel("接口直连纯后台跑，失败原因明确；网页版扩展要开着浏览器，"
-                      "而且窗口被完全盖住时页面会被冻结。")
-        hint.setProperty("role", "hint")
-        hint.setWordWrap(True)
+        self.hint = QLabel()
+        self.hint.setProperty("role", "hint")
+        self.hint.setWordWrap(True)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Save).setText("保存")
@@ -174,6 +180,7 @@ class AiOptionsDialog(QDialog):
         form = QFormLayout(self)
         form.addRow("输入目录", self._dir_row(self.edit_input, "选择输入目录"))
         form.addRow("输出目录", self._dir_row(self.edit_output, "选择输出目录"))
+        form.addRow("找哪家 AI", self.cmb_provider)
         form.addRow("走哪条路", self.cmb_mode)
         form.addRow("API key", self.edit_key)
         form.addRow("模型", self.cmb_model)
@@ -183,9 +190,11 @@ class AiOptionsDialog(QDialog):
         form.addRow(self.chk_side)
         form.addRow(self.chk_focus)
         form.addRow(self.chk_clip)
-        form.addRow(hint)
+        form.addRow(self.hint)
         form.addRow(buttons)
         self.cmb_mode.currentIndexChanged.connect(self.sync_enabled)
+        self.cmb_provider.currentIndexChanged.connect(self.on_provider_changed)
+        self.load_provider(self._provider)
         self.sync_enabled()
 
     # ------------------------------------------------------------- 组件
@@ -217,6 +226,34 @@ class AiOptionsDialog(QDialog):
             return str(getter())
         return str(self.cfg.path("output_dir"))
 
+    # --------------------------------------------------------- 提供方切换
+    def on_provider_changed(self) -> None:
+        """换提供方：先把当前这家的 key / 模型收进草稿，再摊开新那家的。"""
+        self.stash_provider()
+        self._provider = providers.normalize(self.cmb_provider.currentData())
+        self.load_provider(self._provider)
+        self.sync_enabled()
+
+    def stash_provider(self) -> None:
+        draft = self._draft.setdefault(self._provider, {})
+        draft["api_key"] = self.edit_key.text().strip()
+        draft["api_model"] = self.cmb_model.currentText().strip()
+
+    def load_provider(self, name: str) -> None:
+        spec = providers.PROVIDERS[name]
+        draft = self._draft.get(name, {})
+        self.edit_key.setText(str(draft.get("api_key") or ""))
+        self.edit_key.setPlaceholderText(f"留空则读环境变量 {spec['key_env']}")
+        self.edit_key.setToolTip(f"去 {spec['key_page']} 领；不想写进仓库就设环境变量")
+        self.cmb_model.blockSignals(True)
+        self.cmb_model.clear()
+        self.cmb_model.addItems(spec["models"])
+        self.cmb_model.setCurrentText(str(draft.get("api_model") or spec["models"][0]))
+        self.cmb_model.blockSignals(False)
+        self.hint.setText(
+            f"接口直连纯后台跑，失败原因明确（{spec['label']} key 去 {spec['key_page']} 领）；"
+            f"网页版扩展要开着浏览器上 {spec['ai_url']}，而且窗口被完全盖住时页面会被冻结。")
+
     def sync_enabled(self) -> None:
         """按选的路子灰掉用不上的项，免得改了半天不生效还以为坏了。"""
         api = self.cmb_mode.currentData() == "api"
@@ -228,17 +265,25 @@ class AiOptionsDialog(QDialog):
     # ------------------------------------------------------------- 保存
     def save(self) -> None:
         old_port = int(self.cfg.bridge.get("port") or 5998)
-        patch: dict[str, Any] = {"bridge": {
+        self.stash_provider()
+        bridge: dict[str, Any] = {
             "mode": self.cmb_mode.currentData(),
-            "api_key": self.edit_key.text().strip(),
-            "api_model": self.cmb_model.currentText().strip(),
+            "provider": self._provider,
             "api_timeout": int(self.spin_timeout.value()),
             "port": int(self.spin_port.value()),
             "upload_mode": self.cmb_upload.currentData(),
             "side_window": self.chk_side.isChecked(),
             "focus_browser": self.chk_focus.isChecked(),
             "auto_clip": self.chk_clip.isChecked(),
-        }}
+        }
+        # 每家的 key / 模型写回各自那一节（Gemini 是 bridge 下的老键，DeepSeek 在 bridge.deepseek）
+        for name, draft in self._draft.items():
+            section = providers.section_for(name)
+            if section:
+                bridge.setdefault(section, {}).update(draft)
+            else:
+                bridge.update(draft)
+        patch: dict[str, Any] = {"bridge": bridge}
         indir = self.edit_input.text().strip()
         if indir:
             patch["paths"] = {"input_dir": indir}
@@ -255,9 +300,10 @@ class AiOptionsDialog(QDialog):
             apply_export(Path(outdir))
 
         if self._log:
-            mode = "接口直连" if patch["bridge"]["mode"] == "api" else "网页版扩展"
-            self._log(f"[AI 选项] 已保存到 {path}：{mode}，模型 "
-                      f"{patch['bridge']['api_model']}，端口 {patch['bridge']['port']}")
+            mode = "接口直连" if bridge["mode"] == "api" else "网页版扩展"
+            spec = providers.PROVIDERS[self._provider]
+            self._log(f"[AI 选项] 已保存到 {path}：{mode}，{spec['label']} "
+                      f"{self._draft[self._provider]['api_model']}，端口 {bridge['port']}")
             self._log(f"[AI 选项] 输入目录 {indir or '（没改）'}；输出目录 {outdir or '（没改）'}")
         if int(self.spin_port.value()) != old_port:
             QMessageBox.information(self, "AI 选项",

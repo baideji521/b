@@ -286,31 +286,35 @@ class HighlightDialog(QDialog):
 
 
 class AiApiWorker(QThread):
-    """直接调 Gemini API 问高光 JSON。不开浏览器、不用扩展，纯后台一次请求。
+    """直接调 AI 接口问高光 JSON。不开浏览器、不用扩展，纯后台一次请求。
 
+    走哪家（Gemini / DeepSeek）由 provider 决定，实现在 bridge/providers.py 里分发。
     网页版那条路依赖 DOM 和窗口可见性，太脆；这条只有网络会失败，失败原因明确。
     """
 
     log = pyqtSignal(str)
     done = pyqtSignal(str, str)  # (回答正文, 错误)
 
-    def __init__(self, api_key: str, model: str, prompt_text: str, merged_text: str,
-                 message: str, timeout: float):
+    def __init__(self, provider: str, api_key: str, model: str, prompt_text: str,
+                 merged_text: str, message: str, timeout: float, base_url: str = ""):
         super().__init__()
+        self.provider = provider
         self.api_key = api_key
         self.model = model
         self.prompt_text = prompt_text
         self.merged_text = merged_text
         self.message = message
         self.timeout = timeout
+        self.base_url = base_url
 
     def run(self) -> None:
-        from ..bridge import gemini_api  # noqa: PLC0415
+        from ..bridge import providers  # noqa: PLC0415
 
         try:
-            text = gemini_api.ask(self.api_key, self.prompt_text, self.merged_text,
-                                  self.message, self.model, self.timeout)
-        except gemini_api.GeminiError as exc:
+            text = providers.ask(self.provider, self.api_key, self.prompt_text,
+                                 self.merged_text, self.message, self.model,
+                                 self.timeout, self.base_url)
+        except providers.AiError as exc:
             self.done.emit("", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 - 网络层什么都可能抛，别让线程静默死掉
@@ -1603,14 +1607,18 @@ class MainWindow(QMainWindow):
             text, mood = f":{port} 扩展离线", "off"
         else:
             text, mood = f":{port} 等待配对", "busy"
+        from ..bridge import providers  # noqa: PLC0415
+
+        spec = providers.settings(self.cfg.bridge)
         if str(self.cfg.bridge.get("mode") or "api") == "api":
             # 接口直连根本不用扩展，这时候显示扩展在不在线只会让人误会。
-            # 模型名在「AI 选项」里看得到，不用挤在药丸上
+            # 提供方和模型名在「AI 选项」里看得到，不用挤在药丸上
             text, mood = "接口直连", "ok"
         self.set_bridge_pill(text, mood)
         self.lbl_bridge.setToolTip(f"Bridge {state['url']}\n"
+                                   f"当前 AI：{spec['label']}（{spec['api_model']}）\n"
                                    f"扩展选项页的地址填这个，令牌点「配对扩展」自动领取\n"
-                                   f"走哪条路、端口、模型都在「AI 选项」里改")
+                                   f"走哪条路、找哪家 AI、端口、模型都在「AI 选项」里改")
 
     def set_bridge_pill(self, text: str, mood: str) -> None:
         """药丸文字 + 配色。改了 state 属性必须 unpolish/polish，否则颜色不变。"""
@@ -1635,8 +1643,8 @@ class MainWindow(QMainWindow):
         """把 prm/prm_en.txt 和 <视频名>_merged.txt 发给 AI 要高光 JSON。
 
         两条路，由 bridge.mode 决定：
-        - api（默认）：Python 直接调 Gemini 接口。纯后台，不开浏览器，失败原因明确。
-        - extension：老路子，扩展去驱动网页版 Gemini。要开着浏览器且窗口不能被冻结。
+        - api（默认）：Python 直接调 AI 接口（Gemini 或 DeepSeek）。纯后台，不开浏览器。
+        - extension：老路子，扩展去驱动网页版对话页。要开着浏览器且窗口不能被冻结。
         合并导出临时落在项目根目录，任务结束就删。
         """
         if self.video_path is None:
@@ -1671,15 +1679,21 @@ class MainWindow(QMainWindow):
         if self.bridge is None:
             QMessageBox.warning(self, "AI 对接", "Bridge 没有启动")
             return
+        from ..bridge import providers  # noqa: PLC0415
+
+        # 网页版开哪家由 bridge.provider 定：gemini -> gemini.google.com，
+        # deepseek -> chat.deepseek.com；扩展也按网址挑对应的页面选择器
+        spec = providers.settings(cfg)
         task_id = self.bridge.submit(
 
             str(cfg.get("task_type") or "gemini_json"),
-            {"url": str(cfg.get("ai_url") or "https://gemini.google.com/app"),
+            {"url": spec["ai_url"],
+             "provider": spec["provider"],
              "video": self.video_path.name,
              "message": str(cfg.get("message") or ""),
              "upload_mode": str(cfg.get("upload_mode") or "manual"),
              "focus_browser": bool(cfg.get("focus_browser", False)),
-             # 后台标签页会被浏览器冻结（不排版、不跑定时器），所以默认把 Gemini
+             # 后台标签页会被浏览器冻结（不排版、不跑定时器），所以默认把网页版 AI
              # 挪进一个不抢焦点的小窗口，页面照常渲染又挡不着你干活
              "side_window": bool(cfg.get("side_window", True)),
 
@@ -1687,43 +1701,45 @@ class MainWindow(QMainWindow):
              "expect": "json"},
             files=[prompt_path, merged_path])
         state = self.bridge.state()
-        self.append_log(f"[AI 对接] 已入队 {task_id}：上传 {prompt_path.name} + "
-                        f"{merged_path.name}（时间线 {count} 条）"
+        self.append_log(f"[AI 对接] 已入队 {task_id}（{spec['label']} 网页版）：上传 "
+                        f"{prompt_path.name} + {merged_path.name}（时间线 {count} 条）"
                         + ("，等扩展领取" if state["extension_online"]
                            else "；扩展当前离线，先确认扩展已装好并配对"))
         if str(cfg.get("upload_mode") or "manual") == "manual":
-            self.append_log("[AI 对接] 半自动模式：Gemini 打开后请自己把这两个文件选进去，"
-                            "挂好之后扩展会自动发送并回传")
+            self.append_log(f"[AI 对接] 半自动模式：{spec['label']} 打开后请自己把这两个文件"
+                            "选进去，挂好之后扩展会自动发送并回传")
             self.append_log(f"[AI 对接] 文件 1：{prompt_path}")
             self.append_log(f"[AI 对接] 文件 2：{merged_path}")
         self.refresh_bridge_label()
 
     def api_key(self) -> str:
-        """API key：先看 config 里的 bridge.api_key，为空就读环境变量。
+        """当前提供方的 API key：先看配置里写死的，为空就读环境变量。
 
-        环境变量优先给不想把 key 写进仓库的情况用（默认变量名 GEMINI_API_KEY）。
+        环境变量优先给不想把 key 写进仓库的情况用（Gemini 是 GEMINI_API_KEY，
+        DeepSeek 是 DEEPSEEK_API_KEY，都能在配置里改名字）。
         """
-        key = str(self.cfg.bridge.get("api_key") or "").strip()
-        if key:
-            return key
-        env_name = str(self.cfg.bridge.get("api_key_env") or "GEMINI_API_KEY")
-        return os.environ.get(env_name, "").strip()
+        from ..bridge import providers  # noqa: PLC0415
+
+        return str(providers.settings(self.cfg.bridge)["api_key"])
 
     def send_via_api(self, prompt_path: Path, merged_path: Path, count: int) -> None:
-        """直接调 Gemini 接口。不开浏览器，一次请求拿回 JSON。"""
+        """直接调 AI 接口（Gemini 或 DeepSeek）。不开浏览器，一次请求拿回 JSON。"""
         if self.ai_worker is not None and self.ai_worker.isRunning():
             QMessageBox.information(self, "AI 接口", "上一次请求还没回来")
             return
+        from ..bridge import providers  # noqa: PLC0415
+
         cfg = self.cfg.bridge
-        key = self.api_key()
+        spec = providers.settings(cfg)
+        key = str(spec["api_key"])
         if not key:
             self.clean_bridge_temp()
             QMessageBox.warning(self, "AI 接口",
-                                "没有 API key。去 https://aistudio.google.com/apikey 领一个，"
-                                "填到 config.json 的 bridge.api_key，"
-                                "或设环境变量 GEMINI_API_KEY")
+                                f"没有 {spec['label']} 的 API key。去 {spec['key_page']} "
+                                f"领一个，填到 AI 选项里的 API key，"
+                                f"或设环境变量 {spec['api_key_env']}")
             return
-        model = str(cfg.get("api_model") or "gemini-2.5-flash")
+        model = str(spec["api_model"])
         try:
             prompt_text = prompt_path.read_text(encoding="utf-8")
             merged_text = merged_path.read_text(encoding="utf-8")
@@ -1733,11 +1749,11 @@ class MainWindow(QMainWindow):
             return
         self.btn_bridge_send.setEnabled(False)
         self.lbl_stage.setText(f"AI 接口｜{model} 处理中")
-        self.append_log(f"[AI 接口] {model}：提示词 {len(prompt_text)} 字 + "
+        self.append_log(f"[AI 接口] {spec['label']} {model}：提示词 {len(prompt_text)} 字 + "
                         f"合并文本 {len(merged_text)} 字（时间线 {count} 条），等回答…")
-        self.ai_worker = AiApiWorker(key, model, prompt_text, merged_text,
-                                     str(cfg.get("message") or ""),
-                                     float(cfg.get("api_timeout") or 300.0))
+        self.ai_worker = AiApiWorker(str(spec["provider"]), key, model, prompt_text,
+                                     merged_text, str(cfg.get("message") or ""),
+                                     float(spec["api_timeout"]), str(spec["base_url"]))
         self.ai_worker.log.connect(self.append_log)
         self.ai_worker.done.connect(self.on_api_done)
         self.ai_worker.start()
@@ -1751,10 +1767,10 @@ class MainWindow(QMainWindow):
             self.append_log(f"[AI 接口] 失败：{error}")
             QMessageBox.warning(self, "AI 接口", error)
             return
-        from ..bridge import gemini_api  # noqa: PLC0415
+        from ..bridge import providers  # noqa: PLC0415
 
         self.append_log(f"[AI 接口] 收到 {len(text)} 字")
-        self.on_bridge_result({"json": gemini_api.extract_json(text), "text": text})
+        self.on_bridge_result({"json": providers.extract_json(text), "text": text})
 
     def resolve_prompt_file(self) -> Path | None:
         """找高光筛选提示词。按 config 里的路径、prm/、项目根、包内副本依次找。

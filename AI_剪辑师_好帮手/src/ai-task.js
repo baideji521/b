@@ -1,9 +1,10 @@
-// 好帮手唯一的活儿：从 AI_剪辑师 领任务 → 把两个 txt 上传到 Gemini → 等回答 →
-// 把 JSON 回传给 AI_剪辑师。
+// 好帮手唯一的活儿：从 AI_剪辑师 领任务 → 把两个 txt 上传到网页版 AI → 等回答 →
+// 把 JSON 回传给 AI_剪辑师。支持 Gemini 和 DeepSeek 两家，选哪家由任务里的
+// provider / 网址决定，页面差异都在下面的 SITES 里。
 //
 //   GET  /v1/ai/next?types=gemini_json   领任务（文件清单 + 要说的那句话）
 //   GET  /v1/ai/file?task_id=..&index=N  取 txt 本体（prm_en.txt / *_merged.txt）
-//     → gemini.google.com 已经开着就用那个窗口，没开才新建，等输入框出现
+//     → 这家的对话页已经开着就用那个窗口，没开才新建，等输入框出现
 //     → 把两个 txt 依次「拖」进页面（模仿手动拖放，拖不成再退到粘贴 / file 控件），
 //       每个都等页面认账
 
@@ -145,17 +146,70 @@ async function downloadTaskFiles(task) {
 }
 
 // ---------------------------------------------------------------------------
-// 注入到 Gemini 页面里执行的函数（必须自包含，不能引用模块作用域的东西）
+// ---------------------------------------------------------------------------
+// 站点档案：Gemini 和 DeepSeek 的页面长得不一样，差异全收在这儿
+//
+// 注入到页面里的函数不能引用模块作用域，所以这些选择器都是当参数传进去的。
+// 加第三家网页版 AI，就在这里再加一条 + 在 manifest 里加 host_permissions。
 // ---------------------------------------------------------------------------
 
-/** 找输入框。Gemini 是 Quill 富文本，退而求其次找任意 contenteditable。 */
-function pageProbeEditor() {
-  const selectors = [
-    "div.ql-editor[contenteditable='true']",
-    "rich-textarea div[contenteditable='true']",
-    "[contenteditable='true']",
-    "textarea",
-  ];
+const SITES = {
+  gemini: {
+    label: "Gemini",
+    url: "https://gemini.google.com/app",
+    match: "*://gemini.google.com/*",
+    hosts: ["gemini.google.com"],
+    editors: [
+      "div.ql-editor[contenteditable='true']",
+      "rich-textarea div[contenteditable='true']",
+      "[contenteditable='true']",
+      "textarea",
+    ],
+    answers: [
+      "message-content.model-response-text",
+      ".model-response-text",
+      "model-response",
+      ".markdown",
+    ],
+    sends: ["button.send-button"],
+    spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
+    upload: "添加照片和文件|上传文件|添加文件|attach|upload|add files",
+    // 云端硬盘那条会弹 Google Drive 选择器，纯挡路；发送/录音也别碰
+    uploadSkip: "云端|硬盘|drive|发送|send|停止|stop|麦克风|mic|语音|录音|图片生成|制作",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    url: "https://chat.deepseek.com/",
+    match: "*://chat.deepseek.com/*",
+    hosts: ["chat.deepseek.com"],
+    // DeepSeek 的输入框是普通 textarea（id 一直是 chat-input），比富文本好对付
+    editors: ["textarea#chat-input", "textarea[placeholder]", "textarea", "[contenteditable='true']"],
+    // 回答块挂 ds-markdown；类名带哈希的那些一律用前缀匹配兜住
+    answers: [".ds-markdown", "[class*='ds-markdown']", "[class*='_md_']", "[class*='markdown']"],
+    sends: ["div[role='button'][aria-disabled]", "button[type='submit']"],
+    spinners: "[role='progressbar'], [class*='loading'], [class*='uploading']",
+    upload: "上传附件|添加附件|上传文件|attach|upload",
+    uploadSkip: "深度思考|联网搜索|发送|send|停止|stop|语音|录音|新对话|new chat",
+  },
+};
+
+/** 按任务给的 provider / 网址挑站点档案，认不出就当 Gemini。 */
+function siteFor(url, provider) {
+  const name = String(provider || "").toLowerCase();
+  if (SITES[name]) return SITES[name];
+  const text = String(url || "");
+  for (const site of Object.values(SITES)) {
+    if (site.hosts.some((host) => text.includes(host))) return site;
+  }
+  return SITES.gemini;
+}
+
+// ---------------------------------------------------------------------------
+// 注入到对话页里执行的函数（必须自包含，不能引用模块作用域的东西）
+// ---------------------------------------------------------------------------
+
+/** 找输入框。选择器按站点档案给的顺序试，越靠前越准。 */
+function pageProbeEditor(selectors) {
   for (const selector of selectors) {
     if (document.querySelector(selector)) return { ok: true, selector };
   }
@@ -166,7 +220,7 @@ function pageProbeEditor() {
  * 把 txt 塞进页面，默认走「模仿手动拖进去」——页面里能手动拖，就用同一条路。
  * mode: drop（拖放，默认）/ paste（粘贴）/ input（塞 file 控件，兜底）。
  */
-function pageAttachFiles(payloads, mode) {
+function pageAttachFiles(payloads, mode, editorSelector) {
   const transfer = new DataTransfer();
   for (const item of payloads) {
     const binary = atob(item.b64);
@@ -179,10 +233,7 @@ function pageAttachFiles(payloads, mode) {
     transfer.effectAllowed = "all";
   } catch {}
 
-  const editor = document.querySelector(
-    "div.ql-editor[contenteditable='true'], rich-textarea div[contenteditable='true'], "
-    + "[contenteditable='true'], textarea"
-  );
+  const editor = document.querySelector(editorSelector || "[contenteditable='true'], textarea");
 
   if (mode === "drop" || !mode) {
     const root = document.documentElement;
@@ -257,10 +308,9 @@ function pageAttachFiles(payloads, mode) {
 
 
 /** 点一下「+ / 上传文件」把上传控件催出来。返回点了什么、现在有几个 file input。 */
-function pageOpenUploadMenu() {
-  const wanted = /添加照片和文件|上传文件|添加文件|attach|upload|add files/i;
-  // 云端硬盘那条会弹 Google Drive 选择器，纯挡路；发送/录音也别碰
-  const skip = /云端|硬盘|drive|发送|send|停止|stop|麦克风|mic|语音|录音|图片生成|制作/i;
+function pageOpenUploadMenu(wantedSource, skipSource) {
+  const wanted = new RegExp(wantedSource || "attach|upload", "i");
+  const skip = new RegExp(skipSource || "发送|send|停止|stop", "i");
   const clicked = [];
   const nodes = Array.from(
     document.querySelectorAll("button, [role='button'], [role='menuitem']")
@@ -345,13 +395,13 @@ function pageCountAttachment(name) {
 
 
 /** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
-function pageUploadSettled() {
+function pageUploadSettled(spinnerSelector) {
   const body = document.body;
   const text = body ? body.innerText || body.textContent || "" : "";
 
   const pending = /上传中|正在上传|处理中|uploading|processing/i.test(text);
   const spinner = document.querySelectorAll(
-    "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']"
+    spinnerSelector || "[role='progressbar']"
   ).length;
   return { settled: !pending && spinner === 0, pending, spinner };
 }
@@ -367,7 +417,7 @@ function pageUploadSettled() {
  * 按钮是 Angular 按输入内容动态启用的，第一次拿到可能还是 disabled，所以要重试几次。
  * 返回值带上诊断字段，日志里能看出到底卡在哪一步。
  */
-async function pageSendMessage(selector, text) {
+async function pageSendMessage(selector, text, sendSelectors) {
   const editor = document.querySelector(selector);
   if (!editor) return { ok: false, error: "输入框不见了" };
   const nap = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -405,16 +455,32 @@ async function pageSendMessage(selector, text) {
     }
   }
 
+  const enabled = (el) => !(el.disabled || el.getAttribute("aria-disabled") === "true");
   const findSend = () => {
     const buttons = Array.from(document.querySelectorAll(
       "button.send-button, button, [role='button']"
     ));
-    return buttons.find((b) => {
+    const labelled = buttons.find((b) => {
       const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} `
         + `${b.className || ""} ${b.querySelector("mat-icon")?.getAttribute("fonticon") || ""}`;
       if (!/发送|send|提交|submit/i.test(label)) return false;
       return !/停止|stop|取消|cancel|录音|mic/i.test(label);
-    }) || null;
+    });
+    if (labelled) return labelled;
+    // 站点档案给的选择器：DeepSeek 那种按钮没有文字标签，只能按结构找
+    for (const selector of sendSelectors || []) {
+      const hit = Array.from(document.querySelectorAll(selector)).filter(enabled).pop();
+      if (hit) return hit;
+    }
+    // 最后兜底：从输入框往上找几层，取容器里最后一个能点的按钮（就是发送那个）
+    for (let node = editor, up = 0; node && up < 5; node = node.parentElement, up += 1) {
+      const near = Array.from(node.querySelectorAll("button, [role='button']")).filter((b) => {
+        const label = `${b.getAttribute("aria-label") || ""} ${b.className || ""}`;
+        return enabled(b) && !/停止|stop|取消|cancel|录音|mic|附件|attach|upload/i.test(label);
+      });
+      if (near.length) return near[near.length - 1];
+    }
+    return null;
   };
 
   let button = null;
@@ -422,7 +488,7 @@ async function pageSendMessage(selector, text) {
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     button = findSend();
     if (button) {
-      disabled = button.disabled || button.getAttribute("aria-disabled") === "true";
+      disabled = !enabled(button);
       if (!disabled) {
         button.click();
         await nap(300);
@@ -454,14 +520,8 @@ async function pageSendMessage(selector, text) {
 
 
 
-/** 读最后一条回答的纯文本，并判断是否还在写。 */
-function pageReadAnswer() {
-  const groups = [
-    "message-content.model-response-text",
-    ".model-response-text",
-    "model-response",
-    ".markdown",
-  ];
+/** 读最后一条回答的纯文本，并判断是否还在写。选择器按站点档案给的顺序试。 */
+function pageReadAnswer(groups) {
   let nodes = [];
   let used = "";
   for (const selector of groups) {
@@ -501,7 +561,7 @@ async function runInTab(tabId, fn, args = []) {
 }
 
 /**
- * 把 Gemini 挪到一个自己的小窗口里，不抢焦点。
+ * 把对话页挪到一个自己的小窗口里，不抢焦点。
  *
  * 关键在于「后台标签页」和「不在最前面的窗口」是两码事：藏在别的标签页后面的标签页
  * 会被 Chrome 冻结——不排版、不跑定时器，拖放和读回答全废；而独立窗口里的活动标签页
@@ -523,18 +583,19 @@ async function moveToSideWindow(tabId) {
 }
 
 /**
- * 先看 gemini.google.com 是不是已经开着：开着就直接用，绝不动它的 URL，
+ * 先看这家的对话页是不是已经开着：开着就直接用，绝不动它的 URL，
  * 也不等页面加载（省掉重新加载那几秒）。没开才新建一个。
  *
  * sideWindow=true（默认）时保证它是自己窗口里的活动标签页——不然一被别的标签页盖住，
  * 页面就被冻结，上传上去也发不出去、回答也读不出来。
  * 返回 { tabId, created, ready }，created=false 的标签页是用户自己的，事后不许关。
  */
-async function ensureGeminiTab(url, { focus = false, sideWindow = true } = {}) {
-  const opened = await chrome.tabs.query({ url: "*://gemini.google.com/*" }).catch(() => []);
+async function ensureAiTab(url, site, { focus = false, sideWindow = true } = {}) {
+  const label = site.label;
+  const opened = await chrome.tabs.query({ url: site.match }).catch(() => []);
   const existing = Array.isArray(opened) ? opened.find((tab) => typeof tab.id === "number") : null;
   if (existing) {
-    log("Gemini 已经开着，直接用", existing.id, existing.status || "");
+    log(`${label} 已经开着，直接用`, existing.id, existing.status || "");
     if (focus) {
       await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
       if (typeof existing.windowId === "number") {
@@ -548,7 +609,7 @@ async function ensureGeminiTab(url, { focus = false, sideWindow = true } = {}) {
     return { tabId: existing.id, created: false, ready: existing.status === "complete" };
   }
   if (!focus && sideWindow) {
-    log("Gemini 没打开，开个不抢焦点的小窗口", url);
+    log(`${label} 没打开，开个不抢焦点的小窗口`, url);
     const win = await chrome.windows.create({ url, focused: false, width: 560, height: 620 })
       .catch(() => null);
     const tab = win?.tabs?.[0];
@@ -556,7 +617,7 @@ async function ensureGeminiTab(url, { focus = false, sideWindow = true } = {}) {
       return { tabId: tab.id, created: true, ready: false };
     }
   }
-  log("Gemini 没打开，新建标签页", url, focus ? "" : "（后台打开）");
+  log(`${label} 没打开，新建标签页`, url, focus ? "" : "（后台打开）");
   const tab = await chrome.tabs.create({ url, active: focus });
   return { tabId: tab.id, created: true, ready: false };
 }
@@ -619,7 +680,10 @@ export function extractJson(text) {
 
 async function handleAiTask(task) {
   const taskId = task.task_id;
-  const url = task.url || "https://gemini.google.com/app";
+  // 站点档案决定选择器和要开哪个网址：AI_剪辑师 会把 provider 一起发过来，
+  // 老版本没这个字段就按网址认（认不出当 Gemini）
+  const site = siteFor(task.url, task.provider);
+  const url = task.url || site.url;
   const message = String(task.message || "Reply with the JSON object only.");
   // manual = 半自动：文件你自己选进去，剩下的（发送、等回答、抠 JSON、回传）扩展来
   const uploadMode = String(task.upload_mode || "manual");
@@ -666,7 +730,7 @@ async function handleAiTask(task) {
 
 
     if (await cancelled("opening", `打开 ${url}`)) return;
-    const target = await ensureGeminiTab(url, { focus: focusBrowser, sideWindow });
+    const target = await ensureAiTab(url, site, { focus: focusBrowser, sideWindow });
 
 
     tabId = target.tabId;
@@ -675,18 +739,19 @@ async function handleAiTask(task) {
     if (!target.ready) await waitForTabComplete(tabId, READY_TIMEOUT_MS);
 
 
-    // 新开的页面 Angular 还要渲染一会儿；复用的页面通常第一次探测就命中
+    // 新开的页面框架还要渲染一会儿；复用的页面通常第一次探测就命中
     let editor = null;
     const readyDeadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < readyDeadline) {
-      editor = await runInTab(tabId, pageProbeEditor).catch(() => null);
+      editor = await runInTab(tabId, pageProbeEditor, [site.editors]).catch(() => null);
       if (editor?.ok) break;
       if (await cancelled("waiting_editor", "等输入框出现")) return;
       await sleep(400);
     }
 
     if (!editor?.ok) {
-      return finish({ status: "failed", error: "找不到输入框，可能没登录或页面结构变了" });
+      return finish({ status: "failed",
+                      error: `${site.label} 页面找不到输入框，可能没登录或页面结构变了` });
     }
 
     // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
@@ -752,13 +817,15 @@ async function handleAiTask(task) {
         }
         if (plan.mode === "input") {
 
-          const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
+          const menu = await runInTab(tabId, pageOpenUploadMenu,
+                                     [site.upload, site.uploadSkip]).catch(() => null);
           log("催上传控件", JSON.stringify(menu || {}));
           await sleep(300);
         }
         try {
           if (plan.batch) {
-            const attached = await runInTab(tabId, pageAttachFiles, [payloads, plan.mode]);
+            const attached = await runInTab(tabId, pageAttachFiles,
+                                           [payloads, plan.mode, editor.selector]);
             if (!attached?.ok) {
               log("塞入失败", plan.mode, attached?.error || "未知原因");
               continue;
@@ -767,7 +834,8 @@ async function handleAiTask(task) {
           } else {
             autoDone = true;
             for (const item of payloads) {
-              const attached = await runInTab(tabId, pageAttachFiles, [[item], plan.mode]);
+              const attached = await runInTab(tabId, pageAttachFiles,
+                                             [[item], plan.mode, editor.selector]);
               if (!attached?.ok) {
                 log("塞入失败", item.name, plan.mode, attached?.error || "未知原因");
                 autoDone = false;
@@ -805,7 +873,8 @@ async function handleAiTask(task) {
         }
       }
 
-      const menu = await runInTab(tabId, pageOpenUploadMenu).catch(() => null);
+      const menu = await runInTab(tabId, pageOpenUploadMenu,
+                                 [site.upload, site.uploadSkip]).catch(() => null);
       log("等你手动选文件", JSON.stringify(menu || {}));
 
       const manualDeadline = Date.now() + MANUAL_TIMEOUT_MS;
@@ -848,7 +917,7 @@ async function handleAiTask(task) {
     // 附件还在转圈就按回车会白发一条，等页面彻底安静下来
     const settleDeadline = Date.now() + SETTLE_TIMEOUT_MS;
     for (;;) {
-      const settle = await runInTab(tabId, pageUploadSettled).catch(() => null);
+      const settle = await runInTab(tabId, pageUploadSettled, [site.spinners]).catch(() => null);
       if (settle?.settled) {
         log("附件加载完成");
         break;
@@ -863,9 +932,10 @@ async function handleAiTask(task) {
 
 
     // 复用的窗口里可能已经有旧回答，先记下条数，别把旧的当成这次的结果
-    const before = await runInTab(tabId, pageReadAnswer).catch(() => null);
+    const before = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
     const baselineBlocks = Number(before?.blocks || 0);
-    const sent = await runInTab(tabId, pageSendMessage, [editor.selector, message]);
+    const sent = await runInTab(tabId, pageSendMessage,
+                               [editor.selector, message, site.sends]);
 
 
     if (!sent?.ok) {
@@ -884,13 +954,14 @@ async function handleAiTask(task) {
     const answerDeadline = Date.now() + ANSWER_TIMEOUT_MS;
     while (Date.now() < answerDeadline) {
       await sleep(POLL_ANSWER_MS);
-      const snapshot = await runInTab(tabId, pageReadAnswer).catch(() => null);
+      const snapshot = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
       // 新回答还没冒出来（条数没涨）就继续等，别读到窗口里原有的旧回答
       if (Number(snapshot?.blocks || 0) <= baselineBlocks) {
         // 后台标签页里第一次发送有可能没吃进去，等一会儿没反应就再点一次发送
         if (!resent && Date.now() - sentAt > RESEND_AFTER_MS) {
           resent = true;
-          const again = await runInTab(tabId, pageSendMessage, [editor.selector, ""]).catch(() => null);
+          const again = await runInTab(tabId, pageSendMessage,
+                                     [editor.selector, "", site.sends]).catch(() => null);
           log("没反应，再发一次", again?.sent || "失败", JSON.stringify({
             blocks: snapshot?.blocks, baseline: baselineBlocks,
             bodyLen: snapshot?.bodyLen, used: snapshot?.used,
@@ -915,7 +986,7 @@ async function handleAiTask(task) {
     if (!text) {
       // 把最后一眼的现场情况带上：blocks=0 而 bodyLen>0 说明选择器没命中，
       // bodyLen=0 说明这个标签页压根没渲染（被冻结了）
-      const last = await runInTab(tabId, pageReadAnswer).catch(() => null);
+      const last = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
       const detail = JSON.stringify({
         blocks: last?.blocks, baseline: baselineBlocks,
         bodyLen: last?.bodyLen, used: last?.used, streaming: last?.streaming,
