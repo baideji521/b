@@ -84,6 +84,16 @@ Example:
 
 It contains FOUR sections, in this order:
 
+TIMESTAMP FORMAT — READ THIS BEFORE ANYTHING ELSE:
+Every `[start - end]` in every section is ABSOLUTE SECONDS FROM THE START OF THE VIDEO,
+written as a decimal number. `[124.27 - 134.81]` means 124.27s to 134.81s. It is NOT
+mm:ss. Do not strip, merge, or reinterpret any part of the number, and do not multiply
+minutes by 60 — there are no minutes in this file.
+Every timestamp lies between 0 and the `Duration` value in the file header.
+If a number you are about to output is larger than that `Duration`, you misread a
+timestamp: go back to SECTION 4 and copy the value again, character for character.
+
+
 SECTION 1 — INTERLEAVED TIMELINE
 One line per item, sorted by time:
 * `[start - end] Visual (emotion score) [importance]: description`
@@ -2111,7 +2121,8 @@ FULL TIMELINE
 EMOTION
 
 16. Visual emotion confidence and audio emotion confidence are treated separately.
-17. Same-time conflicting emotions use higher confidence as primary.
+17. Same-time conflicting emotions: the expression track (Section 3) is primary; audio
+    emotion confidence never overrides it.
 18. Similar confidence does not create artificial certainty.
 19. Missing emotion data is not invented.
 20. Emotion confidence is not treated as highlight score.
@@ -2174,6 +2185,9 @@ FINAL CLIP
 45. duration mathematically correct.
 46. duration <= 15.00.
 47. duration >= 3.00.
+48. clip.start and clip.end are decimal seconds copied verbatim from SECTION 4.
+49. clip.end <= the `Duration` value in the file header. A value above it means a
+    misread timestamp, not a real time.
 47. Minimum necessary context retained.
 48. Unnecessary setup removed.
 49. Dead time removed.

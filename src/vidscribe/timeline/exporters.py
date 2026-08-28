@@ -24,6 +24,15 @@ def fmt_time(seconds: float) -> str:
     return f"{minutes:02d}:{sec:05.2f}"
 
 
+def fmt_secs(seconds: float) -> str:
+    """绝对秒数，两位小数。
+
+    合并导出（喂给大模型那份）专用：mm:ss.cc 会被模型顺手读成数字——`[02:04.27]` 变成
+    204.27 秒，比视频还长。改成纯秒就没有这个转换环节了。
+    """
+    return f"{max(0.0, float(seconds)):.2f}"
+
+
 def fmt_srt_time(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     millis = int(round(seconds * 1000))
@@ -164,6 +173,8 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "sections_index": "本文件共 4 段：1 交错时间线 | 2 动作轨 | 3 表情轨 | 4 逐词时间轴",
            "authority_note": "时间基准 = SECTION 4；情绪基准 = SECTION 3（人脸模型）；"
                              "语音行括号里的情绪来自音频模型，仅作参考。",
+           "timestamp_note": "所有时间戳都是从视频开头算起的绝对秒数（十进制秒，不是 mm:ss），"
+                             "取值范围 0 到上面那个时长；直接照抄，不要做任何换算。",
            "legend_visual": "行格式：[起 - 止] 画面（表情 置信度）[重要度]：描述",
            "legend_ocr": "行格式：    画面文字：…（缩进行，属于上面那条画面行）",
            "legend_speech": "行格式：[起 - 止] 语音（说话人 N）（音频情绪 置信度，仅参考）：内容",
@@ -186,6 +197,9 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "authority_note": "Timing authority = SECTION 4. Emotion authority = SECTION 3 "
                              "(face model). The emotion on Speech lines is audio-based: "
                              "reference only.",
+           "timestamp_note": "All timestamps are absolute seconds from the start of the video "
+                             "(decimal seconds, NOT mm:ss), between 0 and the Duration above. "
+                             "Copy them verbatim; never convert them.",
            "legend_visual": "Row: [start - end] Visual (expression score) [importance]: "
                             "description",
            "legend_ocr": "Row:     On-screen text: ... (indented, belongs to the Visual row "
@@ -455,6 +469,7 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
         # 表头先把四段结构和"谁说了算"讲清楚：下游的高光筛选提示词按 SECTION 编号引用本文件
         w["sections_index"],
         w["authority_note"],
+        w["timestamp_note"],
         "",
         "=" * 60,
         f"SECTION 1 - {w['timeline_section']}",
@@ -465,7 +480,7 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
         "",
     ]
     for start, end, kind, text, extra in rows:
-        lines.append(f"[{fmt_time(start)} - {fmt_time(end)}] {kind}{w['sep']}{text}")
+        lines.append(f"[{fmt_secs(start)} - {fmt_secs(end)}] {kind}{w['sep']}{text}")
         lines += extra
 
     # 两条独立时间戳轨：动作（事件粒度归并）和表情（人脸模型 2fps 归并）。
@@ -478,14 +493,14 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
                   w["legend_action"], "=" * 60, ""]
         for span in spans:
             scene = f" @ {span['scene']}" if span.get("scene") else ""
-            lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
+            lines.append(f"[{fmt_secs(span['start'])} - {fmt_secs(span['end'])}]"
                          f"{w['sep']}{span['action']}{scene}")
     if emotions:
         lines += ["", "=" * 60, f"SECTION 3 - {w['expression_section']}",
                   w["legend_expression"], "=" * 60, ""]
         for span in emotions:
             name = display_name(span.get("emotion_en"), None, language) or span.get("emotion_en")
-            lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
+            lines.append(f"[{fmt_secs(span['start'])} - {fmt_secs(span['end'])}]"
                          f"{w['sep']}{name} {span.get('intensity', 0):.2f}")
 
     # 末尾附一段逐词时间轴：一个词一个时间戳。说明文字跟着内容语言走（英文内容出英文表头），
@@ -496,7 +511,7 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
                   f"{w['word_count']}{w['sep']}{len(items)}",
                   w["legend_words"], "=" * 60, ""]
         for start, end, body in items:
-            lines.append(f"[{fmt_time(start)} - {fmt_time(end)}] {body}")
+            lines.append(f"[{fmt_secs(start)} - {fmt_secs(end)}] {body}")
     _write_lines(path, lines)
     return len(rows)
 
