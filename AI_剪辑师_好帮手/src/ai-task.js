@@ -432,24 +432,26 @@ async function runInTab(tabId, fn, args = []) {
 }
 
 /**
- * 先看 gemini.google.com 是不是已经开着：开着就直接用那个窗口，没开才新建一个。
- * 返回 { tabId, created }，created=false 的标签页是用户自己的，事后不许关。
+ * 先看 gemini.google.com 是不是已经开着：开着就直接用那个窗口，绝不动它的 URL，
+ * 也不等页面加载（省掉重新加载那几秒）。没开才新建一个。
+ * 返回 { tabId, created, ready }，created=false 的标签页是用户自己的，事后不许关。
  */
 async function ensureGeminiTab(url) {
   const opened = await chrome.tabs.query({ url: "*://gemini.google.com/*" }).catch(() => []);
   const existing = Array.isArray(opened) ? opened.find((tab) => typeof tab.id === "number") : null;
   if (existing) {
-    log("复用已打开的 Gemini 窗口", existing.id);
+    log("Gemini 已经开着，直接用", existing.id, existing.status || "");
     await chrome.tabs.update(existing.id, { active: true }).catch(() => {});
     if (typeof existing.windowId === "number") {
       await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
     }
-    return { tabId: existing.id, created: false };
+    return { tabId: existing.id, created: false, ready: existing.status === "complete" };
   }
   log("Gemini 没打开，新建标签页", url);
   const tab = await chrome.tabs.create({ url, active: true });
-  return { tabId: tab.id, created: true };
+  return { tabId: tab.id, created: true, ready: false };
 }
+
 
 async function waitForTabComplete(tabId, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
@@ -551,18 +553,20 @@ async function handleAiTask(task) {
     const target = await ensureGeminiTab(url);
     tabId = target.tabId;
     createdTab = target.created;
-    await waitForTabComplete(tabId, READY_TIMEOUT_MS);
+    // 已经开着而且加载完的，直接干，不等；只有新开的或还在转的才等页面 complete
+    if (!target.ready) await waitForTabComplete(tabId, READY_TIMEOUT_MS);
 
 
-    // 页面 complete 之后 Angular 还要再渲染一会儿，等输入框出现
+    // 新开的页面 Angular 还要渲染一会儿；复用的页面通常第一次探测就命中
     let editor = null;
     const readyDeadline = Date.now() + READY_TIMEOUT_MS;
     while (Date.now() < readyDeadline) {
       editor = await runInTab(tabId, pageProbeEditor).catch(() => null);
       if (editor?.ok) break;
       if (await cancelled("waiting_editor", "等输入框出现")) return;
-      await sleep(1000);
+      await sleep(400);
     }
+
     if (!editor?.ok) {
       return finish({ status: "failed", error: "找不到输入框，可能没登录或页面结构变了" });
     }
