@@ -160,7 +160,16 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "words_section": "逐词时间轴（一个词一个时间戳，原文，不含译文）",
            "action_section": "动作轨（逐动作时间戳，事件粒度归并）",
            "expression_section": "表情轨（逐表情时间戳，人脸模型 2fps 归并）",
-
+           "timeline_section": "交错时间线（画面事件 + 语音，按时间排序）",
+           "sections_index": "本文件共 4 段：1 交错时间线 | 2 动作轨 | 3 表情轨 | 4 逐词时间轴",
+           "authority_note": "时间基准 = SECTION 4；情绪基准 = SECTION 3（人脸模型）；"
+                             "语音行括号里的情绪来自音频模型，仅作参考。",
+           "legend_visual": "行格式：[起 - 止] 画面（表情 置信度）[重要度]：描述",
+           "legend_ocr": "行格式：    画面文字：…（缩进行，属于上面那条画面行）",
+           "legend_speech": "行格式：[起 - 止] 语音（说话人 N）（音频情绪 置信度，仅参考）：内容",
+           "legend_action": "行格式：[起 - 止]：动作 @ 场景",
+           "legend_expression": "行格式：[起 - 止]：表情 强度(0-1) —— 情绪判定以本段为准",
+           "legend_words": "行格式：[起 - 止] 词 —— clip.start / clip.end 一律取自本段",
            "translated_file": "译文"},
     "en": {"video": "Video", "speech_count": "Speech segments", "event_count": "Visual events",
            "duration": "Duration",
@@ -171,7 +180,22 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "words_section": "Word-by-word timeline (one timestamp per word, source language)",
            "action_section": "Action track (one timestamp per action, event granularity)",
            "expression_section": "Expression track (one timestamp per expression, face model @2fps)",
-
+           "timeline_section": "Interleaved timeline (visual events + speech, sorted by time)",
+           "sections_index": "This file has 4 sections: 1 interleaved timeline | 2 action track "
+                             "| 3 expression track | 4 word-by-word timeline",
+           "authority_note": "Timing authority = SECTION 4. Emotion authority = SECTION 3 "
+                             "(face model). The emotion on Speech lines is audio-based: "
+                             "reference only.",
+           "legend_visual": "Row: [start - end] Visual (expression score) [importance]: "
+                            "description",
+           "legend_ocr": "Row:     On-screen text: ... (indented, belongs to the Visual row "
+                         "above)",
+           "legend_speech": "Row: [start - end] Speech (speaker N) (audio emotion score, "
+                            "reference only): text",
+           "legend_action": "Row: [start - end]: action @ scene",
+           "legend_expression": "Row: [start - end]: expression intensity(0-1) - decisive "
+                                "emotional evidence",
+           "legend_words": "Row: [start - end] word - clip.start / clip.end must come from here",
            "translated_file": "translated"},
 
 }
@@ -428,6 +452,15 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
     lines += [
         w["merged_count"].format(events=len(events), speech=len(segments))
         + (w["translated"] if translated else ""),
+        # 表头先把四段结构和"谁说了算"讲清楚：下游的高光筛选提示词按 SECTION 编号引用本文件
+        w["sections_index"],
+        w["authority_note"],
+        "",
+        "=" * 60,
+        f"SECTION 1 - {w['timeline_section']}",
+        w["legend_visual"],
+        w["legend_ocr"],
+        w["legend_speech"],
         "=" * 60,
         "",
     ]
@@ -441,13 +474,15 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
 
     spans = actions if actions is not None else action_track(events)
     if spans:
-        lines += ["", "=" * 60, w["action_section"], "=" * 60, ""]
+        lines += ["", "=" * 60, f"SECTION 2 - {w['action_section']}",
+                  w["legend_action"], "=" * 60, ""]
         for span in spans:
             scene = f" @ {span['scene']}" if span.get("scene") else ""
             lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
                          f"{w['sep']}{span['action']}{scene}")
     if emotions:
-        lines += ["", "=" * 60, w["expression_section"], "=" * 60, ""]
+        lines += ["", "=" * 60, f"SECTION 3 - {w['expression_section']}",
+                  w["legend_expression"], "=" * 60, ""]
         for span in emotions:
             name = display_name(span.get("emotion_en"), None, language) or span.get("emotion_en")
             lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
@@ -457,8 +492,9 @@ def write_merged_txt(path: Path, video_name: str, segments: list[dict[str, Any]]
     # 逐词只出原文——逐词翻译是词表不是句子。
     items = words_of(segments)
     if items:
-        lines += ["", "=" * 60, w["words_section"],
-                  f"{w['word_count']}{w['sep']}{len(items)}", "=" * 60, ""]
+        lines += ["", "=" * 60, f"SECTION 4 - {w['words_section']}",
+                  f"{w['word_count']}{w['sep']}{len(items)}",
+                  w["legend_words"], "=" * 60, ""]
         for start, end, body in items:
             lines.append(f"[{fmt_time(start)} - {fmt_time(end)}] {body}")
     _write_lines(path, lines)
