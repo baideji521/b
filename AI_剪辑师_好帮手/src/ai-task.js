@@ -454,14 +454,17 @@ async function pageSendMessage(selector, text, sendSelectors) {
   const focused = document.hasFocus();
   const message = typeof text === "string" ? text : "";
   const content = () => (editor.tagName === "TEXTAREA" ? editor.value : editor.textContent || "");
+  const landed = () => content().includes(message.slice(0, 12));
+  let how = "";
 
   if (message) {
     editor.focus();
     if (editor.tagName === "TEXTAREA") {
+      // 纯 textarea（DeepSeek）最省心：改 value + 发一个 input 就行，不需要焦点
       editor.value = message;
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
+      how = "value";
     } else {
-      let typed = false;
       if (focused) {
         try {
           const selection = window.getSelection();
@@ -469,11 +472,22 @@ async function pageSendMessage(selector, text, sendSelectors) {
           range.selectNodeContents(editor);
           selection.removeAllRanges();
           selection.addRange(range);
-          typed = document.execCommand("insertText", false, message);
+          if (document.execCommand("insertText", false, message) && landed()) how = "execCommand";
         } catch {}
       }
-      if (!typed || !content().includes(message.slice(0, 12))) {
-        // 富文本控件靠 input 事件同步自己的模型，光改 DOM 不发事件按钮不会亮
+      // Quill（Gemini）这类富文本自己维护一份模型，光改 DOM 它不认，发送按钮就一直灰着。
+      // 粘贴事件它必须处理，而且不像 execCommand 那样要求文档有焦点，所以优先走这条。
+      if (!how) {
+        try {
+          const transfer = new DataTransfer();
+          transfer.setData("text/plain", message);
+          editor.dispatchEvent(new ClipboardEvent("paste", {
+            bubbles: true, cancelable: true, clipboardData: transfer,
+          }));
+          if (landed()) how = "paste";
+        } catch {}
+      }
+      if (!how) {
         editor.textContent = message;
         editor.dispatchEvent(new InputEvent("beforeinput", {
           bubbles: true, cancelable: true, inputType: "insertText", data: message,
@@ -481,6 +495,7 @@ async function pageSendMessage(selector, text, sendSelectors) {
         editor.dispatchEvent(new InputEvent("input", {
           bubbles: true, cancelable: false, inputType: "insertText", data: message,
         }));
+        how = landed() ? "dom" : "没打进去";
       }
     }
   }
@@ -523,7 +538,7 @@ async function pageSendMessage(selector, text, sendSelectors) {
         button.click();
         await nap(300);
         return {
-          ok: true, sent: "button", typed: message.length, focused,
+          ok: true, sent: "button", typed: message.length, focused, how,
           editorLen: content().trim().length, attempts: attempt,
         };
       }
@@ -542,7 +557,7 @@ async function pageSendMessage(selector, text, sendSelectors) {
   editor.dispatchEvent(new KeyboardEvent("keyup", key));
   await nap(300);
   return {
-    ok: true, sent: "enter", typed: message.length, focused,
+    ok: true, sent: "enter", typed: message.length, focused, how,
     editorLen: content().trim().length,
     button: button ? (disabled ? "灰着" : "没点上") : "没找到",
   };
@@ -1057,8 +1072,10 @@ async function handleAiTask(task) {
     if (!sent?.ok) {
       return finish({ status: "failed", error: `发送失败：${sent?.error || "未知原因"}` });
     }
+    const sentInfo = `发送=${sent.sent} 打字=${sent.how || "无"} 长度=${sent.typed} `
+      + `焦点=${sent.focused ? "有" : "无"} 按钮=${sent.button || "点上了"}`;
     log("已发送", sent.sent, JSON.stringify({
-      typed: sent.typed, editorLen: sent.editorLen, focused: sent.focused,
+      typed: sent.typed, how: sent.how, editorLen: sent.editorLen, focused: sent.focused,
       attempts: sent.attempts, button: sent.button,
     }));
 
@@ -1099,7 +1116,7 @@ async function handleAiTask(task) {
           log("那句话还在输入框里，补发一次", again?.sent || "失败", diag);
         }
         if (polls % 10 === 0) log("还没等到新回答", diag);
-        if (await cancelled("waiting_answer", `等新回答出现｜${diag}`)) return;
+        if (await cancelled("waiting_answer", `等新回答出现｜${sentInfo}｜${diag}`)) return;
         continue;
       }
 
