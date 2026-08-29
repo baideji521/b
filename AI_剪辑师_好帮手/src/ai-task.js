@@ -564,9 +564,14 @@ function pageUploadSettled(spinnerSelector) {
   const text = body ? body.innerText || body.textContent || "" : "";
 
   const pending = /上传中|正在上传|处理中|uploading|processing/i.test(text);
-  const spinner = document.querySelectorAll(
-    spinnerSelector || "[role='progressbar']"
-  ).length;
+  // 只数看得见的转圈：Gemini 页面上常驻一个隐藏的 progressbar，把它算进来的话
+  // 「附件加载完」永远不成立，白等到超时（实测 spinner:1 一直挂着）
+  let spinner = 0;
+  for (const el of document.querySelectorAll(spinnerSelector || "[role='progressbar']")) {
+    if (!el.offsetParent && el.tagName !== "BODY") continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) spinner += 1;
+  }
   return { settled: !pending && spinner === 0, pending, spinner };
 }
 
@@ -1145,13 +1150,11 @@ async function handleAiTask(task) {
       };
 
 
-      // 顺序：先走「正常上传」——把文件塞进页面自己的 input[type=file]，
-      // 跟你手点「+ → 上传文件」选出来的完全一样，页面的状态也就一定是对的。
-      // 合成拖放只当兜底：卡片虽然也会出来，但那是页面级 drop 收下的，附件挂在
-      // 输入框上的状态跟正常选文件不一样（卡片位置都不对），发送键常常不认。
+      // 顺序按实测来：Gemini 页面上压根没有 input[type=file]（日志里 inputs:0），
+      // 真人也是把文件拖到 .ql-editor 上松手的，所以拖放才是正路，input 只当兜底。
       // 注意每个 plan 都必须带上 target 这个数字——executeScript 的 args 里出现
       // undefined 会直接报「Value is unserializable」。
-      const plans = [{ mode: "input", batch: true, target: 0 }];
+      const plans = [];
       // 拖放怎么砸看站点：Gemini 只有一处收，砸整页最稳（target=-1）；
       // DeepSeek 那几层各挂一个监听，只能一次砸一个，砸完数卡片，没进去才换下一个目标。
       if (site.dropAll) {
@@ -1161,6 +1164,7 @@ async function handleAiTask(task) {
       }
       plans.push({ mode: "drop", batch: false, target: site.dropAll ? -1 : 0 });
       plans.push({ mode: "paste", batch: true, target: 0 });
+      plans.push({ mode: "input", batch: true, target: 0 });
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
         // 卡片可能晚一点才冒出来，换下一种方式之前先复查一遍，别白塞第二遍
