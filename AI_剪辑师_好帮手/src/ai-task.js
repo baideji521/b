@@ -579,24 +579,45 @@ async function pageSendMessage(selector, text, sendSelectors) {
 
 
 
-/** 读最后一条回答的纯文本，并判断是否还在写。选择器按站点档案给的顺序试。 */
-function pageReadAnswer(groups, editorSelector) {
+/**
+ * 读回答。核心是「以我们自己那句提问为锚」：只认排在提问后面的内容。
+ *
+ * 不这么干就会读到别的东西——复用的标签页里有你之前手动问的对话，页面上还有侧栏、
+ * 推荐卡片，随便挑「最后一块文字」很容易读回一段跟本次任务毫无关系的回答
+ * （实测读回过「大熊猫吃什么」和「可爱宠物照片建议」）。
+ * 找不到锚点时退回旧策略，那条路 DeepSeek 已经验证可用。
+ */
+function pageReadAnswer(groups, editorSelector, mine) {
+  const needle = String(mine || "").slice(0, 24);
+  let anchor = null;
+  if (needle) {
+    // 提问气泡：包含那句话、而且自身文字不长（长的是把整段对话都包起来的容器）
+    for (const el of document.querySelectorAll("div, span, p, pre, li")) {
+      const own = (el.innerText || el.textContent || "").trim();
+      if (!own.includes(needle) || own.length > needle.length * 6) continue;
+      anchor = el;
+    }
+  }
+  const after = (el) => !anchor
+    || Boolean(anchor.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING);
+
   let nodes = [];
   let used = "";
   for (const selector of groups) {
-    nodes = Array.from(document.querySelectorAll(selector));
-    if (nodes.length) {
+    const hit = Array.from(document.querySelectorAll(selector)).filter(after);
+    if (hit.length) {
+      nodes = hit;
       used = selector;
       break;
     }
   }
   // 选择器全落空时的通用兜底（站点改版、类名带哈希都会这样）：挑「自己有一大段文字、
-  // 子元素里没有同样长文字」的叶子块，文档里最后那个就是最新的回答。
+  // 子元素里没有同样长文字」的叶子块，排在提问后面的最后那个就是最新的回答。
   if (!nodes.length) {
     const leafs = [];
     for (const el of document.querySelectorAll("div, section, article, p, pre, li, td")) {
       const own = (el.innerText || el.textContent || "").trim();
-      if (own.length < 40) continue;
+      if (own.length < 40 || own.includes(needle) || !after(el)) continue;
       const sameInChild = Array.from(el.children).some(
         (c) => (c.innerText || c.textContent || "").trim().length >= own.length * 0.9
       );
@@ -629,18 +650,20 @@ function pageReadAnswer(groups, editorSelector) {
     : -1;
 
   // 最后一道保险，也是最不挑站点的一道：我们要的就是一个 JSON 对象，
-  // 那就直接在整页文字里找最长的、能解析的 {...}。选择器猜错、类名改版都不影响。
-  // 页面上不会有别的大 JSON——发过去的是附件，聊天气泡里只有那句短指令。
+  // 那就直接在文字里找最长的、能解析的 {...}。选择器猜错、类名改版都不影响。
+  // 找到锚点时只扫提问之后那一段，免得把上一轮的旧 JSON 又捡回来。
+  const cut = needle ? pageText.lastIndexOf(needle) : -1;
+  const scanText = cut >= 0 ? pageText.slice(cut + needle.length) : pageText;
   let json = "";
   let tried = 0;
-  for (let start = pageText.indexOf("{"); start >= 0 && tried < 200;
-       start = pageText.indexOf("{", start + 1)) {
+  for (let start = scanText.indexOf("{"); start >= 0 && tried < 200;
+       start = scanText.indexOf("{", start + 1)) {
     tried += 1;
     let depth = 0;
     let inStr = false;
     let esc = false;
-    for (let i = start; i < pageText.length; i += 1) {
-      const ch = pageText[i];
+    for (let i = start; i < scanText.length; i += 1) {
+      const ch = scanText[i];
       if (inStr) {
         if (esc) esc = false;
         else if (ch === "\\") esc = true;
@@ -652,7 +675,7 @@ function pageReadAnswer(groups, editorSelector) {
       else if (ch === "}") {
         depth -= 1;
         if (depth === 0) {
-          const slice = pageText.slice(start, i + 1);
+          const slice = scanText.slice(start, i + 1);
           if (slice.length > json.length) {
             for (const candidate of [slice, slice.replace(/[\r\n]+/g, " ")]) {
               try {
@@ -670,7 +693,7 @@ function pageReadAnswer(groups, editorSelector) {
     }
   }
   return { text, streaming, blocks: nodes.length, used, bodyLen, hint,
-           json, jsonLen: json.length, editorLen };
+           json, jsonLen: json.length, editorLen, anchored: Boolean(anchor) };
 }
 
 
@@ -1075,7 +1098,7 @@ async function handleAiTask(task) {
     // 复用的窗口里可能已经有旧回答，先记下条数、最后那块的文字、整页扫到的 JSON，
     // 别把上一轮的结果当成这次的
     const before = await runInTab(tabId, pageReadAnswer,
-                                 [site.answers, editor.selector]).catch(() => null);
+                                 [site.answers, editor.selector, message]).catch(() => null);
     const baselineBlocks = Number(before?.blocks || 0);
     const baselineText = String(before?.text || "");
     const baselineJson = String(before?.json || "");
@@ -1104,30 +1127,31 @@ async function handleAiTask(task) {
       await sleep(POLL_ANSWER_MS);
       polls += 1;
       const snapshot = await runInTab(tabId, pageReadAnswer,
-                                     [site.answers, editor.selector]).catch(() => null);
+                                     [site.answers, editor.selector, message]).catch(() => null);
       const shot = String(snapshot?.text || "");
       const shotJson = String(snapshot?.json || "");
       // 现场情况：卡住时全靠这几个数判断是选择器没命中还是页面根本没渲染。
       // 顺带塞进进度消息里，AI_剪辑师 的日志能直接看到，不用去翻扩展控制台。
-      const diag = `blocks=${snapshot?.blocks ?? "?"}/${baselineBlocks} `
+      const diag = `问题=${snapshot?.anchored ? "有" : "无"} `
+        + `blocks=${snapshot?.blocks ?? "?"}/${baselineBlocks} `
         + `选择器=${snapshot?.used || "无"} 块=${snapshot?.hint || "无"} `
         + `文字=${shot.length} JSON=${shotJson.length} 整页=${snapshot?.bodyLen ?? "?"} `
         + `输入框=${snapshot?.editorLen ?? "?"}`;
-      // 新回答算不算冒出来，三个信号任一成立：回答块变多了；最后那块文字变了（且不是
-      // 我们刚发的那句）；整页扫出来的 JSON 跟发之前不一样。第三个最不挑站点，
-      // 选择器猜错、类名改版都还能救回来。
+      // 新回答算不算冒出来：先要在页面上找得到我们那句提问（锚点），否则读到的多半是
+      // 复用标签页里的旧对话；有锚点之后，三个信号任一成立即可——回答块变多、
+      // 最后那块文字变了、锚点之后扫出来的 JSON 跟发之前不一样。
       const fresh = Number(snapshot?.blocks || 0) > baselineBlocks
         || (shot && shot !== baselineText && !shot.includes(message.slice(0, 20)))
         || (shotJson && shotJson !== baselineJson);
       if (!fresh) {
-        // 补发只在「输入框里那句话还留着」时做——那才说明真没发出去。
-        // 拿「没等到回答」当理由会误判成没发送，页面上就会多出一条重复提问。
+        // 补发的两个理由：那句话还留在输入框里（压根没发出去），
+        // 或者页面上找不到我们的提问气泡（发出去了但没落到这个对话里）
         if (!resent && Date.now() - sentAt > RESEND_AFTER_MS
-            && Number(snapshot?.editorLen || 0) > 0) {
+            && (Number(snapshot?.editorLen || 0) > 0 || !snapshot?.anchored)) {
           resent = true;
           const again = await runInTab(tabId, pageSendMessage,
-                                     [editor.selector, "", site.sends]).catch(() => null);
-          log("那句话还在输入框里，补发一次", again?.sent || "失败", diag);
+                                     [editor.selector, message, site.sends]).catch(() => null);
+          log("页面上没有我们的提问，补发一次", again?.sent || "失败", diag);
         }
         if (polls % 10 === 0) log("还没等到新回答", diag);
         if (await cancelled("waiting_answer", `等新回答出现｜${sentInfo}｜${diag}`)) return;
@@ -1151,7 +1175,7 @@ async function handleAiTask(task) {
       // 把最后一眼的现场情况带上：blocks=0 而 bodyLen>0 说明选择器没命中，
       // bodyLen=0 说明这个标签页压根没渲染（被冻结了）
       const last = await runInTab(tabId, pageReadAnswer,
-                                 [site.answers, editor.selector]).catch(() => null);
+                                 [site.answers, editor.selector, message]).catch(() => null);
       if (last?.json && last.json !== baselineJson) text = String(last.json);
       const detail = JSON.stringify({
         blocks: last?.blocks, baseline: baselineBlocks,
