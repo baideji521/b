@@ -197,10 +197,12 @@ const SITES = {
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
     // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
     dropAll: true,
-    // 实测真人拖放：文件是落在「将文件拖放到此处」那层覆盖层上的——
-    // DIV.overlay-container < FILE-DROP-INDICATOR < FIELDSET.input-area-container。
+    // 实测真人拖放：文件最终落在覆盖层里的那个图标块上——
+    // DIV.icon < DIV.overlay-container[将文件拖放到此处] < FILE-DROP-INDICATOR
+    // < FIELDSET.input-area-container。所以第一顺位就砸 .icon，跟真人的 target 一模一样。
     // 这层只有在页面收到 dragenter/dragover 之后才渲染出来，所以要先撩一下再往它上面砸。
-    drops: ["file-drop-indicator .overlay-container", "file-drop-indicator",
+    drops: ["file-drop-indicator .overlay-container .icon",
+            "file-drop-indicator .overlay-container", "file-drop-indicator",
             "fieldset.input-area-container", "rich-textarea"],
     // 实测有效的那一条：带 files 的 ClipboardEvent 派给 .ql-editor，一次就挂上
     pasteFirst: true,
