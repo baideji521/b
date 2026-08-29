@@ -55,7 +55,21 @@ let polling = false;
 let busy = false;
 let lastPollState = "";
 
-const log = (...args) => console.info(LOG_PREFIX, ...args);
+// 任务进行中的 task_id：有它的时候，扩展控制台的每条日志都顺手送回 AI_剪辑师
+// 的日志窗口。浏览器控制台你看不见，诊断信息不进 GUI 等于没写。
+let activeTaskId = null;
+const log = (...args) => {
+  console.info(LOG_PREFIX, ...args);
+  if (!activeTaskId) return;
+  const line = args
+    .map((item) => (typeof item === "string" ? item : JSON.stringify(item)))
+    .join(" ")
+    .slice(0, 600);
+  bridgeJson("/v1/ai/progress", {
+    method: "POST",
+    body: { task_id: activeTaskId, stage: "扩展", message: line },
+  }).catch(() => {});
+};
 const warn = (...args) => console.warn(LOG_PREFIX, ...args);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -332,11 +346,15 @@ async function pageAttachFiles(payloads, mode, editorSelector, targetIndex, plus
   let plus = "";
   if (!inputs.length) {
     const want = new RegExp(plusLabels || "添加照片和文件|添加文件|上传|attach|upload", "i");
-    const avoid = /云端|硬盘|drive|发送|send|停止|stop|录音|mic/i;
+    const avoid = /云端|硬盘|drive|发送|send|停止|stop|录音|mic|图片|image|音乐|music|canvas|research|学习/i;
     for (const node of document.querySelectorAll("button, [role='button']")) {
+      const icon = node.querySelector("mat-icon")?.getAttribute("fonticon") || "";
       const label = `${node.getAttribute("aria-label") || ""} `
-        + `${node.getAttribute("mattooltip") || ""}`;
-      if (!want.test(label) || avoid.test(label) || node.disabled) continue;
+        + `${node.getAttribute("mattooltip") || ""} ${node.getAttribute("data-test-id") || ""} `
+        + `${String(node.className || "")}`;
+      // 「+」这个键常常一个字都没有，只有个 add 图标，所以图标名也算命中
+      const hit = want.test(label) || /^add/i.test(icon);
+      if (!hit || avoid.test(label) || node.disabled) continue;
       try {
         node.click();
         plus = label.trim().replace(/\s+/g, " ").slice(0, 24);
@@ -822,19 +840,7 @@ function pageReadAnswer(groups, editorSelector, mine) {
           const slice = scanText.slice(start, i + 1);
           if (slice.length > json.length) {
             for (const candidate of [slice, slice.replace(/[\r\n]+/g, " ")]) {
-  // 把你在页面上的动作捞出来写进 AI_剪辑师 的日志：你手动操作一遍，
-  // 日志里就有「点了哪个键、文件从哪个控件进去的」，照着改比猜快得多
-  const dumpActions = async (stage) => {
-    if (!tabId) return;
-    const rec = await runInTab(tabId, pageDumpRecorder, []).catch(() => null);
-    const items = rec?.items || [];
-    if (!items.length) return;
-    const line = items.join(" ｜ ").slice(0, 600);
-    log("你的动作", line);
-    await reportProgress(taskId, stage, `你的动作：${line}`);
-  };
-
-  try {
+              try {
                 const parsed = JSON.parse(candidate);
                 if (parsed && typeof parsed === "object") {
                   json = candidate;
@@ -990,6 +996,8 @@ export function extractJson(text) {
 
 async function handleAiTask(task) {
   const taskId = task.task_id;
+  // 有了它，后面每条 log 都会跟着送回 AI_剪辑师 的日志窗口（浏览器控制台你看不见）
+  activeTaskId = taskId;
   // 站点档案决定选择器和要开哪个网址：AI_剪辑师 会把 provider 一起发过来，
   // 老版本没这个字段就按网址认（认不出当 Gemini）
   const site = siteFor(task.url, task.provider);
@@ -1021,6 +1029,17 @@ async function handleAiTask(task) {
       return true;
     }
     return false;
+  };
+
+  // 把你在页面上的动作捞出来写进 AI_剪辑师 的日志：你手动正常操作一遍，
+  // 日志里就有「点了哪个键、文件从哪个控件进去的」，照着改比猜快得多
+  const dumpActions = async (stage) => {
+    if (!tabId) return;
+    const rec = await runInTab(tabId, pageDumpRecorder, []).catch(() => null);
+    const items = rec?.items || [];
+    if (!items.length) return;
+    log("你的动作", items.join(" ｜ ").slice(0, 600));
+    await reportProgress(taskId, stage, `你的动作：${items.join(" ｜ ").slice(0, 600)}`);
   };
 
   try {
@@ -1422,6 +1441,7 @@ async function pollOnce() {
     await handleAiTask(task);
   } finally {
     busy = false;
+    activeTaskId = null;
     lastPollState = "";
   }
   return POLL_IDLE_MS;
