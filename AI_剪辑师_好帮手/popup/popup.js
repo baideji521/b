@@ -7,6 +7,8 @@ const pairButton = document.getElementById("pair");
 const portInput = document.getElementById("port");
 const savePortButton = document.getElementById("savePort");
 const portHintEl = document.getElementById("portHint");
+const closeTabInput = document.getElementById("closeTab");
+const closeHintEl = document.getElementById("closeHint");
 
 // 用户正在输入时不要被定时刷新覆盖掉
 let editingPort = false;
@@ -40,6 +42,10 @@ function paint(status) {
   portHintEl.textContent = status.manual
     ? `当前端口 ${status.port} 由你指定，不会自动改；默认 ${status.default_port}。`
     : `默认 ${status.default_port}，连不上时会在 ${status.default_port}-${status.default_port + 9} 里自动找。`;
+  // 正在点的时候别被定时刷新覆盖
+  if (document.activeElement !== closeTabInput) {
+    closeTabInput.checked = status.close_tab !== false;
+  }
 }
 
 async function refresh() {
@@ -66,6 +72,16 @@ savePortButton.addEventListener("click", async () => {
   portHintEl.textContent = result.token_kept
     ? `已保存 ${result.port}`
     : `已保存 ${result.port}，端口变了，需要重新配对`;
+  await refresh();
+});
+
+closeTabInput.addEventListener("change", async () => {
+  const result = await ask({ type: "setCloseTab", value: closeTabInput.checked });
+  closeHintEl.textContent = result?.ok
+    ? (result.closeTab
+        ? "已保存：拿到 JSON 就关掉扩展自己开的那个标签页"
+        : "已保存：拿到 JSON 也留着标签页，方便你回头看回答")
+    : "保存失败，后台没响应";
   await refresh();
 });
 

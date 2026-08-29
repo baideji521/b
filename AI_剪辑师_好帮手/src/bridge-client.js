@@ -11,6 +11,8 @@ export const STORAGE_KEY_ENDPOINT = "bridge_endpoint";
 export const STORAGE_KEY_TOKEN = "bridge_token";
 // 用户在 popup 里手填过端口就置 true：之后一律用这个端口，不再自动探测顺延端口段。
 export const STORAGE_KEY_MANUAL = "bridge_endpoint_manual";
+// 拿到数据之后要不要把自己开的那个对话标签页关掉（popup 里的勾选框）
+export const STORAGE_KEY_CLOSE_TAB = "bridge_close_tab";
 
 // 端点迁移标记。默认端口改过几次（47720 段 -> 5999 -> 5998），而浏览器存储里
 // 的旧地址优先于 DEFAULT_ENDPOINT，所以换默认端口时必须主动清一次。
@@ -68,17 +70,21 @@ function isLegacyDefaultEndpoint(value) {
 
 export async function loadBridgeConfig({ storage = globalThis.chrome?.storage?.local } = {}) {
   if (!storage?.get) {
-    return { endpoint: "", token: "", port: DEFAULT_PORT, manual: false };
+    return { endpoint: "", token: "", port: DEFAULT_PORT, manual: false, closeTab: true };
   }
   return new Promise((resolve) => {
     storage.get(
       [STORAGE_KEY_ENDPOINT, STORAGE_KEY_TOKEN, STORAGE_KEY_ENDPOINT_MIGRATED,
-       STORAGE_KEY_MANUAL],
+       STORAGE_KEY_MANUAL, STORAGE_KEY_CLOSE_TAB],
       (items) => {
         let stored = trimEndpoint(items?.[STORAGE_KEY_ENDPOINT]);
         const token =
           typeof items?.[STORAGE_KEY_TOKEN] === "string" ? items[STORAGE_KEY_TOKEN].trim() : "";
         const manual = Boolean(items?.[STORAGE_KEY_MANUAL]);
+        // 没存过就按老行为来：拿到数据就把自己开的标签页关掉
+        const closeTab = items?.[STORAGE_KEY_CLOSE_TAB] === undefined
+          ? true
+          : Boolean(items[STORAGE_KEY_CLOSE_TAB]);
 
         // 一次性迁移：存储里留着旧默认端口时清掉，让 DEFAULT_ENDPOINT 生效。
         const migrated = items?.[STORAGE_KEY_ENDPOINT_MIGRATED];
@@ -93,7 +99,7 @@ export async function loadBridgeConfig({ storage = globalThis.chrome?.storage?.l
         }
 
         const endpoint = stored || DEFAULT_ENDPOINT;
-        resolve({ endpoint, token, port: portOf(endpoint), manual });
+        resolve({ endpoint, token, port: portOf(endpoint), manual, closeTab });
       }
     );
   });
@@ -114,6 +120,19 @@ export async function saveBridgeConfig(
   if (manual !== null) payload[STORAGE_KEY_MANUAL] = Boolean(manual);
   return new Promise((resolve) => {
     storage.set(payload, () => resolve(true));
+  });
+}
+
+/**
+ * popup 的勾选框：拿到数据之后要不要关掉自己开的那个对话标签页。
+ * 只影响扩展自己新建的标签页，你本来就开着的窗口一律不动。
+ */
+export async function saveCloseTab(value,
+                                  { storage = globalThis.chrome?.storage?.local } = {}) {
+  if (!storage?.set) return { ok: false, reason: "no-storage" };
+  const closeTab = Boolean(value);
+  return new Promise((resolve) => {
+    storage.set({ [STORAGE_KEY_CLOSE_TAB]: closeTab }, () => resolve({ ok: true, closeTab }));
   });
 }
 

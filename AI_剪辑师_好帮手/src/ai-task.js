@@ -1147,9 +1147,15 @@ async function handleAiTask(task) {
   let createdTab = false;
 
   const finish = async (payload) => {
-    // 只关自己开的标签页；用户本来就开着的 Gemini 窗口一律留着
+    // 关不关标签页看 popup 里那个勾选框（默认关）。而且只关自己开的那个，
+    // 你本来就开着的 Gemini 窗口一律留着。
     if (payload.status === "completed" && tabId && createdTab) {
-      await chrome.tabs.remove(tabId).catch(() => {});
+      const config = await loadBridgeConfig().catch(() => null);
+      if (config?.closeTab !== false) {
+        await chrome.tabs.remove(tabId).catch(() => {});
+      } else {
+        log("拿到数据了，按勾选框设置留着标签页");
+      }
     }
     await bridgeJson("/v1/ai/result", { method: "POST", body: { task_id: taskId, ...payload } });
   };

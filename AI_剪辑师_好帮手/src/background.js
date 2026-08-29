@@ -14,6 +14,7 @@ import {
   discoverBridgeEndpoint,
   saveBridgeConfig,
   saveBridgePort,
+  saveCloseTab,
   DEFAULT_PORT,
   AUTOPAIR_ALARM_NAME,
 } from "./bridge-client.js";
@@ -69,6 +70,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
         manual: config.manual,
         default_port: DEFAULT_PORT,
         paired: Boolean(config.token),
+        close_tab: config.closeTab !== false,
         health,
         polling: pollingStatus(),
       });
@@ -79,6 +81,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       const result = await saveBridgePort(message.port);
       if (result.ok) log(`端口已改为 ${result.port}（手填，不再自动探测）`);
+      sendResponse(result);
+    })();
+    return true;
+  }
+  if (message?.type === "setCloseTab") {
+    (async () => {
+      const result = await saveCloseTab(message.value);
+      if (result.ok) {
+        log(result.closeTab ? "拿到数据后关掉自己开的标签页" : "拿到数据后留着标签页");
+      }
       sendResponse(result);
     })();
     return true;
