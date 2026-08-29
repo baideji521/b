@@ -550,6 +550,33 @@ function pageCountAttachment(name) {
 
 
 /**
+ * 「+」（添加文件）那个键能不能点。
+ *
+ * 它是页面「可以挂文件了」最直接的信号：Gemini 刚打开时输入框虽然已经渲染出来，
+ * 但那一排工具键还是灰的，这时候塞文件多半白塞。等它变亮再动手。
+ */
+function pagePlusReady(labels) {
+  const want = new RegExp(labels || "添加照片和文件|添加文件|上传|attach|upload", "i");
+  const avoid = /云端|硬盘|drive|发送|send|停止|stop|录音|mic/i;
+  let found = false;
+  for (const node of document.querySelectorAll("button, [role='button']")) {
+    const icon = node.querySelector("mat-icon")?.getAttribute("fonticon") || "";
+    const label = `${node.getAttribute("aria-label") || ""} `
+      + `${node.getAttribute("mattooltip") || ""} ${node.getAttribute("data-test-id") || ""} `
+      + `${String(node.className || "")}`;
+    // 「+」常常一个字都没有，只挂个 add 图标，所以图标名也算命中
+    if (!(want.test(label) || /^add/i.test(icon)) || avoid.test(label)) continue;
+    found = true;
+    if (!(node.disabled || node.getAttribute("aria-disabled") === "true")) {
+      return { found: true, enabled: true,
+               label: (label.trim().replace(/\s+/g, " ") || icon).slice(0, 30) };
+    }
+  }
+  return { found, enabled: false };
+}
+
+
+/**
  * 装一个「动作录音机」：从打开页面起，把你在页面上的点击、拖放、选文件、粘贴、
  * 回车都记下来（记的是元素标签和名字，不记内容），之后 dump 到 AI_剪辑师 的日志里。
  * 你手动做一遍正常操作，日志里就能看到到底该点哪个键、文件是从哪个控件进去的。
@@ -1225,6 +1252,24 @@ async function handleAiTask(task) {
       if (!editor?.ok) {
         return finish({ status: "failed", error: `${site.label} 开新对话后找不到输入框` });
       }
+    }
+
+    // 等「+」变亮：它能点了才说明这个对话框真的准备好收文件了。
+    // 输入框先渲染、工具键后启用，这中间塞文件多半白塞。
+    const plusDeadline = Date.now() + READY_TIMEOUT_MS;
+    let plusReady = null;
+    for (;;) {
+      plusReady = await runInTab(tabId, pagePlusReady, [site.upload || ""]).catch(() => null);
+      if (plusReady?.enabled) {
+        log("+ 可以点了，能挂文件", plusReady.label || "");
+        break;
+      }
+      if (Date.now() > plusDeadline) {
+        log("+ 一直不能点，照样往下试", JSON.stringify(plusReady || {}));
+        break;
+      }
+      if (await cancelled("waiting_editor", "等「+」变成可点状态")) return;
+      await sleep(400);
     }
 
     // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
