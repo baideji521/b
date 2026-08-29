@@ -156,6 +156,9 @@ class AiOptionsDialog(QDialog):
         self.cmb_upload = QComboBox()
         self.cmb_upload.addItem("自动拖文件", "auto")
         self.cmb_upload.addItem("我自己选文件", "manual")
+        self.cmb_upload.addItem("只看我操作（扩展不动手）", "observe")
+        self.cmb_upload.setToolTip("只看我操作：页面打开后扩展一个键都不点，只把你碰过的"
+                                   "元素记进日志，用来查它该点哪里")
         idx = self.cmb_upload.findData(str(bridge.get("upload_mode") or "auto"))
         self.cmb_upload.setCurrentIndex(max(0, idx))
 

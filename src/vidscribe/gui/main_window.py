@@ -1705,9 +1705,16 @@ class MainWindow(QMainWindow):
                         f"{prompt_path.name} + {merged_path.name}（时间线 {count} 条）"
                         + ("，等扩展领取" if state["extension_online"]
                            else "；扩展当前离线，先确认扩展已装好并配对"))
-        if str(cfg.get("upload_mode") or "manual") == "manual":
+        mode = str(cfg.get("upload_mode") or "manual")
+        if mode == "manual":
             self.append_log(f"[AI 对接] 半自动模式：{spec['label']} 打开后请自己把这两个文件"
                             "选进去，挂好之后扩展会自动发送并回传")
+            self.append_log(f"[AI 对接] 文件 1：{prompt_path}")
+            self.append_log(f"[AI 对接] 文件 2：{merged_path}")
+        elif mode == "observe":
+            self.append_log(f"[AI 对接] 观察模式：{spec['label']} 打开后扩展一个键都不点，"
+                            "你自己走一遍（挂文件、发送），日志里会记下你碰过的元素；"
+                            "看完点「停止 AI」结束")
             self.append_log(f"[AI 对接] 文件 1：{prompt_path}")
             self.append_log(f"[AI 对接] 文件 2：{merged_path}")
         self.refresh_bridge_label()

@@ -1076,6 +1076,28 @@ async function handleAiTask(task) {
     const rec = await runInTab(tabId, pageInstallRecorder, [40]).catch(() => null);
     log("动作录音机", rec?.already ? "已经装着了" : (rec?.ok ? "装好了" : "装不上"));
 
+    // 观察模式：你自己手动跑一遍，扩展一个键都不点（连「新对话」都不点），
+    // 只把你碰过的元素记进日志。想结束就在 GUI 点「停止 AI」。
+    if (uploadMode === "observe") {
+      log("观察模式：只记录你的操作，扩展不动手");
+      const watchDeadline = Date.now() + MANUAL_TIMEOUT_MS;
+      let rounds = 0;
+      while (Date.now() < watchDeadline) {
+        // 页面换了地址（比如你点了新对话）录音机会跟着没，所以每圈补装一次；
+        // 装过了它自己会返回 already，不会重复挂监听
+        await runInTab(tabId, pageInstallRecorder, [40]).catch(() => null);
+        await dumpActions("waiting_manual");
+        rounds += 1;
+        // 每隔十几秒报一次进度，顺带感知 GUI 上的「停止 AI」
+        if (rounds % 8 === 1
+            && await cancelled("waiting_manual",
+                               "观察模式：你操作，我只记录（点「停止 AI」结束）")) return;
+        await sleep(1500);
+      }
+      await dumpActions("reporting");
+      return finish({ status: "failed", error: "观察模式结束：只记录动作，没有自动操作" });
+    }
+
 
     // 新开的页面框架还要渲染一会儿；复用的页面通常第一次探测就命中
     let editor = null;
