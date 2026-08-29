@@ -455,6 +455,20 @@ def cmd_gui(cfg: Config, args: argparse.Namespace) -> int:
     return launch(cfg, video)
 
 
+def cmd_ai(cfg: Config, args: argparse.Namespace) -> int:
+    """只开 AI 面板（第二主界面）。主界面在后台备着但不显示，关掉面板就退出。"""
+    _apply_mirror(cfg)
+    try:
+        from vidscribe.gui.main_window import launch  # noqa: PLC0415
+    except ImportError as exc:
+        logger.error("GUI 依赖缺失（需要 PyQt5）：%s", exc)
+        logger.error("安装命令: pip install PyQt5==5.15.11 -i https://pypi.tuna.tsinghua.edu.cn/simple")
+        return 1
+
+    return launch(cfg, panel_only=True, auto=bool(getattr(args, "auto", False)))
+
+
+
 # ------------------------------------------------------------------ 报告
 def write_json_report(path: Path, cfg: Config, results: list[dict], total: float) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -661,7 +675,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_gui = sub.add_parser("gui", help="启动 PyQt5 图形界面（左视频 / 右时间轴 / 底部语音）")
     p_gui.add_argument("video", nargs="?", default=None, help="启动时直接打开的视频")
     p_gui.set_defaults(func=cmd_gui)
+
+    p_ai = sub.add_parser("ai", help="只开 AI 面板（第二主界面）：AI 设置 + 自动剪辑，不显示主界面")
+    p_ai.add_argument("--auto", action="store_true",
+                      help="开起来直接跑一遍自动剪辑，不用手点")
+    p_ai.set_defaults(func=cmd_ai)
     return parser
+
 
 
 def main(argv: list[str] | None = None) -> int:

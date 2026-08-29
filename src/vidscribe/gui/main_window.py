@@ -2879,7 +2879,13 @@ class MainWindow(QMainWindow):
 
 
 
-def launch(cfg: Config, video: str | Path | None = None) -> int:
+def launch(cfg: Config, video: str | Path | None = None, panel_only: bool = False,
+           auto: bool = False) -> int:
+    """起 GUI。panel_only=True 就只开 AI 面板（主界面在后面备着，不显示）。
+
+    面板要用主界面的分析、渲染和 Bridge，所以 MainWindow 照样建，只是不 show；
+    关掉面板就退出进程。auto=True 是开起来直接跑一遍自动剪辑，不用手点。
+    """
     app = QApplication(sys.argv[:1])
     theme.apply(app)
 
@@ -2894,5 +2900,17 @@ def launch(cfg: Config, video: str | Path | None = None) -> int:
 
     sys.excepthook = on_error
     window = MainWindow(cfg, Path(video) if video else None)
-    window.show()
+    if not panel_only:
+        window.show()
+        return app.exec_()
+
+    window.on_ai_options()
+    panel = window.ai_panel
+    if panel is None:  # 理论上不会，保险起见退回整个主界面
+        window.show()
+        return app.exec_()
+    panel.finished.connect(lambda *_: app.quit())
+    if auto:
+        QTimer.singleShot(0, window.on_auto_clip)
     return app.exec_()
+
