@@ -171,7 +171,8 @@ const SITES = {
       "model-response",
       ".markdown",
     ],
-    sends: ["button.send-button"],
+    sends: ["button.send-button", "button[aria-label*='发送']", "button[aria-label*='Send']",
+            "button[mattooltip*='发送']"],
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
     // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
     dropAll: true,
@@ -517,11 +518,18 @@ async function pageSendMessage(selector, text, sendSelectors) {
       const hit = Array.from(document.querySelectorAll(selector)).filter(enabled).pop();
       if (hit) return hit;
     }
-    // 最后兜底：从输入框往上找几层，取容器里最后一个能点的按钮（就是发送那个）
+    // 最后兜底：从输入框往上找几层，取容器里最后一个「只有图标的」按钮——发送键就是这种。
+    // 必须挑得很死：Gemini 输入框旁边还蹲着图片生成、视频、Canvas、深度研究这些工具键，
+    // 以及首页那几张建议卡片。误点一下就变成它替你出题（问出来一堆「可爱宠物照片建议」），
+    // 附件白挂、回答里当然没有 JSON。
+    const trap = /停止|stop|取消|cancel|录音|mic|语音|附件|attach|upload|图片|image|图像|生成|generate|创建|create|视频|video|canvas|研究|research|学习|guided|建议|试试|suggest|分享|share|复制|copy|设置|setting|菜单|menu|登录|account/i;
     for (let node = editor, up = 0; node && up < 5; node = node.parentElement, up += 1) {
       const near = Array.from(node.querySelectorAll("button, [role='button']")).filter((b) => {
-        const label = `${b.getAttribute("aria-label") || ""} ${b.className || ""}`;
-        return enabled(b) && !/停止|stop|取消|cancel|录音|mic|附件|attach|upload/i.test(label);
+        const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} `
+          + `${b.className || ""}`;
+        // 图标键自己没什么文字；有一长串文字的是工具条或建议卡片，绝对不能点
+        const own = (b.innerText || b.textContent || "").trim();
+        return enabled(b) && own.length <= 4 && !trap.test(label) && !trap.test(own);
       });
       if (near.length) return near[near.length - 1];
     }
@@ -530,15 +538,21 @@ async function pageSendMessage(selector, text, sendSelectors) {
 
   let button = null;
   let disabled = false;
+  // 点了哪个键：误点工具键这种事只有把它记下来才查得出
+  const nameOf = (el) => (el
+    ? `${el.tagName}[${el.getAttribute("aria-label") || el.getAttribute("mattooltip")
+      || (el.innerText || "").trim().slice(0, 10) || String(el.className || "").slice(0, 20)}]`
+    : "无");
   for (let attempt = 1; attempt <= 6; attempt += 1) {
     button = findSend();
     if (button) {
       disabled = !enabled(button);
       if (!disabled) {
+        const clicked = nameOf(button);
         button.click();
         await nap(300);
         return {
-          ok: true, sent: "button", typed: message.length, focused, how,
+          ok: true, sent: "button", typed: message.length, focused, how, clicked,
           editorLen: content().trim().length, attempts: attempt,
         };
       }
@@ -1073,10 +1087,10 @@ async function handleAiTask(task) {
       return finish({ status: "failed", error: `发送失败：${sent?.error || "未知原因"}` });
     }
     const sentInfo = `发送=${sent.sent} 打字=${sent.how || "无"} 长度=${sent.typed} `
-      + `焦点=${sent.focused ? "有" : "无"} 按钮=${sent.button || "点上了"}`;
+      + `焦点=${sent.focused ? "有" : "无"} 点了=${sent.clicked || sent.button || "无"}`;
     log("已发送", sent.sent, JSON.stringify({
-      typed: sent.typed, how: sent.how, editorLen: sent.editorLen, focused: sent.focused,
-      attempts: sent.attempts, button: sent.button,
+      typed: sent.typed, how: sent.how, clicked: sent.clicked, editorLen: sent.editorLen,
+      focused: sent.focused, attempts: sent.attempts, button: sent.button,
     }));
 
     // 等回答：文本连续 STABLE_MS 不变且没有「停止」按钮就算写完
