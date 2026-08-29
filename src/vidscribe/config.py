@@ -12,6 +12,9 @@ DEFAULTS: dict[str, Any] = {
     "paths": {
         "input_dir": "input",
         "output_dir": "output",
+        # 集中管理用的视频库根目录（递归扫）：设了它，缓存管理就知道哪些缓存还有对应视频，
+        # 不在库里的（视频删了/搬走了）会被标出来，可以一键清掉。留空＝不做这个判断
+        "video_dir": "",
         # 缓存根目录（断点、窗口缓存、预览音轨），见 vidscribe/cache.py
         "cache_dir": "cache",
         "log_dir": "logs",
@@ -322,7 +325,9 @@ class Config:
         return value if value.is_absolute() else self.root / value
 
     def ensure_dirs(self) -> None:
-        for key in self.data["paths"]:
+        for key, value in self.data["paths"].items():
+            if not str(value).strip():  # 留空的（比如 video_dir）不建目录
+                continue
             self.path(key).mkdir(parents=True, exist_ok=True)
 
     def to_dict(self) -> dict[str, Any]:

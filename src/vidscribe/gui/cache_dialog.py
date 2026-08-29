@@ -19,9 +19,11 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QDialog,
     QDoubleSpinBox,
+    QFileDialog,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QMessageBox,
     QPushButton,
     QTableWidget,
@@ -48,14 +50,14 @@ class CacheDialog(QDialog):
         self.lbl_summary = QLabel("正在扫描…")
         self.lbl_summary.setProperty("role", "hint")
 
-        self.table = QTableWidget(0, 5)
-        self.table.setHorizontalHeaderLabels(["名称", "类型", "大小", "多久没动", "路径"])
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["名称", "类型", "视频", "大小", "多久没动", "路径"])
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
         # 勾选变了就刷新"已勾选 N 项 / 多大"；填表期间不响应，否则每写一格都要重算
         self._loading = False
         self.table.itemChanged.connect(lambda *_: None if self._loading else self.refresh_summary())
@@ -81,6 +83,9 @@ class CacheDialog(QDialog):
         btn_pick_old.clicked.connect(self.select_stale)
         btn_pick_logs = QPushButton("勾选日志")
         btn_pick_logs.clicked.connect(self.select_logs)
+        btn_pick_orphan = QPushButton("勾选视频没了的")
+        btn_pick_orphan.setToolTip("对应视频已经不在盘上的缓存（视频删了）。视频只是放在库外面的不会被勾")
+        btn_pick_orphan.clicked.connect(self.select_orphans)
         btn_drop_wav = QPushButton("只删音轨")
         btn_drop_wav.setToolTip("把所有视频的 preview_audio.wav 删掉，分析结果（json）全留着")
         btn_drop_wav.clicked.connect(self.drop_audio)
@@ -98,6 +103,7 @@ class CacheDialog(QDialog):
         picks.addWidget(self.spin_days)
         picks.addWidget(btn_pick_old)
         picks.addWidget(btn_pick_logs)
+        picks.addWidget(btn_pick_orphan)
         picks.addStretch(1)
         picks.addWidget(self.chk_drop_wav)
         picks.addWidget(btn_refresh)
@@ -111,8 +117,21 @@ class CacheDialog(QDialog):
         actions.addWidget(btn_close)
 
 
+        self.edit_library = QLineEdit(str(cfg.data["paths"].get("video_dir", "") or ""))
+        self.edit_library.setPlaceholderText("留空＝不判断；填了就按这个目录（含子目录）认视频")
+        self.edit_library.setToolTip("集中管理用的视频库：缓存管理据此判断每份缓存的视频还在不在")
+        self.edit_library.editingFinished.connect(self.save_library)
+        btn_library = QPushButton("选目录…")
+        btn_library.clicked.connect(self.browse_library)
+
+        library = QHBoxLayout()
+        library.addWidget(QLabel("视频库"))
+        library.addWidget(self.edit_library, 1)
+        library.addWidget(btn_library)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.lbl_summary)
+        layout.addLayout(library)
         layout.addLayout(picks)
         layout.addWidget(self.table, 1)
         layout.addLayout(actions)
@@ -130,14 +149,27 @@ class CacheDialog(QDialog):
             name.setCheckState(Qt.Unchecked)
             self.table.setItem(row, 0, name)
             self.table.setItem(row, 1, QTableWidgetItem(KIND_TEXT.get(item["kind"], item["kind"])))
-            self.table.setItem(row, 2, QTableWidgetItem(cache_mod.human_size(item["bytes"])))
-            self.table.setItem(row, 3, QTableWidgetItem(f"{item['age_days']:.1f} 天"))
-            self.table.setItem(row, 4, QTableWidgetItem(str(item["path"])))
+            self.table.setItem(row, 2, QTableWidgetItem(self._library_text(item)))
+            self.table.setItem(row, 3, QTableWidgetItem(cache_mod.human_size(item["bytes"])))
+            self.table.setItem(row, 4, QTableWidgetItem(f"{item['age_days']:.1f} 天"))
+            self.table.setItem(row, 5, QTableWidgetItem(str(item["path"])))
         self.table.resizeColumnsToContents()
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(4, QHeaderView.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
         self._loading = False
         self.refresh_summary()
+
+    @staticmethod
+    def _library_text(item: dict[str, Any]) -> str:
+        """「视频」列：这份缓存的视频还在不在、在不在视频库里。"""
+        if item["kind"] != "video":
+            return "—"
+        exists = item.get("video_exists")
+        if exists is None:
+            return "不清楚"          # state.json 没记视频路径，不好判断
+        if not exists:
+            return "视频没了"
+        return "在库" if item.get("in_library") else "在库外"
 
     def refresh_summary(self) -> None:
         total = sum(it["bytes"] for it in self._items)
@@ -149,6 +181,13 @@ class CacheDialog(QDialog):
         info = cache_mod.read_state(self.cfg)
         if info.get("last_cleanup"):
             text += f"；上次清理 {info['last_cleanup']}"
+        gone = [it for it in self._items if it.get("video_exists") is False]
+        if gone:
+            size = sum(it["bytes"] for it in gone)
+            text += f"；{len(gone)} 份视频已删 / {cache_mod.human_size(size)}"
+        outside = [it for it in self._items if it.get("video_exists") and it.get("in_library") is False]
+        if outside:
+            text += f"；{len(outside)} 份视频在库外"
         text += f"｜{cache_mod.cache_dir(self.cfg)}"
         self.lbl_summary.setText(text)
 
@@ -177,6 +216,34 @@ class CacheDialog(QDialog):
 
     def select_logs(self) -> None:
         self._set_checked([i for i, it in enumerate(self._items) if it["kind"] == "log"])
+
+    def select_orphans(self) -> None:
+        """勾选视频已经不在盘上的那些缓存（视频删了）。视频只是放在库外面的不算。"""
+        rows = [i for i, it in enumerate(self._items) if it.get("video_exists") is False]
+        self._set_checked(rows)
+        if not rows:
+            self.lbl_summary.setText("每份缓存的视频都还在，没有要清的")
+
+    # --------------------------------------------------------------- 视频库
+    def save_library(self) -> None:
+        """视频库目录写回 config.json 的 paths.video_dir，然后重扫一遍。"""
+        value = self.edit_library.text().strip()
+        if value == str(self.cfg.data["paths"].get("video_dir", "") or ""):
+            return
+        self.cfg.data["paths"]["video_dir"] = value
+        self.cfg.save_patch({"paths": {"video_dir": value}})
+        if self._log:
+            self._log(f"[缓存] 视频库设为 {value or '（空，不判断）'}")
+        self.reload()
+
+    def browse_library(self) -> None:
+        start = self.edit_library.text().strip() or str(self.cfg.path("input_dir"))
+        picked = QFileDialog.getExistingDirectory(self, "选视频库目录", start)
+        if not picked:
+            return
+        self.edit_library.setText(picked)
+        self.save_library()
+
 
     # --------------------------------------------------------------- 删
     def _do_remove(self, items: list[dict[str, Any]], what: str) -> None:

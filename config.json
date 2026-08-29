@@ -2,6 +2,7 @@
   "paths": {
     "input_dir": "F:\\工具\\视频音频转文字\\input",
     "output_dir": "output",
+    "video_dir": "",
     "cache_dir": "cache",
     "log_dir": "logs",
     "model_dir": "models"

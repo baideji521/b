@@ -20,6 +20,10 @@
 不会自动删任何东西：开软件只扫一眼报个现状。清理都是手动触发的——
 GUI 的「高级选项 -> 缓存管理」，或 `python run.py cache --clean`。
 `max_age_days` 只用来在清单里标出"多久没动过"，不是自动删除的开关。
+
+集中管理：`config.json` 的 `paths.video_dir` 指一个视频库根目录（递归扫）。设了之后，
+清单里每份视频缓存会多一个"视频还在不在库里"的判断——视频删了或搬走了的，缓存就是孤儿，
+在缓存管理里一键勾选删掉。留空＝不做这个判断（老行为）。
 """
 
 from __future__ import annotations
@@ -208,18 +212,56 @@ def human_size(num: float) -> str:
     return f"{num:.1f} GB"
 
 
+VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".flv", ".ts", ".wmv"}
+
+
+def library_root(cfg: Any) -> Path | None:
+    """集中管理的视频库根目录（paths.video_dir）。留空或不存在就返回 None。"""
+    raw = str(cfg.data["paths"].get("video_dir", "") or "").strip()
+    if not raw:
+        return None
+    path = Path(raw)
+    path = path if path.is_absolute() else Path(cfg.root) / path
+    return path if path.is_dir() else None
+
+
+def library_videos(cfg: Any) -> list[Path]:
+    """视频库里的视频（递归扫子目录）。没配库就是空的。"""
+    root = library_root(cfg)
+    if root is None:
+        return []
+    return sorted(p for p in root.rglob("*")
+                  if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES)
+
+
+def library_slugs(cfg: Any) -> dict[str, Path]:
+    """视频库里每个视频对应的缓存目录名 -> 视频路径。用来判断缓存还有没有主人。"""
+    return {slug_for(p): p for p in library_videos(cfg)}
+
+
 def _entries(cfg: Any) -> list[dict[str, Any]]:
-    """列出所有缓存单元：cache/videos 下每个视频一个目录，logs 下每个日志一个文件。"""
+    """列出所有缓存单元：cache/videos 下每个视频一个目录，logs 下每个日志一个文件。
+
+    每份视频缓存额外带两件事（`state.json` 里记了它属于哪个视频）：
+    - `video_exists`：那个视频文件现在还在不在盘上（没记视频路径就是 None）
+    - `in_library`：在不在 `paths.video_dir` 这个视频库里（没配库就是 None）
+    「不在库」不等于「可以删」——视频可能只是放在库外面，所以清理只认 video_exists 是 False 的。
+    """
     now = time.time()
     items: list[dict[str, Any]] = []
+    slugs = library_slugs(cfg) if library_root(cfg) is not None else None
     vd = videos_root(cache_dir(cfg))
     if vd.is_dir():
         for child in sorted(vd.iterdir()):
             mtime = _newest_mtime(child)
+            video = _video_of(child) or ""
             items.append({
                 "path": child, "kind": "video", "name": child.name,
                 "bytes": _size_of(child), "mtime": mtime,
                 "age_days": round((now - mtime) / DAY, 2),
+                "video": video,
+                "video_exists": Path(video).is_file() if video else None,
+                "in_library": None if slugs is None else child.name in slugs,
             })
     ld = log_dir(cfg)
     if ld.is_dir():
