@@ -1,0 +1,1075 @@
+Video: 202608261927_tiktok_7677962144964463894.mp4
+Duration: 285.72s
+16 visual events, 126 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[0.00 - 1.78] Speech (speaker 1) (happy 1.00): Guys guess what I've got my hands on.
+[0.00 - 12.00] Visual (happy 0.79) [normal]: woman holds chocolate package while smiling and talking
+    On-screen text: clinker challenge!
+[2.88 - 3.60] Speech (speaker 1) (angry 0.86): I was trying to find them.
+[3.60 - 5.56] Speech (speaker 1): I went to B&M, and then Harriet was like I got you present.
+[5.56 - 6.56] Speech (speaker 1): I went to B&M to find them.
+[6.64 - 8.22] Speech (speaker 1) (happy 0.97): Wait why did you, were you trying to find them anyway?
+[8.96 - 9.28] Speech (speaker 1) (happy 1.00): Yeah,
+[9.84 - 10.74] Speech (speaker 1) (happy 0.91): and I have some.
+[10.86 - 15.10] Speech (speaker 1): I have done the clink challenge before because I ordered some online from this random Australian website like a year ago.
+[12.00 - 24.00] Visual (happy 0.60) [normal]: woman holds snack bag while speaking, another woman relaxes in background
+    On-screen text: paszal clement
+[15.10 - 19.98] Speech (speaker 1) (happy 1.00): But, they're my favorite Australian sweets slash chocolate ever and Frogs Alive actually I need to find some of that.
+[19.98 - 21.64] Speech (speaker 1): Um, but Emma and Harriet don't like them.
+[21.72 - 24.18] Speech (speaker 1): So I'm doing the challenge on my own.
+[24.00 - 36.00] Visual (happy 0.84) [normal]: woman holds chocolate bag while smiling at camera, another woman lounges in background
+    On-screen text: cadbury
+[24.32 - 25.14] Speech (speaker 1) (disgusted 0.51): She said, do you actually?
+[25.44 - 25.76] Speech (speaker 2) (disgusted 0.99): Yeah.
+[25.76 - 26.36] Speech (speaker 2) (happy 1.00): Yeah,
+[28.40 - 30.58] Speech (speaker 2) (happy 0.59): I don't know daddy long legs over here.
+[31.96 - 36.28] Speech (speaker 2) (happy 1.00): Okay, so I'm basically gonna eat this whole pack and they're gonna guess the color as well
+[36.00 - 40.27] Visual (neutral 0.49) [normal]: woman in purple shirt speaks to camera, smiling and gesturing
+    On-screen text: woman speaking
+[36.28 - 38.18] Speech (speaker 2): But I don't really know what to do like guess the color.
+[38.18 - 39.76] Speech (speaker 2): I'm gonna feed it to you.
+[40.27 - 44.57] Visual (sad 0.45) [normal]: woman gestures with hand while speaking, smiling
+    On-screen text: woman gestures
+[40.32 - 42.84] Speech (speaker 1) (<unk> 0.36): And then I have to tell you what it means.
+[42.84 - 43.44] Speech (speaker 1) (neutral 0.65): What?
+[43.94 - 45.56] Speech (speaker 1) (<unk> 0.43): That does not sound right.
+[45.56 - 48.74] Speech (speaker 1) (neutral 0.33): If it's green I will...
+[48.00 - 108.00] Visual (happy 0.69) [normal]: woman in purple shirt eats while smiling, man in background laughs and rests on couch
+    On-screen text: FF
+[48.74 - 50.56] Speech (speaker 1): I don't know, give me something.
+[50.56 - 51.54] Speech (speaker 1) (happy 0.80): Give me something.
+[51.54 - 52.24] Speech (speaker 1): If,
+[52.45 - 54.17] Speech (speaker 1): it's green, you'll clean the whole kitchen.
+[54.75 - 55.43] Speech (speaker 1): That's good.
+[58.16 - 58.60] Speech (speaker 1) (happy 0.94): Yellow.
+[59.38 - 61.20] Speech (speaker 1) (happy 0.88): So how do you not like them?
+[61.84 - 62.96] Speech (speaker 1): I actually haven't tried them.
+[62.96 - 63.48] Speech (speaker 1) (neutral 0.45): When,
+[65.84 - 66.52] Speech (speaker 1) (sad 0.98): you get a pink one.
+[66.52 - 67.64] Speech (speaker 2): I'll give you a second half.
+[67.64 - 69.50] Speech (speaker 1) (happy 0.67): But I love the pink ones as well.
+[69.50 - 70.78] Speech (speaker 2) (happy 0.77): Okay when you've got a yellow.
+[71.40 - 73.44] Speech (speaker 1) (happy 0.57): Okay if it's pink.
+[74.00 - 74.84] Speech (speaker 1): I will.
+[74.84 - 78.34] Speech (speaker 1): I don't even know.
+[78.34 - 80.56] Speech (speaker 1): Okay if it's pink, Emma can play.
+[80.56 - 82.92] Speech (speaker 1): Whatever music she wants on the way back.
+[82.92 - 84.00] Speech (speaker 1): In the car.
+[84.00 - 86.71] Speech (speaker 1): I don't like how these little sacrifices are.
+[86.71 - 91.85] Speech (speaker 1): Thank god for that.
+[91.85 - 92.77] Speech (speaker 1) (surprised 1.00): Oh my god.
+[92.77 - 94.15] Speech (speaker 1) (happy 0.89): Oh do you want the second half?
+[94.37 - 94.53] Speech (speaker 1): Yeah.
+[94.53 - 95.15] Speech (speaker 1): Okay.
+[97.15 - 102.94] Speech (speaker 2): I knew you wouldn't like it because you don't.
+[102.94 - 103.64] Speech (speaker 2) (happy 0.99): Do you like honeycomb?
+[104.06 - 104.66] Speech (speaker 2): Mmm, mmm.
+[105.14 - 105.96] Speech (speaker 2): That's like texture.
+[108.00 - 120.00] Visual (happy 0.70) [low]: woman takes bite of food while looking around
+[108.93 - 111.77] Speech (speaker 1) (happy 0.70): Wait, Harriet, did you try these when you went to Australia before?
+[112.11 - 112.29] Speech (speaker 1): No.
+[112.55 - 113.03] Speech (speaker 1): Oh, you didn't?
+[113.33 - 113.69] Speech (speaker 1) (surprised 0.99): Okay.
+[114.47 - 114.83] Speech (speaker 1) (surprised 1.00): Okay,
+[118.27 - 118.91] Speech (speaker 1): if it's green,
+[119.89 - 121.39] Speech (speaker 1): Harriet has to...
+[120.00 - 156.00] Visual (happy 0.75) [normal]: woman in purple top speaks and gestures while seated, another woman watches from couch in background
+[121.81 - 123.54] Speech (speaker 1): I don't know.
+[123.62 - 126.22] Speech (speaker 1): If it's green, Harriet has to watch a horror movie tonight because she's home alone.
+[137.01 - 137.37] Speech (speaker 1) (happy 0.98): Yum.
+[137.61 - 138.77] Speech (speaker 1): So good.
+[138.87 - 143.65] Speech (speaker 1): If it's pink, I'll let you guys pick the drinks in the drinks fridge.
+[144.45 - 145.07] Speech (speaker 1) (surprised 0.97): Oh, yeah.
+[145.27 - 145.89] Speech (speaker 1) (happy 0.94): That's good.
+[146.13 - 147.63] Speech (speaker 1): I'm going to do innocent smoothies.
+[147.85 - 148.41] Speech (speaker 1) (happy 0.91): Okay, hello.
+[150.27 - 150.71] Speech (speaker 1): Okay.
+[150.71 - 154.98] Speech (speaker 1): If it's yellow, you have to only drink tequila on the next three nights out.
+[154.98 - 155.40] Speech (speaker 1) (disgusted 0.67): That's.
+[155.40 - 159.95] Speech (speaker 2): No, i feel like this is gonna be pink.
+[156.00 - 164.57] Visual (happy 0.81) [normal]: woman speaking while holding a spoon
+[159.95 - 161.49] Speech (speaker 1) (neutral 0.38): I think the pink ones are smaller than the rest.
+[161.49 - 161.71] Speech (speaker 2): That's.
+[161.71 - 163.77] Speech (speaker 2): My theory, i'm gonna pick a random one.
+[163.77 - 164.93] Speech (speaker 2) (happy 0.65): Really, i think the pink ones are big.
+[164.57 - 168.00] Visual (neutral 0.48) [normal]: woman gesturing with spoon
+[164.93 - 165.71] Speech (speaker 2): Okay,
+[165.92 - 167.26] Speech (speaker 1): yellow, yeah.
+[167.26 - 168.22] Speech (speaker 2) (neutral 0.37): Yellow three two one.
+[168.00 - 192.00] Visual (neutral 0.47) [normal]: woman speaks and gestures while seated, another woman reads in background
+[168.65 - 172.44] Speech (speaker 1): that is amazing.
+[172.44 - 173.92] Speech (speaker 1): They're trying to make me tequila girls.
+[173.92 - 175.04] Speech (speaker 1): Do you want?
+[175.04 - 176.72] Speech (speaker 1): The second half of the pink one, you're
+[177.60 - 178.04] Speech (speaker 1): welcome.
+[178.04 - 180.36] Speech (speaker 1) (angry 0.79): If it's green, you
+[181.88 - 183.16] Speech (speaker 1): can't drink tequila next time.
+[183.16 - 186.42] Speech (speaker 1): You can't do it to keep the show when we next go out, you have to do vodka.
+[186.42 - 189.40] Speech (speaker 2): That goes my hair pink.
+[189.40 - 189.82] Speech (speaker 1) (happy 0.80): Again.
+[189.82 - 192.78] Speech (speaker 1): Look at this guy.
+[192.00 - 198.40] Visual (happy 0.48) [low]: woman shows phone with heart drawing
+    On-screen text: Heart Slim
+[192.78 - 193.70] Speech (speaker 2) (neutral 0.33): I think it's yellow.
+[193.70 - 197.29] Speech (speaker 1): Is it yellow if it's pink?
+[197.29 - 199.53] Speech (speaker 1) (angry 0.91): We'll stop off our service station on the way back.
+[198.40 - 204.00] Visual (neutral 0.57) [low]: woman eats small snack while sitting
+[199.53 - 200.31] Speech (speaker 1) (disgusted 0.97): No,
+[202.15 - 208.51] Speech (speaker 1) (<unk> 0.38): what yellow cool um only that lady's here.
+[204.00 - 218.97] Visual (neutral 0.51) [low]: woman holds chocolate bag and takes out a piece
+    On-screen text: Caramel
+[208.51 - 208.87] Speech (speaker 1) (happy 0.84): Okay.
+[208.87 - 214.37] Speech (speaker 1) (happy 0.54): If it's green, you have to put a big black poster of both
+[214.77 - 217.80] Speech (speaker 1) (happy 1.00): above yeah, the whole year.
+[217.80 - 218.58] Speech (speaker 1) (happy 1.00): I'll.
+[218.58 - 220.72] Speech (speaker 1) (fearful 0.65): I'll take professional, I'll use my camera and take professional photos.
+[220.92 - 221.12] Speech (speaker 1): Yeah, yeah, yeah.
+[221.76 - 222.12] Speech (speaker 1) (happy 0.96): Yellow.
+[223.38 - 223.74] Speech (speaker 1) (surprised 0.99): Again,
+[224.84 - 226.28] Speech (speaker 1) (sad 0.83): but this time it's in Harriet's room.
+[227.93 - 229.37] Speech (speaker 1): If it's pink, it
+[228.00 - 252.00] Visual (happy 0.68) [normal]: woman eats snack while speaking, another woman watches from couch
+    On-screen text: snack
+[229.52 - 230.62] Speech (speaker 2): has to be above your room.
+[230.74 - 231.08] Speech (speaker 2) (happy 0.99): Okay.
+[239.77 - 241.27] Speech (speaker 1): Okay, and then if it's
+[241.77 - 246.99] Speech (speaker 1): yellow, Emma has to get a cardboard cutout of me in her room.
+[247.55 - 248.97] Speech (speaker 2) (sad 0.80): I was going to plan on doing that anyway.
+[249.05 - 250.21] Speech (speaker 2): I know, but I'm
+[251.48 - 251.94] Speech (speaker 2): not a pink one,
+[252.00 - 285.67] Visual (happy 0.69) [normal]: woman in purple shirt speaks and gestures while seated
+[252.10 - 253.60] Speech (speaker 2): which is good, but also bad.
+[253.68 - 256.48] Speech (speaker 1) (disgusted 0.63): If it's yellow, Emma has to go on a smoking ban for a month.
+[256.54 - 257.12] Speech (speaker 1) (happy 0.95): Don't say that.
+[258.82 - 259.26] Speech (speaker 2) (surprised 0.61): Lucky you.
+[259.96 - 260.32] Speech (speaker 2) (surprised 1.00): Green.
+[262.18 - 264.41] Speech (speaker 1): I haven't had a green one in ages.
+[264.41 - 270.25] Speech (speaker 1): If it's green, I'll go back to B&M and I'll hunt for another bag.
+[271.78 - 272.14] Speech (speaker 1) (surprised 0.95): Yay!
+[273.89 - 277.15] Speech (speaker 1): Okay, I think that's gonna be it because I've got so many halves I need to eat now.
+[277.85 - 278.21] Speech (speaker 1) (surprised 0.97): Sorry!
+[278.67 - 279.19] Speech (speaker 1) (neutral 0.34): Part two?
+[279.27 - 279.73] Speech (speaker 1) (surprised 0.83): Question mark?
+[279.81 - 280.33] Speech (speaker 1): Question mark?
+[280.33 - 281.09] Speech (speaker 1) (neutral 0.30): Like and heart in the comments.
+[284.82 - 285.18] Speech (speaker 1) (sad 0.99): What?!
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[0.00 - 12.00]: holding_package @ indoor_room
+[12.00 - 24.00]: holding @ indoor_room
+[24.00 - 36.00]: holding @ living_room
+[36.00 - 40.27]: speaking @ indoor_room
+[40.27 - 44.57]: gesturing @ indoor_room
+[48.00 - 108.00]: talking @ indoor_room
+[108.00 - 120.00]: yawning @ indoor_room
+[120.00 - 156.00]: eating @ living_room
+[156.00 - 164.57]: speaking @ indoor_room
+[164.57 - 168.00]: gesturing @ indoor_room
+[168.00 - 192.00]: speaking @ indoor_room
+[192.00 - 198.40]: showing_phone @ indoor_room
+[198.40 - 204.00]: eating_snack @ indoor_room
+[204.00 - 218.97]: holding @ indoor_room
+[228.00 - 252.00]: eating @ indoor_room
+[252.00 - 285.67]: speaking @ indoor_room
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[0.50 - 2.50]: happy 0.90
+--- 1.50s with no face detected (this is NOT neutral) ---
+[4.00 - 5.00]: happy 0.51
+[5.50 - 6.00]: neutral 0.56
+[7.00 - 9.00]: neutral 0.47
+[9.50 - 11.50]: happy 0.89
+--- 2.00s with no face detected (this is NOT neutral) ---
+[13.50 - 14.00]: angry 0.54
+[15.00 - 15.50]: happy 0.51
+--- 1.50s with no face detected (this is NOT neutral) ---
+[17.00 - 17.50]: neutral 0.55
+[18.00 - 21.50]: happy 0.61
+--- 3.00s with no face detected (this is NOT neutral) ---
+[24.50 - 25.50]: neutral 0.45
+[26.00 - 28.00]: happy 0.87
+--- 3.00s with no face detected (this is NOT neutral) ---
+[31.00 - 33.00]: happy 0.93
+[33.50 - 34.00]: surprised 0.50
+[34.50 - 35.50]: happy 0.79
+[36.00 - 36.50]: neutral 0.55
+[37.00 - 37.50]: disgusted 0.69
+[38.50 - 39.00]: neutral 0.43
+--- 1.50s with no face detected (this is NOT neutral) ---
+[40.50 - 41.00]: sad 0.46
+[42.00 - 42.50]: sad 0.44
+--- 1.50s with no face detected (this is NOT neutral) ---
+[44.00 - 44.50]: fearful 0.54
+[45.50 - 46.00]: happy 0.58
+--- 1.50s with no face detected (this is NOT neutral) ---
+[47.50 - 48.50]: happy 0.61
+[49.50 - 50.00]: neutral 0.52
+[50.50 - 52.50]: happy 0.55
+--- 3.00s with no face detected (this is NOT neutral) ---
+[55.50 - 56.00]: disgusted 0.66
+[57.00 - 57.50]: neutral 0.38
+[58.50 - 59.00]: happy 0.89
+--- 1.50s with no face detected (this is NOT neutral) ---
+[60.50 - 62.00]: happy 0.68
+--- 1.50s with no face detected (this is NOT neutral) ---
+[63.50 - 64.00]: angry 0.41
+[64.50 - 68.00]: neutral 0.47
+--- 3.50s with no face detected (this is NOT neutral) ---
+[71.50 - 72.50]: happy 0.69
+--- 1.50s with no face detected (this is NOT neutral) ---
+[74.00 - 76.50]: neutral 0.56
+--- 2.50s with no face detected (this is NOT neutral) ---
+[79.00 - 80.00]: happy 0.66
+[80.50 - 81.50]: neutral 0.56
+[82.00 - 84.00]: happy 0.75
+[85.00 - 85.50]: disgusted 0.61
+[86.00 - 86.50]: happy 0.87
+[87.50 - 88.50]: happy 0.66
+[89.50 - 90.50]: neutral 0.49
+[91.50 - 92.00]: happy 0.75
+[93.00 - 96.00]: neutral 0.47
+[96.50 - 98.00]: happy 0.55
+--- 1.50s with no face detected (this is NOT neutral) ---
+[99.50 - 100.00]: neutral 0.43
+--- 1.50s with no face detected (this is NOT neutral) ---
+[101.50 - 103.00]: happy 0.80
+[103.50 - 107.50]: neutral 0.45
+--- 2.50s with no face detected (this is NOT neutral) ---
+[110.00 - 111.00]: neutral 0.47
+[111.50 - 112.00]: happy 0.71
+--- 3.00s with no face detected (this is NOT neutral) ---
+[115.00 - 116.50]: neutral 0.53
+[117.00 - 119.00]: happy 0.73
+[119.50 - 122.00]: neutral 0.44
+[123.00 - 124.00]: neutral 0.40
+[125.00 - 128.50]: neutral 0.54
+--- 3.00s with no face detected (this is NOT neutral) ---
+[131.50 - 132.00]: disgusted 0.74
+[132.50 - 133.50]: happy 0.87
+--- 1.50s with no face detected (this is NOT neutral) ---
+[135.00 - 136.00]: happy 0.96
+[137.00 - 138.00]: neutral 0.57
+--- 1.50s with no face detected (this is NOT neutral) ---
+[139.50 - 140.00]: happy 0.47
+--- 1.50s with no face detected (this is NOT neutral) ---
+[141.50 - 142.00]: happy 0.64
+--- 1.50s with no face detected (this is NOT neutral) ---
+[143.50 - 145.00]: neutral 0.46
+[145.50 - 146.00]: happy 0.90
+[146.50 - 147.50]: neutral 0.52
+[148.00 - 150.50]: happy 0.74
+--- 1.50s with no face detected (this is NOT neutral) ---
+[152.00 - 152.50]: neutral 0.65
+[153.50 - 154.50]: neutral 0.57
+--- 2.00s with no face detected (this is NOT neutral) ---
+[156.50 - 157.50]: sad 0.68
+[158.00 - 159.00]: neutral 0.58
+[159.50 - 160.50]: happy 0.90
+--- 2.00s with no face detected (this is NOT neutral) ---
+[162.50 - 163.00]: neutral 0.47
+[164.00 - 165.50]: neutral 0.55
+[166.00 - 166.50]: happy 0.54
+[167.00 - 167.50]: neutral 0.42
+--- 2.50s with no face detected (this is NOT neutral) ---
+[170.00 - 172.00]: happy 0.86
+--- 2.00s with no face detected (this is NOT neutral) ---
+[174.00 - 177.50]: neutral 0.47
+--- 1.50s with no face detected (this is NOT neutral) ---
+[179.00 - 181.00]: happy 0.64
+[181.50 - 186.50]: neutral 0.48
+[187.50 - 188.00]: happy 0.93
+--- 2.50s with no face detected (this is NOT neutral) ---
+[190.50 - 191.00]: surprised 0.40
+--- 1.50s with no face detected (this is NOT neutral) ---
+[192.50 - 195.00]: happy 0.49
+[196.00 - 196.50]: neutral 0.56
+[197.00 - 198.50]: happy 0.48
+--- 1.50s with no face detected (this is NOT neutral) ---
+[200.00 - 201.50]: neutral 0.56
+--- 6.00s with no face detected (this is NOT neutral) ---
+[207.50 - 209.00]: neutral 0.44
+--- 1.50s with no face detected (this is NOT neutral) ---
+[210.50 - 211.50]: neutral 0.66
+[212.50 - 213.50]: neutral 0.51
+[214.00 - 214.50]: angry 0.56
+[215.00 - 216.50]: neutral 0.47
+--- 2.50s with no face detected (this is NOT neutral) ---
+[219.00 - 219.50]: happy 0.60
+[220.00 - 220.50]: neutral 0.60
+--- 1.50s with no face detected (this is NOT neutral) ---
+[222.00 - 224.50]: happy 0.75
+--- 1.50s with no face detected (this is NOT neutral) ---
+[226.00 - 226.50]: neutral 0.46
+[227.50 - 231.00]: neutral 0.48
+[232.00 - 232.50]: happy 0.78
+[233.00 - 234.50]: neutral 0.42
+--- 1.50s with no face detected (this is NOT neutral) ---
+[236.00 - 241.50]: happy 0.69
+[242.00 - 244.50]: neutral 0.59
+--- 1.50s with no face detected (this is NOT neutral) ---
+[246.00 - 246.50]: happy 0.52
+--- 4.00s with no face detected (this is NOT neutral) ---
+[250.50 - 252.00]: neutral 0.42
+--- 2.00s with no face detected (this is NOT neutral) ---
+[254.00 - 254.50]: happy 0.49
+--- 2.50s with no face detected (this is NOT neutral) ---
+[257.00 - 258.50]: neutral 0.54
+[259.00 - 260.00]: happy 0.74
+[260.50 - 261.50]: disgusted 0.59
+[262.50 - 266.00]: neutral 0.53
+[266.50 - 267.00]: happy 0.56
+--- 2.50s with no face detected (this is NOT neutral) ---
+[269.50 - 270.00]: neutral 0.62
+--- 2.00s with no face detected (this is NOT neutral) ---
+[272.00 - 272.50]: surprised 0.76
+[273.00 - 273.50]: happy 0.91
+[274.00 - 276.50]: neutral 0.50
+--- 1.50s with no face detected (this is NOT neutral) ---
+[278.00 - 278.50]: surprised 0.78
+[279.50 - 280.50]: fearful 0.52
+[281.50 - 284.50]: happy 0.76
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 698
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[0.00 - 0.26] Guys
+[0.26 - 0.48] guess
+[0.48 - 0.70] what
+[0.70 - 0.84] I've
+[0.84 - 0.96] got
+[0.96 - 1.10] my
+[1.10 - 1.48] hands
+[1.48 - 1.78] on.
+[2.88 - 3.04] I
+[3.04 - 3.12] was
+[3.12 - 3.26] trying
+[3.26 - 3.34] to
+[3.34 - 3.50] find
+[3.50 - 3.60] them.
+[3.60 - 3.68] I
+[3.68 - 3.78] went
+[3.78 - 3.92] to
+[3.92 - 3.98] B
+[3.98 - 4.14] &M,
+[4.14 - 4.30] and
+[4.30 - 4.46] then
+[4.46 - 4.72] Harriet
+[4.72 - 4.88] was
+[4.88 - 5.00] like
+[5.00 - 5.10] I
+[5.10 - 5.26] got
+[5.26 - 5.38] you
+[5.38 - 5.56] present.
+[5.56 - 5.74] I
+[5.74 - 5.84] went
+[5.84 - 5.98] to
+[5.98 - 6.02] B
+[6.02 - 6.18] &M
+[6.18 - 6.34] to
+[6.34 - 6.46] find
+[6.46 - 6.56] them.
+[6.64 - 6.72] Wait
+[6.72 - 6.92] why
+[6.92 - 7.08] did
+[7.08 - 7.24] you,
+[7.36 - 7.38] were
+[7.38 - 7.48] you
+[7.48 - 7.66] trying
+[7.66 - 7.74] to
+[7.74 - 7.90] find
+[7.90 - 8.00] them
+[8.00 - 8.22] anyway?
+[8.96 - 9.28] Yeah,
+[9.84 - 10.16] and
+[10.16 - 10.30] I
+[10.30 - 10.50] have
+[10.50 - 10.74] some.
+[10.86 - 10.96] I
+[10.96 - 11.10] have
+[11.10 - 11.32] done
+[11.32 - 11.46] the
+[11.46 - 11.64] clink
+[11.64 - 11.72] challenge
+[11.72 - 12.04] before
+[12.04 - 12.38] because
+[12.38 - 12.54] I
+[12.54 - 12.70] ordered
+[12.70 - 12.86] some
+[12.86 - 13.14] online
+[13.14 - 13.42] from
+[13.42 - 13.56] this
+[13.56 - 13.82] random
+[13.82 - 14.18] Australian
+[14.18 - 14.56] website
+[14.56 - 14.78] like
+[14.78 - 14.88] a
+[14.88 - 14.98] year
+[14.98 - 15.10] ago.
+[15.10 - 15.26] But,
+[15.26 - 15.40] they're
+[15.40 - 15.48] my
+[15.48 - 15.82] favorite
+[15.82 - 16.20] Australian
+[16.20 - 17.00] sweets
+[17.00 - 17.30] slash
+[17.30 - 17.76] chocolate
+[17.76 - 18.00] ever
+[18.00 - 18.30] and
+[18.30 - 18.66] Frogs
+[18.66 - 18.86] Alive
+[18.86 - 19.12] actually
+[19.12 - 19.30] I
+[19.30 - 19.40] need
+[19.40 - 19.50] to
+[19.50 - 19.66] find
+[19.66 - 19.78] some
+[19.78 - 19.90] of
+[19.90 - 19.98] that.
+[19.98 - 20.24] Um,
+[20.26 - 20.42] but
+[20.42 - 20.62] Emma
+[20.62 - 20.74] and
+[20.74 - 21.00] Harriet
+[21.00 - 21.32] don't
+[21.32 - 21.44] like
+[21.44 - 21.64] them.
+[21.72 - 21.96] So
+[21.96 - 22.28] I'm
+[22.28 - 22.46] doing
+[22.46 - 22.60] the
+[22.60 - 22.90] challenge
+[22.90 - 23.74] on
+[23.74 - 23.94] my
+[23.94 - 24.18] own.
+[24.32 - 24.44] She
+[24.44 - 24.68] said,
+[24.72 - 24.86] do
+[24.86 - 24.96] you
+[24.96 - 25.14] actually?
+[25.44 - 25.76] Yeah.
+[25.76 - 26.36] Yeah,
+--- 2.04s with no speech ---
+[28.40 - 28.50] I
+[28.50 - 28.76] don't
+[28.76 - 28.94] know
+[28.94 - 29.70] daddy
+[29.70 - 29.88] long
+[29.88 - 30.12] legs
+[30.12 - 30.32] over
+[30.32 - 30.58] here.
+[31.96 - 32.40] Okay,
+[32.40 - 32.50] so
+[32.50 - 32.72] I'm
+[32.72 - 32.98] basically
+[32.98 - 33.32] gonna
+[33.32 - 33.54] eat
+[33.54 - 33.66] this
+[33.66 - 33.74] whole
+[33.74 - 33.92] pack
+[33.92 - 34.34] and
+[34.34 - 34.82] they're
+[34.82 - 35.00] gonna
+[35.00 - 35.58] guess
+[35.58 - 35.74] the
+[35.74 - 35.94] color
+[35.94 - 36.12] as
+[36.12 - 36.28] well
+[36.28 - 36.72] But
+[36.72 - 36.88] I
+[36.88 - 37.00] don't
+[37.00 - 37.08] really
+[37.08 - 37.24] know
+[37.24 - 37.32] what
+[37.32 - 37.42] to
+[37.42 - 37.54] do
+[37.54 - 37.70] like
+[37.70 - 37.88] guess
+[37.88 - 38.04] the
+[38.04 - 38.18] color.
+[38.18 - 38.76] I'm
+[38.76 - 38.96] gonna
+[38.96 - 39.22] feed
+[39.22 - 39.42] it
+[39.42 - 39.48] to
+[39.48 - 39.76] you.
+[40.32 - 40.60] And
+[40.60 - 40.76] then
+[40.76 - 40.98] I
+[40.98 - 41.86] have
+[41.86 - 41.98] to
+[41.98 - 42.18] tell
+[42.18 - 42.30] you
+[42.30 - 42.48] what
+[42.48 - 42.60] it
+[42.60 - 42.84] means.
+[42.84 - 43.44] What?
+[43.94 - 44.38] That
+[44.38 - 44.58] does
+[44.58 - 44.80] not
+[44.80 - 45.20] sound
+[45.20 - 45.56] right.
+[45.56 - 46.10] If
+[46.10 - 46.58] it's
+[46.58 - 47.14] green
+[47.14 - 48.06] I
+[48.06 - 48.74] will...
+[48.74 - 49.24] I
+[49.74 - 49.92] don't
+[49.92 - 50.02] know,
+[50.02 - 50.14] give
+[50.14 - 50.28] me
+[50.28 - 50.56] something.
+[50.56 - 51.24] Give
+[51.24 - 51.40] me
+[51.40 - 51.54] something.
+[51.54 - 52.24] If,
+[52.45 - 52.71] it's
+[52.71 - 52.93] green,
+[52.93 - 53.15] you'll
+[53.15 - 53.45] clean
+[53.45 - 53.61] the
+[53.61 - 53.75] whole
+[53.75 - 54.17] kitchen.
+[54.75 - 55.19] That's
+[55.19 - 55.43] good.
+--- 2.73s with no speech ---
+[58.16 - 58.60] Yellow.
+[59.38 - 59.82] So
+[59.82 - 60.26] how
+[60.26 - 60.48] do
+[60.48 - 60.58] you
+[60.58 - 60.68] not
+[60.68 - 60.94] like
+[60.94 - 61.20] them?
+[61.84 - 62.04] I
+[62.04 - 62.28] actually
+[62.28 - 62.48] haven't
+[62.48 - 62.68] tried
+[62.68 - 62.96] them.
+[62.96 - 63.48] When,
+--- 2.36s with no speech ---
+[65.84 - 65.98] you
+[65.98 - 66.16] get
+[66.16 - 66.26] a
+[66.26 - 66.44] pink
+[66.44 - 66.52] one.
+[66.52 - 66.54] I'll
+[66.54 - 66.70] give
+[66.70 - 66.94] you
+[66.94 - 67.06] a
+[67.06 - 67.36] second
+[67.36 - 67.64] half.
+[67.64 - 68.20] But
+[68.20 - 68.34] I
+[68.34 - 68.58] love
+[68.58 - 68.72] the
+[68.72 - 68.92] pink
+[68.92 - 69.20] ones
+[69.20 - 69.42] as
+[69.42 - 69.50] well.
+[69.50 - 69.64] Okay
+[69.64 - 69.80] when
+[69.80 - 70.00] you've
+[70.00 - 70.10] got
+[70.10 - 70.28] a
+[70.28 - 70.78] yellow.
+[71.40 - 71.84] Okay
+[71.84 - 72.28] if
+[72.28 - 72.80] it's
+[72.80 - 73.44] pink.
+[74.00 - 74.44] I
+[74.44 - 74.84] will.
+[74.84 - 75.62] I
+--- 2.22s with no speech ---
+[77.84 - 78.04] don't
+[78.04 - 78.18] even
+[78.18 - 78.34] know.
+[78.34 - 78.66] Okay
+[78.66 - 79.08] if
+[79.08 - 79.42] it's
+[79.42 - 79.76] pink,
+[79.76 - 80.18] Emma
+[80.18 - 80.36] can
+[80.36 - 80.56] play.
+[80.56 - 81.36] Whatever
+[81.36 - 81.80] music
+[81.80 - 82.08] she
+[82.08 - 82.30] wants
+[82.30 - 82.50] on
+[82.50 - 82.62] the
+[82.62 - 82.72] way
+[82.72 - 82.92] back.
+[82.92 - 83.62] In
+[83.62 - 83.80] the
+[83.80 - 84.00] car.
+[84.00 - 84.60] I
+[84.81 - 84.97] don't
+[84.97 - 85.13] like
+[85.13 - 85.29] how
+[85.29 - 85.53] these
+[85.53 - 85.75] little
+[85.75 - 86.31] sacrifices
+[86.31 - 86.71] are.
+[86.71 - 87.19] Thank
+[87.19 - 89.27] god
+--- 2.00s with no speech ---
+[91.27 - 91.61] for
+[91.61 - 91.85] that.
+[91.85 - 92.21] Oh
+[92.21 - 92.49] my
+[92.49 - 92.77] god.
+[92.77 - 93.39] Oh
+[93.39 - 93.57] do
+[93.57 - 93.65] you
+[93.65 - 93.67] want
+[93.67 - 93.79] the
+[93.79 - 93.99] second
+[93.99 - 94.15] half?
+[94.37 - 94.53] Yeah.
+[94.53 - 95.15] Okay.
+--- 2.00s with no speech ---
+[97.15 - 97.59] I
+--- 2.23s with no speech ---
+[99.82 - 100.26] knew
+[101.20 - 102.12] you
+[102.12 - 102.28] wouldn't
+[102.28 - 102.40] like
+[102.40 - 102.52] it
+[102.52 - 102.62] because
+[102.62 - 102.72] you
+[102.72 - 102.94] don't.
+[102.94 - 103.06] Do
+[103.06 - 103.10] you
+[103.10 - 103.22] like
+[103.22 - 103.64] honeycomb?
+[104.06 - 104.24] Mmm,
+[104.36 - 104.66] mmm.
+[105.14 - 105.50] That's
+[105.50 - 105.62] like
+[105.62 - 105.96] texture.
+--- 2.97s with no speech ---
+[108.93 - 109.29] Wait,
+[109.39 - 109.53] Harriet,
+[109.63 - 109.71] did
+[109.71 - 109.81] you
+[109.81 - 109.97] try
+[109.97 - 110.07] these
+[110.07 - 110.21] when
+[110.21 - 110.31] you
+[110.31 - 110.47] went
+[110.47 - 110.61] to
+[110.61 - 111.39] Australia
+[111.39 - 111.77] before?
+[112.11 - 112.29] No.
+[112.55 - 112.79] Oh,
+[112.79 - 112.85] you
+[112.85 - 113.03] didn't?
+[113.33 - 113.69] Okay.
+[114.47 - 114.83] Okay,
+--- 3.44s with no speech ---
+[118.27 - 118.43] if
+[118.43 - 118.63] it's
+[118.63 - 118.91] green,
+[119.89 - 120.61] Harriet
+[120.61 - 120.89] has
+[120.89 - 121.39] to...
+[121.81 - 122.17] I
+[123.28 - 123.44] don't
+[123.44 - 123.54] know.
+[123.62 - 123.76] If
+[123.76 - 123.88] it's
+[123.88 - 124.08] green,
+[124.18 - 124.44] Harriet
+[124.44 - 124.60] has
+[124.60 - 124.68] to
+[124.68 - 124.80] watch
+[124.80 - 124.88] a
+[124.88 - 125.00] horror
+[125.00 - 125.18] movie
+[125.18 - 125.48] tonight
+[125.48 - 125.74] because
+[125.74 - 125.96] she's
+[125.96 - 126.04] home
+[126.04 - 126.22] alone.
+--- 10.79s with no speech ---
+[137.01 - 137.37] Yum.
+[137.61 - 137.97] So
+[138.59 - 138.77] good.
+[138.87 - 139.19] If
+[139.19 - 139.37] it's
+[139.37 - 139.67] pink,
+[139.75 - 140.49] I'll
+[140.49 - 140.67] let
+[140.67 - 140.81] you
+[140.81 - 141.21] guys
+[141.21 - 141.81] pick
+[141.81 - 142.53] the
+[142.53 - 142.91] drinks
+[142.91 - 143.03] in
+[143.03 - 143.13] the
+[143.13 - 143.35] drinks
+[143.35 - 143.65] fridge.
+[144.45 - 144.81] Oh,
+[144.81 - 145.07] yeah.
+[145.27 - 145.63] That's
+[145.63 - 145.89] good.
+[146.13 - 146.49] I'm
+[146.49 - 146.55] going
+[146.55 - 146.63] to
+[146.63 - 146.75] do
+[146.75 - 146.99] innocent
+[146.99 - 147.63] smoothies.
+[147.85 - 148.21] Okay,
+[148.25 - 148.41] hello.
+--- 1.86s with no speech ---
+[150.27 - 150.71] Okay.
+[150.71 - 151.15] If
+[151.36 - 151.66] it's
+[151.66 - 151.92] yellow,
+[151.92 - 152.24] you
+[152.24 - 152.42] have
+[152.42 - 152.64] to
+[152.64 - 152.92] only
+[152.92 - 153.16] drink
+[153.16 - 153.58] tequila
+[153.58 - 153.80] on
+[153.80 - 153.84] the
+[153.84 - 154.06] next
+[154.06 - 154.30] three
+[154.30 - 154.76] nights
+[154.76 - 154.98] out.
+[154.98 - 155.40] That's.
+[155.40 - 155.62] No,
+[155.62 - 156.30] i
+--- 2.73s with no speech ---
+[159.03 - 159.25] feel
+[159.25 - 159.33] like
+[159.33 - 159.47] this
+[159.47 - 159.55] is
+[159.55 - 159.67] gonna
+[159.67 - 159.79] be
+[159.79 - 159.95] pink.
+[159.95 - 160.07] I
+[160.07 - 160.21] think
+[160.21 - 160.31] the
+[160.31 - 160.49] pink
+[160.49 - 160.67] ones
+[160.67 - 160.79] are
+[160.79 - 161.03] smaller
+[161.03 - 161.21] than
+[161.21 - 161.33] the
+[161.33 - 161.49] rest.
+[161.49 - 161.71] That's.
+[161.71 - 161.83] My
+[161.83 - 162.15] theory,
+[162.15 - 162.91] i'm
+[162.91 - 162.99] gonna
+[162.99 - 163.21] pick
+[163.21 - 163.35] a
+[163.35 - 163.53] random
+[163.53 - 163.77] one.
+[163.77 - 163.95] Really,
+[163.95 - 164.11] i
+[164.11 - 164.25] think
+[164.25 - 164.35] the
+[164.35 - 164.49] pink
+[164.49 - 164.65] ones
+[164.65 - 164.75] are
+[164.75 - 164.93] big.
+[164.93 - 165.71] Okay,
+[165.92 - 166.60] yellow,
+[166.60 - 167.26] yeah.
+[167.26 - 167.54] Yellow
+[167.54 - 167.90] three
+[167.90 - 168.04] two
+[168.04 - 168.22] one.
+[168.65 - 169.81] that
+[169.81 - 171.27] is
+[172.02 - 172.44] amazing.
+[172.44 - 172.88] They're
+[172.88 - 172.98] trying
+[172.98 - 173.06] to
+[173.06 - 173.20] make
+[173.20 - 173.24] me
+[173.24 - 173.58] tequila
+[173.58 - 173.92] girls.
+[173.92 - 174.56] Do
+[174.96 - 174.98] you
+[174.98 - 175.04] want?
+[175.04 - 175.12] The
+[175.12 - 175.32] second
+[175.32 - 175.46] half
+[175.46 - 175.58] of
+[175.58 - 175.58] the
+[175.58 - 175.76] pink
+[175.76 - 176.00] one,
+[176.00 - 176.72] you're
+[177.60 - 178.04] welcome.
+[178.04 - 178.92] If
+[178.92 - 179.10] it's
+[179.10 - 179.38] green,
+[179.38 - 180.36] you
+--- 1.52s with no speech ---
+[181.88 - 182.14] can't
+[182.14 - 182.28] drink
+[182.28 - 182.70] tequila
+[182.70 - 182.94] next
+[182.94 - 183.16] time.
+[183.16 - 183.34] You
+[183.34 - 183.58] can't
+[183.58 - 183.70] do
+[183.70 - 183.80] it
+[183.80 - 183.84] to
+[183.84 - 184.06] keep
+[184.06 - 184.20] the
+[184.20 - 184.36] show
+[184.36 - 184.52] when
+[184.52 - 184.64] we
+[184.64 - 184.80] next
+[184.80 - 185.02] go
+[185.02 - 185.26] out,
+[185.26 - 185.76] you
+[185.76 - 185.84] have
+[185.84 - 185.94] to
+[185.94 - 186.10] do
+[186.10 - 186.42] vodka.
+[186.42 - 187.24] That
+[188.12 - 188.74] goes
+[188.74 - 188.94] my
+[188.94 - 189.16] hair
+[189.16 - 189.40] pink.
+[189.40 - 189.82] Again.
+[189.82 - 190.82] Look
+[191.32 - 192.40] at
+[192.40 - 192.52] this
+[192.52 - 192.78] guy.
+[192.78 - 193.06] I
+[193.06 - 193.40] think
+[193.40 - 193.58] it's
+[193.58 - 193.70] yellow.
+[193.70 - 193.98] Is
+[193.98 - 194.14] it
+[194.14 - 194.64] yellow
+--- 1.55s with no speech ---
+[196.19 - 196.83] if
+[196.83 - 197.03] it's
+[197.03 - 197.29] pink?
+[197.29 - 197.57] We'll
+[197.57 - 197.83] stop
+[197.83 - 198.05] off
+[198.05 - 198.23] our
+[198.23 - 198.55] service
+[198.55 - 198.83] station
+[198.83 - 199.07] on
+[199.07 - 199.15] the
+[199.15 - 199.25] way
+[199.25 - 199.53] back.
+[199.53 - 200.31] No,
+--- 1.84s with no speech ---
+[202.15 - 203.35] what
+[203.35 - 204.19] yellow
+[204.19 - 204.89] cool
+[205.93 - 206.71] um
+[206.71 - 207.49] only
+[207.73 - 207.85] that
+[207.85 - 208.41] lady's
+[208.41 - 208.51] here.
+[208.51 - 208.87] Okay.
+[208.87 - 210.01] If
+[210.01 - 210.63] it's
+[210.63 - 210.95] green,
+[210.95 - 211.45] you
+[211.45 - 211.63] have
+[211.63 - 211.79] to
+[211.79 - 212.01] put
+[212.01 - 212.19] a
+[212.19 - 212.49] big
+[212.49 - 212.87] black
+[212.87 - 213.71] poster
+[213.71 - 214.07] of
+[214.07 - 214.37] both
+[214.77 - 214.99] above
+[214.99 - 215.27] yeah,
+[215.27 - 216.25] the
+[216.72 - 217.34] whole
+[217.34 - 217.80] year.
+[217.80 - 218.58] I'll.
+[218.58 - 218.58] I'll
+[218.58 - 218.76] take
+[218.76 - 219.16] professional,
+[219.28 - 219.44] I'll
+[219.44 - 219.52] use
+[219.52 - 219.62] my
+[219.62 - 219.90] camera
+[219.90 - 219.98] and
+[219.98 - 220.06] take
+[220.06 - 220.36] professional
+[220.36 - 220.72] photos.
+[220.92 - 220.94] Yeah,
+[220.96 - 220.96] yeah,
+[221.06 - 221.12] yeah.
+[221.76 - 222.12] Yellow.
+[223.38 - 223.74] Again,
+[224.84 - 224.98] but
+[224.98 - 225.18] this
+[225.18 - 225.40] time
+[225.40 - 225.62] it's
+[225.62 - 225.74] in
+[225.74 - 226.12] Harriet's
+[226.12 - 226.28] room.
+--- 1.65s with no speech ---
+[227.93 - 228.25] If
+[228.25 - 228.47] it's
+[228.47 - 228.83] pink,
+[228.97 - 229.37] it
+[229.52 - 229.66] has
+[229.66 - 229.78] to
+[229.78 - 229.88] be
+[229.88 - 230.08] above
+[230.08 - 230.32] your
+[230.32 - 230.62] room.
+[230.74 - 231.08] Okay.
+--- 8.69s with no speech ---
+[239.77 - 240.13] Okay,
+[240.13 - 240.49] and
+[240.49 - 240.67] then
+[240.67 - 240.89] if
+[240.89 - 241.27] it's
+[241.77 - 242.41] yellow,
+[242.59 - 243.33] Emma
+[243.89 - 244.87] has
+[244.87 - 245.07] to
+[245.07 - 245.23] get
+[245.23 - 245.33] a
+[245.33 - 245.65] cardboard
+[245.65 - 246.15] cutout
+[246.15 - 246.23] of
+[246.23 - 246.37] me
+[246.37 - 246.57] in
+[246.57 - 246.69] her
+[246.69 - 246.99] room.
+[247.55 - 247.71] I
+[247.71 - 247.85] was
+[247.85 - 248.03] going
+[248.03 - 248.09] to
+[248.09 - 248.31] plan
+[248.31 - 248.45] on
+[248.45 - 248.63] doing
+[248.63 - 248.81] that
+[248.81 - 248.97] anyway.
+[249.05 - 249.11] I
+[249.11 - 249.21] know,
+[249.29 - 249.47] but
+[249.47 - 250.21] I'm
+[251.48 - 251.56] not
+[251.56 - 251.64] a
+[251.64 - 251.78] pink
+[251.78 - 251.94] one,
+[252.10 - 252.52] which
+[252.52 - 252.68] is
+[252.68 - 252.86] good,
+[252.88 - 253.02] but
+[253.02 - 253.34] also
+[253.34 - 253.60] bad.
+[253.68 - 253.88] If
+[253.88 - 254.10] it's
+[254.10 - 254.30] yellow,
+[254.38 - 254.60] Emma
+[254.60 - 254.70] has
+[254.70 - 254.78] to
+[254.78 - 254.86] go
+[254.86 - 254.94] on
+[254.94 - 254.96] a
+[254.96 - 255.14] smoking
+[255.14 - 255.44] ban
+[255.44 - 256.12] for
+[256.12 - 256.26] a
+[256.26 - 256.48] month.
+[256.54 - 256.70] Don't
+[256.70 - 256.90] say
+[256.90 - 257.12] that.
+--- 1.70s with no speech ---
+[258.82 - 259.18] Lucky
+[259.18 - 259.26] you.
+[259.96 - 260.32] Green.
+--- 1.86s with no speech ---
+[262.18 - 262.44] I
+[263.45 - 263.65] haven't
+[263.65 - 263.75] had
+[263.75 - 263.79] a
+[263.79 - 263.95] green
+[263.95 - 264.09] one
+[264.09 - 264.17] in
+[264.17 - 264.41] ages.
+[264.41 - 265.07] If
+[266.34 - 266.94] it's
+[267.27 - 268.03] green,
+[268.31 - 268.51] I'll
+[268.51 - 268.65] go
+[268.65 - 268.89] back
+[268.89 - 269.03] to
+[269.03 - 269.11] B
+[269.11 - 269.35] &M
+[269.35 - 269.45] and
+[269.45 - 269.61] I'll
+[269.61 - 269.73] hunt
+[269.73 - 269.87] for
+[269.87 - 269.99] another
+[269.99 - 270.25] bag.
+--- 1.53s with no speech ---
+[271.78 - 272.14] Yay!
+--- 1.75s with no speech ---
+[273.89 - 274.11] Okay,
+[274.27 - 274.59] I
+[274.59 - 274.71] think
+[274.71 - 274.83] that's
+[274.83 - 274.95] gonna
+[274.95 - 275.07] be
+[275.07 - 275.21] it
+[275.21 - 275.43] because
+[275.43 - 275.73] I've
+[275.73 - 275.83] got
+[275.83 - 275.99] so
+[275.99 - 276.21] many
+[276.21 - 276.43] halves
+[276.43 - 276.63] I
+[276.63 - 276.75] need
+[276.75 - 276.85] to
+[276.85 - 276.99] eat
+[276.99 - 277.15] now.
+[277.85 - 278.21] Sorry!
+[278.67 - 279.03] Part
+[279.03 - 279.19] two?
+[279.27 - 279.51] Question
+[279.51 - 279.73] mark?
+[279.81 - 280.09] Question
+[280.09 - 280.33] mark?
+[280.33 - 280.51] Like
+[280.51 - 280.63] and
+[280.63 - 280.79] heart
+[280.79 - 280.87] in
+[280.87 - 280.91] the
+[280.91 - 281.09] comments.
+--- 3.73s with no speech ---
+[284.82 - 285.18] What?!

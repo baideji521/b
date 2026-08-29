@@ -1,0 +1,581 @@
+Video: 202608261929_tiktok_7581708622791609621.mp4
+Duration: 175.47s
+22 visual events, 63 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[0.00 - 12.00] Visual (happy 0.81) [normal]: two girls holding a bag of nesquik candy
+    On-screen text: Clinkers challenge!!
+[0.09 - 1.15] Speech (speaker 1) (happy 0.87): Clinkers Challenge!
+[1.57 - 5.99] Speech (speaker 1): We are recreating the Clinkers Challenge because we hit 3 million views.
+[6.49 - 10.39] Speech (speaker 1) (happy 0.50): That is crazy and sadly, the TikTok ban is tomorrow.
+[10.69 - 13.99] Speech (speaker 1): But our page will hopefully, fingers crossed, still be up.
+[12.00 - 16.10] Visual (happy 0.72) [normal]: two girls hold bag of candy and look at it
+    On-screen text: chocolate eggs
+[14.56 - 17.18] Speech (speaker 1) (happy 0.60): I haven't had clinkers in so long.
+[16.10 - 28.70] Visual (happy 0.71) [normal]: two girls eat candies from a bag while smiling
+    On-screen text: chocolate eggs
+[17.32 - 18.28] Speech (speaker 2) (happy 0.71): They're so good.
+[18.62 - 21.86] Speech (speaker 2): If this is pink, then you have to jump in the pool fully clothed.
+[21.96 - 22.32] Speech (speaker 2): No, no, no.
+[25.75 - 26.45] Speech (speaker 2) (neutral 0.43): It's yellow.
+[26.45 - 32.13] Speech (speaker 2) (happy 1.00): If this is green, then you have to buy me something when you go, like, either to, like, Japan or, like, whatever place you're going.
+[28.70 - 35.30] Visual (happy 0.97) [normal]: girls continue eating candies, one opens mouth wide
+    On-screen text: twister2
+[32.27 - 32.99] Speech (speaker 2): Probably would anyway.
+[34.29 - 35.19] Speech (speaker 2): Green, I think.
+[35.30 - 42.00] Visual (happy 0.59) [normal]: two girls eat small items while looking at camera
+[38.88 - 39.48] Speech (speaker 2) (happy 0.91): That's green.
+[39.60 - 40.08] Speech (speaker 2) (happy 0.91): Oh, is it?
+[40.26 - 41.75] Speech (speaker 2) (sad 0.99): Yeah, it's green.
+[41.97 - 42.37] Speech (speaker 1): That's yellow.
+[42.00 - 46.27] Visual (happy 0.76) [normal]: two girls hold chocolate, one offers to taste
+    On-screen text: chocolate
+[42.61 - 42.97] Speech (speaker 1) (neutral 0.34): Oh.
+[44.23 - 45.83] Speech (speaker 2) (neutral 0.46): I probably still will.
+[46.13 - 46.49] Speech (speaker 2) (happy 0.95): Yay.
+[46.27 - 54.00] Visual (happy 0.72) [normal]: girls eat chocolate, one holds bag, both look at camera
+    On-screen text: chocolate
+[48.43 - 48.79] Speech (speaker 1) (happy 0.62): Yellow.
+[49.01 - 49.67] Speech (speaker 1): Yellow twins.
+[49.99 - 55.83] Speech (speaker 1): If this is yellow, then you have to switch to my school.
+[54.00 - 62.17] Visual (happy 0.67) [normal]: girl with blonde hair shows pink chocolate to camera
+    On-screen text: fresh eggs
+[55.97 - 61.07] Speech (speaker 2) (happy 0.99): I love my school, but, like, I
+[61.60 - 63.68] Speech (speaker 2) (happy 1.00): love her school, but I also love my school.
+[63.96 - 64.42] Speech (speaker 2): I'm going.
+[65.30 - 69.60] Visual (surprised 0.52) [high]: hand moves toward camera, then away while holding chocolate
+    On-screen text: chocolate
+[65.55 - 66.63] Speech (speaker 2) (happy 0.94): But, yeah,
+[66.97 - 67.97] Speech (speaker 2): it's still good.
+[68.29 - 69.68] Speech (speaker 2): I love pink.
+[69.60 - 77.30] Visual (happy 0.76) [normal]: girl eats chocolate, other girl watches
+    On-screen text: chocolate
+[70.54 - 72.10] Speech (speaker 2) (happy 0.90): If this is green,
+[73.58 - 75.74] Speech (speaker 1): then you have to make me an advent calendar.
+[76.85 - 78.09] Speech (speaker 2) (happy 0.99): Oh, yeah, I've seen those on TikTok.
+[77.30 - 80.50] Visual (happy 0.76) [normal]: girl holds candy and eats it while smiling
+[79.07 - 79.45] Speech (speaker 2) (angry 1.00): Pink.
+[80.50 - 83.73] Visual (happy 0.90) [normal]: girl shows candy to camera while smiling
+[81.50 - 81.88] Speech (speaker 1) (happy 0.95): Pinky.
+[83.03 - 87.62] Speech (speaker 1) (neutral 0.44): If this is yellow,
+[83.73 - 89.30] Visual (happy 0.95) [normal]: girl opens bag of candy while smiling
+[88.14 - 90.82] Speech (speaker 1): then you have to make me an advent calendar.
+[89.30 - 91.43] Visual (happy 0.77) [normal]: girl eats candy while smiling at camera
+[91.43 - 94.70] Visual (happy 0.65) [normal]: girl holds candy up to camera for close-up view
+[94.70 - 130.70] Visual (happy 0.82) [normal]: girl continues eating candy while smiling at camera
+    On-screen text: chocolate
+[98.54 - 99.76] Speech (speaker 2) (<unk> 0.47): Oh, I said bro.
+[100.28 - 104.06] Speech (speaker 1) (disgusted 0.99): If this is yellow, then I get to post an embarrassing photo of you on there.
+[104.12 - 104.30] Speech (speaker 1): Sorry.
+[104.56 - 105.06] Speech (speaker 1): Let's see.
+[105.24 - 105.50] Speech (speaker 1): If
+[114.06 - 115.06] Speech (speaker 1) (happy 0.66): this is green,
+[115.85 - 119.79] Speech (speaker 1) (happy 1.00): then the Christmas giveaway is going to happen very soon.
+[120.11 - 120.79] Speech (speaker 1) (happy 0.61): Very soon.
+[124.27 - 125.55] Speech (speaker 1): Green, you know what that means?
+[125.63 - 126.51] Speech (speaker 1): You know what that means, guys?
+[127.52 - 128.20] Speech (speaker 1): This is all.
+[128.36 - 128.76] Speech (speaker 1) (happy 0.81): Let me get one.
+[128.94 - 130.46] Speech (speaker 1): If this is feeling.
+[130.70 - 137.30] Visual (happy 0.72) [low]: girl1 gestures with hand while girl2 holds candy
+    On-screen text: chocolate bar
+[130.71 - 134.81] Speech (speaker 1) (happy 1.00): If this is yellow, then I get to do your nails with all your new nail stuff.
+[135.11 - 139.72] Speech (speaker 1) (angry 0.84): Once your nails are off, obviously.
+[137.30 - 143.60] Visual (happy 0.78) [normal]: girl holds candy up, other girl eats it
+[140.04 - 140.48] Speech (speaker 2) (happy 1.00): Mm-hmm.
+[140.60 - 145.74] Speech (speaker 2) (happy 1.00): If this is yellow, then you guys have to buy from My Secret Swim and City Beach.
+[143.60 - 149.00] Visual (happy 0.71) [normal]: girls wave goodbye to camera
+[145.86 - 147.04] Speech (speaker 2) (happy 1.00): Because they have the best swimmers.
+[147.50 - 148.14] Speech (speaker 2): And clothes.
+[148.46 - 148.86] Speech (speaker 2): Yeah.
+[149.00 - 154.30] Visual (happy 0.80) [low]: girl holds up candy bag to camera
+    On-screen text: candy bag
+[151.28 - 151.68] Speech (speaker 1) (happy 1.00): Yellow.
+[151.82 - 160.88] Speech (speaker 1) (happy 0.61): If this is pink, then you guys will still see us during the band because it is a parent run account.
+[154.30 - 161.00] Visual (happy 0.71) [low]: girls eat candy while looking at camera
+[161.00 - 175.43] Visual (happy 0.78) [low]: two girls wave and gesture to camera while standing side by side
+[161.16 - 161.78] Speech (speaker 2): This is pink.
+[164.31 - 164.59] Speech (speaker 2): Yay.
+[166.60 - 167.68] Speech (speaker 2) (happy 1.00): That's the end of the video.
+[167.74 - 168.94] Speech (speaker 1) (happy 0.93): I hope you guys liked it.
+[169.08 - 171.58] Speech (speaker 1): This is in honor of our three million views.
+[172.18 - 172.78] Speech (speaker 1): Clink a challenge.
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[0.00 - 12.00]: holding @ indoor_room
+[12.00 - 16.10]: holding_bag @ indoor_room
+[16.10 - 42.00]: eating @ indoor_room
+[42.00 - 46.27]: hand_gesture @ indoor_room
+[46.27 - 54.00]: chocolate_eating @ indoor_room
+[54.00 - 62.17]: eating @ indoor
+[65.30 - 69.60]: hand_movement @ indoor_room
+[69.60 - 80.50]: eating @ indoor_room
+[80.50 - 83.73]: showing @ indoor
+[83.73 - 89.30]: opening @ indoor
+[89.30 - 91.43]: eating @ indoor_room
+[91.43 - 94.70]: holding @ indoor_room
+[94.70 - 130.70]: eating @ indoor_room
+[130.70 - 137.30]: gesturing @ indoor_room
+[137.30 - 143.60]: holding_candy @ indoor_room
+[143.60 - 149.00]: waving @ indoor_room
+[149.00 - 154.30]: holding @ indoor_room
+[154.30 - 161.00]: eating @ indoor_room
+[161.00 - 175.43]: waving @ indoor_room
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[0.00 - 5.00]: happy 0.80
+[6.00 - 7.00]: happy 0.94
+[8.00 - 9.50]: happy 0.83
+--- 2.00s with no face detected (this is NOT neutral) ---
+[11.50 - 15.50]: happy 0.72
+[16.50 - 19.00]: happy 0.68
+--- 4.00s with no face detected (this is NOT neutral) ---
+[23.00 - 25.00]: happy 0.66
+--- 1.50s with no face detected (this is NOT neutral) ---
+[26.50 - 27.00]: happy 0.81
+[27.50 - 28.50]: neutral 0.59
+[29.50 - 31.50]: neutral 0.56
+[32.50 - 33.00]: surprised 0.66
+[33.50 - 37.50]: happy 0.79
+[38.50 - 40.50]: happy 0.53
+[41.00 - 42.50]: sad 0.66
+[43.00 - 43.50]: happy 0.56
+[44.50 - 46.50]: happy 0.81
+[47.50 - 49.00]: happy 0.70
+[50.00 - 51.50]: happy 0.76
+[52.50 - 55.50]: neutral 0.42
+[56.00 - 57.00]: happy 0.62
+[58.00 - 62.00]: happy 0.70
+--- 1.50s with no face detected (this is NOT neutral) ---
+[63.50 - 64.00]: neutral 0.48
+--- 1.50s with no face detected (this is NOT neutral) ---
+[65.50 - 68.50]: surprised 0.52
+--- 1.50s with no face detected (this is NOT neutral) ---
+[70.00 - 72.50]: happy 0.72
+--- 2.00s with no face detected (this is NOT neutral) ---
+[74.50 - 76.00]: happy 0.81
+[76.50 - 77.00]: surprised 0.49
+[77.50 - 83.00]: happy 0.82
+[84.00 - 86.00]: happy 0.95
+[86.50 - 87.50]: neutral 0.51
+[88.50 - 89.00]: surprised 0.58
+[89.50 - 92.00]: happy 0.76
+[92.50 - 93.00]: neutral 0.44
+[93.50 - 100.00]: happy 0.76
+--- 2.00s with no face detected (this is NOT neutral) ---
+[102.00 - 104.00]: happy 0.99
+[104.50 - 105.00]: sad 0.47
+[105.50 - 108.50]: happy 0.90
+--- 2.00s with no face detected (this is NOT neutral) ---
+[110.50 - 112.00]: happy 0.73
+[113.00 - 115.00]: happy 0.75
+[116.00 - 117.50]: happy 0.75
+--- 1.50s with no face detected (this is NOT neutral) ---
+[119.00 - 119.50]: happy 0.65
+--- 2.00s with no face detected (this is NOT neutral) ---
+[121.50 - 122.00]: happy 0.94
+[122.50 - 124.50]: neutral 0.54
+[125.50 - 127.50]: happy 0.93
+[128.50 - 129.50]: happy 0.67
+[130.50 - 140.00]: happy 0.73
+[141.00 - 145.50]: happy 0.76
+--- 2.00s with no face detected (this is NOT neutral) ---
+[147.50 - 148.50]: happy 0.73
+[149.50 - 150.00]: happy 0.75
+--- 1.50s with no face detected (this is NOT neutral) ---
+[151.50 - 152.00]: happy 0.95
+[153.00 - 159.00]: happy 0.74
+[159.50 - 160.00]: neutral 0.52
+[160.50 - 165.00]: happy 0.66
+--- 1.50s with no face detected (this is NOT neutral) ---
+[166.50 - 168.00]: happy 0.87
+[169.00 - 171.50]: happy 0.89
+[172.50 - 174.50]: happy 0.73
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 349
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[0.09 - 0.73] Clinkers
+[0.73 - 1.15] Challenge!
+[1.57 - 1.97] We
+[1.97 - 2.13] are
+[2.13 - 2.69] recreating
+[2.69 - 2.85] the
+[2.85 - 3.27] Clinkers
+[3.27 - 3.53] Challenge
+[3.53 - 4.03] because
+[4.03 - 4.29] we
+[4.29 - 4.49] hit
+[4.49 - 4.95] 3
+[4.95 - 5.45] million
+[5.45 - 5.99] views.
+[6.49 - 6.87] That
+[6.87 - 7.07] is
+[7.07 - 7.55] crazy
+[7.55 - 8.07] and
+[8.07 - 8.85] sadly,
+[9.03 - 9.35] the
+[9.35 - 9.63] TikTok
+[9.63 - 9.93] ban
+[9.93 - 10.13] is
+[10.13 - 10.39] tomorrow.
+[10.69 - 10.97] But
+[10.97 - 11.35] our
+[11.35 - 11.75] page
+[11.75 - 12.01] will
+[12.01 - 12.47] hopefully,
+[12.69 - 13.01] fingers
+[13.01 - 13.27] crossed,
+[13.41 - 13.67] still
+[13.67 - 13.83] be
+[13.83 - 13.99] up.
+[14.56 - 14.68] I
+[14.68 - 14.94] haven't
+[14.94 - 15.08] had
+[15.08 - 15.68] clinkers
+[15.68 - 16.04] in
+[16.04 - 16.58] so
+[16.58 - 17.18] long.
+[17.32 - 17.84] They're
+[17.84 - 17.94] so
+[17.94 - 18.28] good.
+[18.62 - 19.14] If
+[19.14 - 19.32] this
+[19.32 - 19.46] is
+[19.46 - 19.72] pink,
+[19.78 - 19.92] then
+[19.92 - 20.04] you
+[20.04 - 20.16] have
+[20.16 - 20.26] to
+[20.26 - 20.44] jump
+[20.44 - 20.58] in
+[20.58 - 20.70] the
+[20.70 - 21.12] pool
+[21.12 - 21.46] fully
+[21.46 - 21.86] clothed.
+[21.96 - 22.08] No,
+[22.10 - 22.22] no,
+[22.22 - 22.32] no.
+--- 3.43s with no speech ---
+[25.75 - 26.27] It's
+[26.27 - 26.45] yellow.
+[26.45 - 26.61] If
+[26.61 - 26.71] this
+[26.71 - 26.85] is
+[26.85 - 27.13] green,
+[27.27 - 27.37] then
+[27.37 - 27.49] you
+[27.49 - 27.59] have
+[27.59 - 27.73] to
+[27.73 - 27.87] buy
+[27.87 - 27.99] me
+[27.99 - 28.17] something
+[28.17 - 28.41] when
+[28.41 - 28.55] you
+[28.55 - 28.79] go,
+[28.85 - 29.15] like,
+[29.23 - 29.73] either
+[29.73 - 29.95] to,
+[30.01 - 30.19] like,
+[30.19 - 30.49] Japan
+[30.49 - 30.81] or,
+[30.87 - 31.19] like,
+[31.27 - 31.51] whatever
+[31.51 - 31.77] place
+[31.77 - 32.03] you're
+[32.03 - 32.13] going.
+[32.27 - 32.59] Probably
+[32.59 - 32.77] would
+[32.77 - 32.99] anyway.
+[34.29 - 34.65] Green,
+[34.81 - 35.01] I
+[35.01 - 35.19] think.
+--- 3.69s with no speech ---
+[38.88 - 39.24] That's
+[39.24 - 39.48] green.
+[39.60 - 39.84] Oh,
+[39.84 - 39.94] is
+[39.94 - 40.08] it?
+[40.26 - 40.62] Yeah,
+[40.72 - 41.16] it's
+[41.65 - 41.75] green.
+[41.97 - 42.21] That's
+[42.21 - 42.37] yellow.
+[42.61 - 42.97] Oh.
+[44.23 - 44.59] I
+[45.15 - 45.35] probably
+[45.35 - 45.57] still
+[45.57 - 45.83] will.
+[46.13 - 46.49] Yay.
+--- 1.94s with no speech ---
+[48.43 - 48.79] Yellow.
+[49.01 - 49.37] Yellow
+[49.37 - 49.67] twins.
+[49.99 - 50.35] If
+--- 2.16s with no speech ---
+[52.51 - 52.79] this
+[52.79 - 53.01] is
+[53.47 - 54.17] yellow,
+[54.33 - 54.59] then
+[54.59 - 54.79] you
+[54.79 - 54.93] have
+[54.93 - 54.97] to
+[54.97 - 55.25] switch
+[55.25 - 55.43] to
+[55.43 - 55.57] my
+[55.57 - 55.83] school.
+[55.97 - 56.27] I
+--- 3.28s with no speech ---
+[59.55 - 59.75] love
+[59.75 - 59.87] my
+[59.87 - 60.13] school,
+[60.21 - 60.35] but,
+[60.41 - 60.59] like,
+[60.59 - 61.07] I
+[61.60 - 61.90] love
+[61.90 - 62.06] her
+[62.06 - 62.36] school,
+[62.44 - 63.02] but
+[63.02 - 63.12] I
+[63.12 - 63.22] also
+[63.22 - 63.40] love
+[63.40 - 63.50] my
+[63.50 - 63.68] school.
+[63.96 - 64.32] I'm
+[64.32 - 64.42] going.
+[65.55 - 65.91] But,
+[65.91 - 66.63] yeah,
+[66.97 - 67.61] it's
+[67.61 - 67.79] still
+[67.79 - 67.97] good.
+[68.29 - 68.65] I
+[69.34 - 69.50] love
+[69.50 - 69.68] pink.
+[70.54 - 70.92] If
+[70.92 - 71.18] this
+[71.18 - 71.44] is
+[71.44 - 72.10] green,
+[73.58 - 74.18] then
+[74.48 - 74.62] you
+[74.62 - 74.76] have
+[74.76 - 74.82] to
+[74.82 - 74.96] make
+[74.96 - 75.10] me
+[75.10 - 75.22] an
+[75.22 - 75.40] advent
+[75.40 - 75.74] calendar.
+[76.85 - 77.23] Oh,
+[77.25 - 77.35] yeah,
+[77.37 - 77.45] I've
+[77.45 - 77.57] seen
+[77.57 - 77.71] those
+[77.71 - 77.85] on
+[77.85 - 78.09] TikTok.
+[79.07 - 79.45] Pink.
+--- 2.05s with no speech ---
+[81.50 - 81.88] Pinky.
+[83.03 - 83.41] If
+--- 3.03s with no speech ---
+[86.44 - 86.68] this
+[86.68 - 86.92] is
+[86.92 - 87.62] yellow,
+[88.14 - 88.38] then
+[88.38 - 88.84] you
+[88.84 - 89.02] have
+[89.02 - 89.22] to
+[89.22 - 89.52] make
+[89.52 - 89.84] me
+[89.84 - 90.08] an
+[90.08 - 90.34] advent
+[90.34 - 90.82] calendar.
+--- 7.72s with no speech ---
+[98.54 - 98.78] Oh,
+[98.78 - 99.20] I
+[99.20 - 99.56] said
+[99.56 - 99.76] bro.
+[100.28 - 100.66] If
+[100.66 - 101.00] this
+[101.00 - 101.30] is
+[101.30 - 101.88] yellow,
+[102.00 - 102.20] then
+[102.20 - 102.30] I
+[102.30 - 102.44] get
+[102.44 - 102.54] to
+[102.54 - 102.70] post
+[102.70 - 102.86] an
+[102.86 - 103.08] embarrassing
+[103.08 - 103.52] photo
+[103.52 - 103.66] of
+[103.66 - 103.76] you
+[103.76 - 103.92] on
+[103.92 - 104.06] there.
+[104.12 - 104.30] Sorry.
+[104.56 - 104.94] Let's
+[104.94 - 105.06] see.
+[105.24 - 105.50] If
+--- 8.56s with no speech ---
+[114.06 - 114.18] this
+[114.18 - 114.40] is
+[114.40 - 115.06] green,
+[115.85 - 116.31] then
+[116.31 - 116.93] the
+[116.93 - 117.27] Christmas
+[117.27 - 117.77] giveaway
+[117.77 - 118.29] is
+[118.29 - 118.43] going
+[118.43 - 118.57] to
+[118.57 - 118.89] happen
+[118.89 - 119.43] very
+[119.43 - 119.79] soon.
+[120.11 - 120.49] Very
+[120.49 - 120.79] soon.
+--- 3.48s with no speech ---
+[124.27 - 124.65] Green,
+[124.73 - 124.89] you
+[124.89 - 125.01] know
+[125.01 - 125.13] what
+[125.13 - 125.27] that
+[125.27 - 125.55] means?
+[125.63 - 125.79] You
+[125.79 - 125.89] know
+[125.89 - 125.97] what
+[125.97 - 126.09] that
+[126.09 - 126.25] means,
+[126.31 - 126.51] guys?
+[127.52 - 127.90] This
+[127.90 - 128.06] is
+[128.06 - 128.20] all.
+[128.36 - 128.44] Let
+[128.44 - 128.54] me
+[128.54 - 128.64] get
+[128.64 - 128.76] one.
+[128.94 - 129.34] If
+[129.34 - 129.54] this
+[129.54 - 129.80] is
+[129.80 - 130.46] feeling.
+[130.71 - 131.07] If
+[131.07 - 131.23] this
+[131.23 - 131.37] is
+[131.37 - 131.71] yellow,
+[131.89 - 132.45] then
+[132.45 - 132.67] I
+[132.67 - 132.91] get
+[132.91 - 133.01] to
+[133.01 - 133.15] do
+[133.15 - 133.29] your
+[133.29 - 133.55] nails
+[133.55 - 133.79] with
+[133.79 - 133.95] all
+[133.95 - 134.13] your
+[134.13 - 134.31] new
+[134.31 - 134.55] nail
+[134.55 - 134.81] stuff.
+[135.11 - 135.37] Once
+--- 3.37s with no speech ---
+[138.74 - 138.86] your
+[138.86 - 139.02] nails
+[139.02 - 139.14] are
+[139.14 - 139.34] off,
+[139.42 - 139.72] obviously.
+[140.04 - 140.36] Mm
+[140.36 - 140.48] -hmm.
+[140.60 - 141.00] If
+[141.98 - 142.18] this
+[142.18 - 142.36] is
+[142.36 - 142.68] yellow,
+[142.76 - 142.94] then
+[142.94 - 143.08] you
+[143.08 - 143.28] guys
+[143.28 - 143.42] have
+[143.42 - 143.58] to
+[143.58 - 143.74] buy
+[143.74 - 143.88] from
+[143.88 - 144.22] My
+[144.22 - 144.62] Secret
+[144.62 - 144.96] Swim
+[144.96 - 145.14] and
+[145.14 - 145.50] City
+[145.50 - 145.74] Beach.
+[145.86 - 146.02] Because
+[146.02 - 146.14] they
+[146.14 - 146.26] have
+[146.26 - 146.32] the
+[146.32 - 146.72] best
+[146.72 - 147.04] swimmers.
+[147.50 - 147.90] And
+[147.90 - 148.14] clothes.
+[148.46 - 148.86] Yeah.
+--- 2.42s with no speech ---
+[151.28 - 151.68] Yellow.
+[151.82 - 152.22] If
+--- 2.54s with no speech ---
+[154.76 - 154.96] this
+[154.96 - 155.16] is
+[155.16 - 155.42] pink,
+[155.56 - 156.06] then
+[156.06 - 156.64] you
+[156.64 - 156.88] guys
+[156.88 - 157.04] will
+[157.04 - 157.26] still
+[157.26 - 157.48] see
+[157.48 - 157.64] us
+[157.64 - 157.84] during
+[157.84 - 158.00] the
+[158.00 - 158.18] band
+[158.18 - 158.52] because
+[158.52 - 158.96] it
+[158.96 - 159.22] is
+[159.22 - 159.56] a
+[159.56 - 160.28] parent
+[160.28 - 160.62] run
+[160.62 - 160.88] account.
+[161.16 - 161.46] This
+[161.46 - 161.58] is
+[161.58 - 161.78] pink.
+--- 2.53s with no speech ---
+[164.31 - 164.59] Yay.
+--- 2.01s with no speech ---
+[166.60 - 167.00] That's
+[167.00 - 167.08] the
+[167.08 - 167.24] end
+[167.24 - 167.34] of
+[167.34 - 167.40] the
+[167.40 - 167.68] video.
+[167.74 - 167.90] I
+[167.90 - 168.10] hope
+[168.10 - 168.22] you
+[168.22 - 168.40] guys
+[168.40 - 168.76] liked
+[168.76 - 168.94] it.
+[169.08 - 169.48] This
+[169.48 - 169.64] is
+[169.64 - 169.80] in
+[169.80 - 170.04] honor
+[170.04 - 170.34] of
+[170.34 - 170.58] our
+[170.58 - 170.94] three
+[170.94 - 171.14] million
+[171.14 - 171.58] views.
+[172.18 - 172.46] Clink
+[172.46 - 172.48] a
+[172.48 - 172.78] challenge.
