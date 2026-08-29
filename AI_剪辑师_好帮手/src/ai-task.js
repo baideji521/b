@@ -186,15 +186,22 @@ const SITES = {
       ".markdown",
     ],
     // 实测（观察模式录到的）：Gemini 的发送键是
-    // BUTTON.mdc-icon-button.mat-mdc-icon-button[aria-label=发送]，里面套 gem-icon > mat-icon，
-    // 没有 send-button 这个类名了，所以按 aria-label 和 icon-button 类名一起兜
-    sends: ["button.send-button", "button[aria-label*='发送']", "button[aria-label*='Send']",
+    // BUTTON.mdc-icon-button.mat-mdc-icon-button[aria-label=发送]，外面套
+    // GEM-ICON-BUTTON.send-button < DIV.send-button-container。
+    // 注意 send-button 这个类在 gem-icon-button 上，不在 button 上——
+    // 所以老写法 button.send-button 永远匹配不到。
+    sends: ["div.send-button-container button", "gem-icon-button.send-button button",
+            "button[aria-label*='发送']", "button[aria-label*='Send']",
             "button.mat-mdc-icon-button[aria-label*='发送']",
-            "button.mat-mdc-icon-button[aria-label*='Send']",
             "button[mattooltip*='发送']"],
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
     // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
     dropAll: true,
+    // 实测真人拖放：文件是落在「将文件拖放到此处」那层覆盖层上的——
+    // DIV.overlay-container < FILE-DROP-INDICATOR < FIELDSET.input-area-container。
+    // 这层只有在页面收到 dragenter/dragover 之后才渲染出来，所以要先撩一下再往它上面砸。
+    drops: ["file-drop-indicator .overlay-container", "file-drop-indicator",
+            "fieldset.input-area-container", "rich-textarea"],
     // 它有正规发送键，绝不许走「输入框旁边最后一个图标键」那条兜底：
     // 旁边就是建议卡片和图片生成那排工具，误点一下就变成它替你出题。
     nearFallback: false,
@@ -250,9 +257,11 @@ function pageProbeEditor(selectors) {
 
 /**
  * 把 txt 塞进页面，默认走「模仿手动拖进去」——页面里能手动拖，就用同一条路。
- * mode: drop（拖放，默认）/ paste（粘贴）/ input（塞 file 控件，兜底）。
+ * mode: zone（先撩出拖放覆盖层再往它上面砸，最像真人）/ drop（直接砸元素）/
+ *       paste（粘贴）/ input（塞 file 控件，兜底）。
  */
-async function pageAttachFiles(payloads, mode, editorSelector, targetIndex, plusLabels) {
+async function pageAttachFiles(payloads, mode, editorSelector, targetIndex, plusLabels,
+                               dropZones) {
   const transfer = new DataTransfer();
   for (const item of payloads) {
     const binary = atob(item.b64);
@@ -266,6 +275,56 @@ async function pageAttachFiles(payloads, mode, editorSelector, targetIndex, plus
   } catch {}
 
   const editor = document.querySelector(editorSelector || "[contenteditable='true'], textarea");
+  const nameOf = (el) => (el && el.tagName
+    ? `${el.tagName}${el.className ? `.${String(el.className).split(/\s+/)[0]}` : ""}`
+    : "?");
+  const center = (el) => {
+    const rect = el.getBoundingClientRect ? el.getBoundingClientRect() : null;
+    return rect && (rect.width || rect.height)
+      ? { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }
+      : { clientX: 0, clientY: 0 };
+  };
+  const fire = (target, type, point) => {
+    try {
+      target.dispatchEvent(new DragEvent(type, {
+        bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...point,
+      }));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  // zone：照抄真人的动作顺序。实测拖文件进 Gemini 时，页面先收到 dragenter/dragover，
+  // 这才把「将文件拖放到此处」那层覆盖层（file-drop-indicator）渲染出来，文件是落在
+  // 那层上的，不是落在输入框上。所以先撩一下，等覆盖层出来，再往覆盖层上砸 drop。
+  if (mode === "zone") {
+    const base = editor || document.body || document.documentElement;
+    if (!base) return { ok: false, error: "页面还没渲染" };
+    const point = center(base);
+    for (const target of [base, document.body, document.documentElement]) {
+      if (!target) continue;
+      fire(target, "dragenter", point);
+      fire(target, "dragover", point);
+    }
+    await new Promise((done) => setTimeout(done, 350));
+    let zone = null;
+    for (const selector of dropZones || []) {
+      const hit = document.querySelector(selector);
+      if (hit) {
+        zone = hit;
+        break;
+      }
+    }
+    if (!zone) return { ok: false, error: "没等到拖放覆盖层", via: "zone" };
+    const spot = center(zone);
+    fire(zone, "dragenter", spot);
+    fire(zone, "dragover", spot);
+    const dropped = fire(zone, "drop", spot);
+    return dropped
+      ? { ok: true, via: "zone", where: nameOf(zone), count: transfer.files.length }
+      : { ok: false, error: "覆盖层上派发 drop 失败", via: "zone" };
+  }
 
   if (mode === "drop" || !mode) {
     const root = document.documentElement;
@@ -1184,6 +1243,9 @@ async function handleAiTask(task) {
       // 注意每个 plan 都必须带上 target 这个数字——executeScript 的 args 里出现
       // undefined 会直接报「Value is unserializable」。
       const plans = [];
+      // zone 排第一：实测真人拖文件时，文件是落在「将文件拖放到此处」那层覆盖层上的，
+      // 覆盖层要先收到 dragenter/dragover 才会出来，所以这条最像真人。
+      if ((site.drops || []).length) plans.push({ mode: "zone", batch: true, target: 0 });
       // 拖放怎么砸看站点：Gemini 只有一处收，砸整页最稳（target=-1）；
       // DeepSeek 那几层各挂一个监听，只能一次砸一个，砸完数卡片，没进去才换下一个目标。
       if (site.dropAll) {
@@ -1212,7 +1274,7 @@ async function handleAiTask(task) {
           if (plan.batch) {
             const attached = await runInTab(tabId, pageAttachFiles,
                                            [payloads, plan.mode, editor.selector, plan.target,
-                                            site.upload || ""]);
+                                            site.upload || "", site.drops || []]);
             if (!attached?.ok) {
               log("塞入失败", plan.mode, attached?.error || "未知原因");
               // 拖放目标试完了就别再往下试同类方案
@@ -1222,6 +1284,7 @@ async function handleAiTask(task) {
               continue;
             }
             if (plan.mode === "drop") log("拖了一次", `目标${attached.target}=${attached.where}`);
+            if (plan.mode === "zone") log("砸在拖放覆盖层上", `${attached.where}`);
             if (plan.mode === "input") log("走正常上传", `控件=有 点了+=${attached.plus || "不用"}`);
             autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
           } else {
@@ -1229,7 +1292,7 @@ async function handleAiTask(task) {
             for (const item of payloads) {
               const attached = await runInTab(tabId, pageAttachFiles,
                                              [[item], plan.mode, editor.selector, plan.target,
-                                              site.upload || ""]);
+                                              site.upload || "", site.drops || []]);
               if (!attached?.ok) {
                 log("塞入失败", item.name, plan.mode, attached?.error || "未知原因");
                 autoDone = false;
