@@ -56,6 +56,69 @@ _STEPS: dict[int, list[str]] = {
         "ALTER TABLE ai_results ADD COLUMN prompt_path TEXT",
         "ALTER TABLE ai_results ADD COLUMN prompt_size INTEGER",
     ],
+    # v4：高光 JSON 变成"资产"（highlight_assets）+ PRM 档案（prm_profiles），
+    # 成品多两列指回它们。只建表 / 只加列，老数据一行不动，新列全是 NULL。
+    4: [
+        """
+        CREATE TABLE IF NOT EXISTS prm_profiles (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            name        TEXT    NOT NULL,
+            filename    TEXT    NOT NULL,
+            description TEXT,
+            language    TEXT,
+            version     TEXT,
+            is_default  INTEGER NOT NULL DEFAULT 0,
+            created_at  TEXT    NOT NULL,
+            updated_at  TEXT    NOT NULL,
+            deleted_at  TEXT
+        )
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prm_name_live
+            ON prm_profiles(name) WHERE deleted_at IS NULL
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_prm_default_live
+            ON prm_profiles(is_default) WHERE is_default = 1 AND deleted_at IS NULL
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS highlight_assets (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            video_id       INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+            analysis_id    INTEGER REFERENCES analysis_runs(id) ON DELETE SET NULL,
+            source_task_id INTEGER REFERENCES ai_tasks(id) ON DELETE SET NULL,
+            ai_result_id   INTEGER REFERENCES ai_results(id) ON DELETE SET NULL,
+            prm_id         INTEGER REFERENCES prm_profiles(id) ON DELETE SET NULL,
+            parent_id      INTEGER REFERENCES highlight_assets(id) ON DELETE SET NULL,
+            provider       TEXT,
+            model          TEXT,
+            source_type    TEXT    NOT NULL DEFAULT 'ai',
+            name           TEXT    NOT NULL,
+            version        INTEGER NOT NULL DEFAULT 1,
+            raw_json       TEXT    NOT NULL,
+            current_json   TEXT    NOT NULL,
+            clip_count     INTEGER NOT NULL DEFAULT 0,
+            best_score     REAL,
+            is_current     INTEGER NOT NULL DEFAULT 0,
+            note           TEXT,
+            created_at     TEXT    NOT NULL,
+            updated_at     TEXT    NOT NULL,
+            deleted_at     TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_assets_video ON highlight_assets(video_id, deleted_at)",
+        "CREATE INDEX IF NOT EXISTS idx_assets_ai ON highlight_assets(provider, model)",
+        "CREATE INDEX IF NOT EXISTS idx_assets_prm ON highlight_assets(prm_id)",
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_current_live
+            ON highlight_assets(video_id)
+         WHERE is_current = 1 AND deleted_at IS NULL
+        """,
+        "ALTER TABLE artifacts ADD COLUMN highlight_asset_id INTEGER",
+        "ALTER TABLE artifacts ADD COLUMN prm_id INTEGER",
+        "CREATE INDEX IF NOT EXISTS idx_artifacts_asset ON artifacts(highlight_asset_id)",
+        "CREATE INDEX IF NOT EXISTS idx_artifacts_prm ON artifacts(prm_id)",
+    ],
 }
 
 

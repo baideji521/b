@@ -939,7 +939,14 @@ def create_clip(db: Database, video_id: int, spec: dict[str, Any], *,
 
 
 def update_clip(db: Database, clip_id: int, *, status: str | None = None,
-                output_path: str | Path | None = None) -> None:
+                output_path: str | Path | None = None,
+                start: float | None = None, end: float | None = None,
+                duration: float | None = None) -> None:
+    """改片段行。start/end/duration 用来把**实际剪出来的**区间回写。
+
+    AI 给的区间和真正剪的区间可能不一样（剪辑引擎会把边界挪到语义位置上），
+    库里得留实际值，不然以后按 clips 复盘会和成片对不上。
+    """
     sets, params = [], []
     if status:
         sets.append("status = ?")
@@ -947,6 +954,10 @@ def update_clip(db: Database, clip_id: int, *, status: str | None = None,
     if output_path is not None:
         sets.append("output_path = ?")
         params.append(str(output_path))
+    for column, value in (("start_time", start), ("end_time", end), ("duration", duration)):
+        if value is not None:
+            sets.append(f"{column} = ?")
+            params.append(float(value))
     if not sets:
         return
     params.append(clip_id)

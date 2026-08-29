@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
 TASK_STATES = ("pending", "uploading", "waiting", "processing",
@@ -35,6 +35,10 @@ ANALYSIS_STATES = ("running", "completed", "failed")
 
 ARTIFACT_TYPES = ("source_video", "merged_txt", "words_srt", "translated_txt",
                   "preview_audio", "final_video", "thumbnail", "ai_script")
+
+# 高光方案（highlight_assets）的来源：AI 回的 / 手工写的 / 从盘上导入的 /
+# 在已有方案上编辑出来的 / 复制出来的。原始 AI 结果永远留在 raw_json 里。
+ASSET_SOURCES = ("ai", "manual", "imported", "edited", "copied")
 
 TABLES: tuple[str, ...] = (
     # --- 视频主表 ---------------------------------------------------------
@@ -219,6 +223,73 @@ TABLES: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_clips_video ON clips(video_id, status)",
 
+    # --- PRM（提示词档案）-------------------------------------------------
+    # 只登记"有哪一份提示词、叫什么、在哪个文件"，**内容仍然只存在文件里**。
+    # 成品记 prm_id 而不是文件名：以后文件改名/换目录，历史依然查得到。
+    """
+    CREATE TABLE IF NOT EXISTS prm_profiles (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        name        TEXT    NOT NULL,
+        filename    TEXT    NOT NULL,
+        description TEXT,
+        language    TEXT,
+        version     TEXT,
+        is_default  INTEGER NOT NULL DEFAULT 0,
+        created_at  TEXT    NOT NULL,
+        updated_at  TEXT    NOT NULL,
+        deleted_at  TEXT
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_prm_name_live
+        ON prm_profiles(name) WHERE deleted_at IS NULL
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_prm_default_live
+        ON prm_profiles(is_default) WHERE is_default = 1 AND deleted_at IS NULL
+    """,
+
+    # --- 高光方案（资产）--------------------------------------------------
+    # 一个视频可以有任意多份高光 JSON，谁也不覆盖谁：新结果永远是新的一行。
+    # raw_json 是当时那份原始输出，一个字都不改；人工编辑落在 current_json，
+    # 而且编辑默认另开一条（source_type='edited' + parent_id 指回来），
+    # 所以「AI 当时到底给了什么」永远追得到。
+    # 删除一律软删（deleted_at），已经剪出来的成品绝不跟着消失。
+    """
+    CREATE TABLE IF NOT EXISTS highlight_assets (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        video_id       INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        analysis_id    INTEGER REFERENCES analysis_runs(id) ON DELETE SET NULL,
+        source_task_id INTEGER REFERENCES ai_tasks(id) ON DELETE SET NULL,
+        ai_result_id   INTEGER REFERENCES ai_results(id) ON DELETE SET NULL,
+        prm_id         INTEGER REFERENCES prm_profiles(id) ON DELETE SET NULL,
+        parent_id      INTEGER REFERENCES highlight_assets(id) ON DELETE SET NULL,
+        provider       TEXT,
+        model          TEXT,
+        source_type    TEXT    NOT NULL DEFAULT 'ai',
+        name           TEXT    NOT NULL,
+        version        INTEGER NOT NULL DEFAULT 1,
+        raw_json       TEXT    NOT NULL,
+        current_json   TEXT    NOT NULL,
+        clip_count     INTEGER NOT NULL DEFAULT 0,
+        best_score     REAL,
+        is_current     INTEGER NOT NULL DEFAULT 0,
+        note           TEXT,
+        created_at     TEXT    NOT NULL,
+        updated_at     TEXT    NOT NULL,
+        deleted_at     TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_assets_video ON highlight_assets(video_id, deleted_at)",
+    "CREATE INDEX IF NOT EXISTS idx_assets_ai ON highlight_assets(provider, model)",
+    "CREATE INDEX IF NOT EXISTS idx_assets_prm ON highlight_assets(prm_id)",
+    # 每个视频同时只能有一个「当前方案」（软删掉的不算）
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_assets_current_live
+        ON highlight_assets(video_id)
+     WHERE is_current = 1 AND deleted_at IS NULL
+    """,
+
     # --- 实际文件 ---------------------------------------------------------
     # 同一个视频的同一种产物同一个路径只留一条，重复登记就更新。
     """
@@ -232,10 +303,16 @@ TABLES: tuple[str, ...] = (
         exists_on_disk INTEGER NOT NULL DEFAULT 1,
         created_at     TEXT    NOT NULL,
         updated_at     TEXT    NOT NULL,
+        -- 成品溯源（v4）：这份文件是拿哪个高光方案、哪个 PRM 剪出来的。
+        -- 方案/PRM 以后被软删也不影响这里：存的是 id，历史照旧查得到。
+        highlight_asset_id INTEGER REFERENCES highlight_assets(id) ON DELETE SET NULL,
+        prm_id             INTEGER REFERENCES prm_profiles(id) ON DELETE SET NULL,
         UNIQUE(video_id, type, path)
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_artifacts_video ON artifacts(video_id, type)",
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_asset ON artifacts(highlight_asset_id)",
+    "CREATE INDEX IF NOT EXISTS idx_artifacts_prm ON artifacts(prm_id)",
 
     # --- 元信息 -----------------------------------------------------------
     """
