@@ -2910,7 +2910,12 @@ def launch(cfg: Config, video: str | Path | None = None, panel_only: bool = Fals
         window.show()
         return app.exec_()
     panel.finished.connect(lambda *_: app.quit())
+    panel.set_standalone()  # 独立跑就是正经窗口：任务栏、最小化、最大化都有
+    panel.show()
+    panel.raise_()
+    panel.activateWindow()
     if auto:
         QTimer.singleShot(0, window.on_auto_clip)
     return app.exec_()
+
 

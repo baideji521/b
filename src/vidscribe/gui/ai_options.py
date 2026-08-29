@@ -16,7 +16,7 @@ import os
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import QUrl
+from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
     QCheckBox,
@@ -124,7 +124,12 @@ class AiOptionsDialog(QDialog):
         self.setWindowTitle("AI 面板")
         self.setModal(False)
         self.setMinimumWidth(640)
+        self.setSizeGripEnabled(True)
+        # QDialog 默认只给个关闭按钮，这儿当第二主界面用，最小化/最大化都得有
+        self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint
+                            | Qt.WindowMaximizeButtonHint)
         bridge = cfg.bridge
+
 
 
         # --- 目录（只归 AI 用，跟界面的导入/导出目录各走各的）---
@@ -258,7 +263,14 @@ class AiOptionsDialog(QDialog):
         self.sync_enabled()
 
     # --------------------------------------------------------- 跑自动剪辑
+    def set_standalone(self) -> None:
+        """单独运行（run.py ai）时当正经主窗口用：任务栏有它，最小化/最大化/拉伸都全。"""
+        self.setWindowFlags(Qt.Window | Qt.WindowMinMaxButtonsHint
+                            | Qt.WindowCloseButtonHint)
+        self.resize(900, 720)
+
     def append_log(self, line: str) -> None:
+
         """主界面把 AI 相关的日志转播过来，跑的时候不用切回去看。"""
         self.view_log.appendPlainText(line)
 
