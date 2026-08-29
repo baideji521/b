@@ -2147,7 +2147,7 @@ class MainWindow(QMainWindow):
                 db_repo.complete_ai_task(db, task_id)
                 return "completed"
             if outcome == "cancelled":
-                db_repo.update_ai_task(db, task_id, status="cancelled", error=error)
+                db_repo.cancel_ai_task(db, task_id, error)
                 return "cancelled"
             final = db_repo.fail_or_requeue_ai_task(db, task_id, error or "没说原因")
             if final == "pending":
@@ -2272,6 +2272,16 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 对账失败，状态可能不准：{exc}")
 
+    def _auto_product_ready(self) -> Path | None:
+        """数据库里确认这条任务的成品真的登记上了，才允许把任务算 completed。
+
+        剪辑成片 / 脚本剪辑看 final_video，收取脚本看落在 AI_输出目录的 ai_script。
+        渲染线程说"成了"不算数——文件没落地、或者没登记进 artifacts，就是没完成。
+        """
+        if self._auto_video is None:
+            return None
+        return self._auto_done_file(self._auto_video)
+
     def _register_final_video(self, output: str) -> None:
         """成品刚出炉：登记 final_video，并把这个视频的 clip 标成已渲染。"""
         video = self._auto_video or self.video_path
@@ -2371,9 +2381,12 @@ class MainWindow(QMainWindow):
         self._set_auto_step(self._auto_video.stem, "发送")
         self.dispatch_ai(prompt_path, merged_path, count)
 
-    def _auto_save_script(self) -> None:
+    def _auto_save_script(self) -> bool:
 
-        """把 AI 回的 JSON 存进 AI_输出目录，当脚本留档（任务表的 JSON 列就看它）。"""
+        """把 AI 回的 JSON 存进 AI_输出目录，当脚本留档（任务表的 JSON 列就看它）。
+
+        存下来并登记进库才返回 True——「收取脚本」这一串就靠它判断算不算干完。
+        """
         out = self.ai_dir("ai_output_dir") or self.export_root()
         stem = self._auto_video.stem if self._auto_video is not None else "script"
         target = out / f"{stem}_脚本.json"
@@ -2381,9 +2394,10 @@ class MainWindow(QMainWindow):
             target.write_text(self._last_highlight_json, encoding="utf-8")
         except OSError as exc:
             self.append_log(f"[自动剪辑] 脚本存不下来：{exc}")
-            return
+            return False
         self.append_log(f"[自动剪辑] 脚本已存：{target}")
         self._register_artifact(self._auto_video, "ai_script", target)
+        return True
 
     # ---------------------------------------------------- 面板上的状态回显
     def _set_auto_step(self, stem: str, step: str) -> None:
@@ -2482,9 +2496,12 @@ class MainWindow(QMainWindow):
         idle = ((self.clip_worker is None or not self.clip_worker.isRunning())
                 and (self.worker is None or not self.worker.isRunning()))
         if self.auto_running():
-            self._auto_save_script()  # 不管哪一串都留档，任务表的 JSON 列就看这个
-            if self._auto_job == "collect":  # 收取脚本：只存不剪
-                self._auto_advance("completed")
+            saved = self._auto_save_script()  # 不管哪一串都留档，任务表的 JSON 列就看这个
+            if self._auto_job == "collect":  # 收取脚本：只存不剪，存下来才算干完
+                if saved and self._auto_product_ready() is not None:
+                    self._auto_advance("completed")
+                else:
+                    self._auto_advance("failed", "脚本没存进 AI_输出目录")
                 return
             self.append_log("[自动剪辑] 拿到 JSON，按主界面高光配置开剪")
             if self._auto_video is not None:
@@ -2520,9 +2537,14 @@ class MainWindow(QMainWindow):
         if self.auto_running():
             if self.ai_panel is not None:
                 self.ai_panel.refresh_tasks()
-            # 剪辑砸了就是砸了，不许把任务标成 completed
-            self._auto_advance("completed" if ok else "failed",
-                               None if ok else f"剪辑失败：{message}")
+            # 剪辑砸了就是砸了；就算渲染线程说成了，成品没登记进库也不算完成
+            if not ok:
+                self._auto_advance("failed", f"剪辑失败：{message}")
+                return
+            if self._auto_product_ready() is None:
+                self._auto_advance("failed", f"渲染说成了但成品没落地/没登记：{message}")
+                return
+            self._auto_advance("completed")
 
 
 

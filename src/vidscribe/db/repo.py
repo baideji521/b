@@ -528,6 +528,16 @@ def fail_or_requeue_ai_task(db: Database, task_id: int, error: str) -> str:
     return status
 
 
+def cancel_ai_task(db: Database, task_id: int, reason: str | None = None) -> None:
+    """单独取消一条任务（人工点停止时手上那条）。状态名只在这一层出现。"""
+    stamp = now()
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE ai_tasks SET status = 'cancelled', finished_at = ?, updated_at = ?, "
+            "heartbeat_at = ?, worker_id = NULL, error = ? WHERE id = ?",
+            (stamp, stamp, stamp, str(reason)[:2000] if reason else None, task_id))
+
+
 def cancel_open_ai_tasks(db: Database, *, mode: str | None = None,
                          task_type: str = AUTO_TASK_TYPE, video_id: int | None = None,
                          exclude_id: int | None = None) -> int:
