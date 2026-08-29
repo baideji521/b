@@ -20,12 +20,32 @@ from typing import Any
 
 from .. import cache as cache_mod
 from ..logging_setup import get_logger
+from ..video_io import is_complete_video
 from . import repo
 from .db import Database, open_db
 
 logger = get_logger(__name__)
 
 VIDEO_SUFFIXES = cache_mod.VIDEO_SUFFIXES
+
+# 渲染中的临时后缀，和 highlight/clip.py 的 PART_SUFFIX 是同一个值。
+# 这里另写一份而不是 import，是不想让 db 包为了一个字符串拖上整套渲染依赖（av/PIL/cv2）。
+PART_SUFFIX = ".part"
+
+
+def _ok_to_register(kind: str, path: Path) -> bool:
+    """这个文件能不能登记成 artifacts。除 final_video 外还是老规矩：在盘上且非空。
+
+    final_video 多一条：必须是一份封装完整的视频。渲染中途崩掉留下的残片、历史遗留
+    的坏 mp4 都是"非空文件"，登记上去 `_auto_done_file()` 就会把任务当干完了，
+    于是永远不会重剪——所以成品这一种必须严一点（见 video_io.is_complete_video）。
+    """
+    if not (path.is_file() and path.stat().st_size > 0):
+        return False
+    if kind == "final_video" and not is_complete_video(path):
+        logger.warning("成品封装不完整，不登记 final_video：%s", path)
+        return False
+    return True
 
 
 def _read_json(path: Path) -> Any:
@@ -133,7 +153,7 @@ def _import_artifacts(db: Database, cfg: Any, video_id: int, video: Path,
         candidates.append(("ai_script", ai_out / f"{stem}_脚本.json"))
         candidates.append(("final_video", ai_out / f"{stem}_高光时刻.mp4"))
     for kind, path in candidates:
-        if path.is_file() and path.stat().st_size > 0:
+        if _ok_to_register(kind, path):
             repo.register_artifact(db, video_id, kind, path)
             count += 1
     return count
@@ -311,16 +331,20 @@ def register_video_files(cfg: Any, db: Database, video: Path, video_id: int,
         if ai_out is not None:
             candidates.append(("ai_script", ai_out / name))
     if ai_out is not None:
-        candidates.append(("final_video", ai_out / f"{stem}_高光时刻.mp4"))
-        # 成品名字被手改过也认：AI_输出目录里同名开头的视频文件都算成品
+        exact = ai_out / f"{stem}_高光时刻.mp4"
+        candidates.append(("final_video", exact))
+        # 成品名字被手改过也认：AI_输出目录里同名开头的视频文件都算成品。
+        # 但渲染中的 .part 残片永远不算——它连视频后缀都不是，这里再显式挡一道。
         if ai_out.is_dir():
             for item in sorted(ai_out.iterdir()):
+                if item == exact or item.name.endswith(PART_SUFFIX):
+                    continue
                 if (item.is_file() and item.stem.startswith(stem)
                         and item.suffix.lower() in VIDEO_SUFFIXES):
                     candidates.append(("final_video", item))
     for kind, path in candidates:
         try:
-            if path.is_file() and path.stat().st_size > 0:
+            if _ok_to_register(kind, path):
                 repo.register_artifact(db, video_id, kind, path)
                 found += 1
         except OSError as exc:

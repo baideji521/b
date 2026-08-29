@@ -22,6 +22,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "PIXEL_FACTOR", "VIDEO_SUFFIXES", "VideoInfo", "FrameBatch", "list_videos", "probe_video",
+    "is_complete_video",
     "smart_size", "plan_frame_indices", "sample_frames", "detect_scene_cuts", "plan_windows",
 ]
 
@@ -155,6 +156,47 @@ def _has_audio_fallback(path: Path) -> bool:
         return bool(proc.stdout.strip())
     except Exception:
         return True
+
+
+def is_complete_video(path: str | Path) -> bool:
+    """这个文件是不是一份**封装完整**的视频（能打开、有视频流、时长有效）。
+
+    只用来把"写了一半就崩了"的残片挡在成品登记之外，所以判据故意只有三条：
+    PyAV 能打开、有视频流、时长 > 0。不看 codec / 分辨率 / 码率 / 时长阈值，
+    正常成品一律放行。
+
+    注意和 `probe_video` 的分工：`probe_video` 是**宽容探测**（读不到就回退默认值，
+    坏容器也尽量给个 VideoInfo），这里是**严格判断**，两者语义相反，不要互相替代。
+
+    PyAV 装不上时返回 True——降级回原来的"非空即认"，不能因为缺依赖就把所有成品判死。
+    """
+    target = Path(path)
+    try:
+        if not target.is_file() or target.stat().st_size <= 0:
+            return False
+    except OSError as exc:
+        logger.debug("看不了 %s：%s", target, exc)
+        return False
+    try:
+        import av  # noqa: PLC0415
+    except Exception:
+        logger.debug("PyAV 不可用，跳过 %s 的完整性校验", target.name)
+        return True
+    try:
+        with av.open(str(target)) as container:
+            vstreams = [s for s in container.streams if s.type == "video"]
+            if not vstreams:
+                return False
+            seconds = float(container.duration) / 1_000_000.0 if container.duration else 0.0
+            if seconds <= 0:
+                vs = vstreams[0]
+                if vs.duration and vs.time_base:
+                    seconds = float(vs.duration * vs.time_base)
+            return seconds > 0
+    except Exception as exc:  # 没写完的容器（缺 moov）在这儿就打不开
+        logger.debug("封装不完整 %s：%s", target.name, exc)
+        return False
+
 
 
 def smart_size(width: int, height: int, max_pixels: int, min_pixels: int = 4 * PIXEL_FACTOR ** 2) -> tuple[int, int]:

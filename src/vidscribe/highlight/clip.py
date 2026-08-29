@@ -21,6 +21,7 @@ PyAV 编码封装（同 audio.py 的用法）。不依赖外部 ffmpeg 可执行
 from __future__ import annotations
 
 import math
+import os
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
@@ -40,6 +41,10 @@ logger = get_logger("highlight")
 
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int, str], None]   # (已完成帧, 总帧, 当前阶段)
+
+# 渲染中的临时后缀。故意不是视频后缀：db/importer 的成品扫描按后缀过滤，
+# 所以 .part 天然进不了 artifacts，崩溃留下的残片不会被当成成品。
+PART_SUFFIX = ".part"
 
 # --- 字幕样式（第八节）---
 TEXT_COLOR = (0x16, 0x83, 0xFF)      # #1683FF 蓝
@@ -208,6 +213,15 @@ def default_target(directory: Path, video: Path) -> Path:
     return directory / f"{video.stem}_高光时刻.mp4"
 
 
+def part_target(target: Path) -> Path:
+    """渲染中的临时文件：<成品名>.part，和成品同目录（`os.replace` 不许跨盘）。
+
+    成品路径在整个渲染过程中都是空的，只有封装完整收尾之后才由 `os.replace` 一次性
+    出现——这样"崩在渲染中途"留下的永远是 .part 残片，不会被当成成品登记。
+    """
+    return target.with_name(target.name + PART_SUFFIX)
+
+
 # ==================================================================== 字幕排版
 def _load_font(size: int) -> ImageFont.FreeTypeFont:
     for candidate in FONT_CANDIDATES:
@@ -327,9 +341,11 @@ class _Writer:
 
     def __init__(self, target: Path, width: int, height: int, fps: float,
                  audio_rate: int | None = None,
-                 sample_aspect_ratio: Fraction | None = None) -> None:
+                 sample_aspect_ratio: Fraction | None = None,
+                 container_format: str | None = None) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)
-        self.container = av.open(str(target), mode="w")
+        # 写的是 .part，扩展名猜不出容器格式，所以由调用方按成品扩展名显式给（None = 让 PyAV 猜）
+        self.container = av.open(str(target), mode="w", format=container_format)
         rate = _fps_fraction(fps)
         self.stream = self.container.add_stream("libx264", rate=rate)
         self.stream.width = width
@@ -354,12 +370,37 @@ class _Writer:
             self.container.mux(packet)
 
     def close(self) -> None:
-        for packet in self.stream.encode():
-            self.container.mux(packet)
-        if self.audio is not None:
-            for packet in self.audio.encode():
-                self.container.mux(packet)
-        self.container.close()
+        """正常收尾：把编码器里剩的帧吐完，再关容器（moov 就在这一步写进去）。
+
+        重复调用是安全的（第二次直接返回）；中途出错会抛出去，调用方绝不能把这次
+        渲染当成功。
+        """
+        container = self.container
+        if container is None:
+            return
+        self.container = None
+        try:
+            for packet in self.stream.encode():
+                container.mux(packet)
+            if self.audio is not None:
+                for packet in self.audio.encode():
+                    container.mux(packet)
+        finally:
+            container.close()
+
+    def abort(self) -> None:
+        """出错时收尾：只把文件句柄放开，不保证封装完整，也绝不再抛异常。
+
+        真正的错误由调用方往上抛，这儿再抛就会把原因盖掉。
+        """
+        container = self.container
+        if container is None:
+            return
+        self.container = None
+        try:
+            container.close()
+        except Exception as exc:  # noqa: BLE001 - 放弃这次渲染，关不上也只能记一笔
+            logger.debug("放弃渲染时关容器失败：%s", exc)
 
 
 def _sample_aspect_ratio(video: Path) -> Fraction | None:
@@ -514,6 +555,9 @@ def render_highlight(video: Path, spec: HighlightSpec, target: Path,
     """按 spec 生成高光 MP4，返回统计信息。on_progress 每写一帧回报一次进度。
 
     sfx 是冻帧音效（见 highlight/sfx.py），混在冻帧那一刻原本静音的那段；None = 不加。
+
+    落地方式是「先写 .part，完整收尾后 os.replace 成 target」：崩溃 / 被杀 / 断电
+    只会留下 .part，target 要么是上一次的完整成品、要么根本不存在，绝不会是残片。
     """
     log = on_log or (lambda line: logger.info("%s", line))
     report = on_progress or (lambda done, total, stage: None)
@@ -566,80 +610,94 @@ def render_highlight(video: Path, spec: HighlightSpec, target: Path,
         step = 0.0
     glyphs = _build_glyphs(text, info.width, info.height, step)
 
-    writer = _Writer(target, info.width, info.height, fps, audio_rate=_audio_rate(video),
-                     sample_aspect_ratio=sar)
-    cap = cv2.VideoCapture(str(video))
-    if not cap.isOpened():
-        writer.close()
-        raise RuntimeError(f"OpenCV 打不开视频：{video}")
-
-    freeze_bgr: np.ndarray | None = None
-    written_play = 0
-    report(0, total_frames, "正常播放段")
+    part = part_target(target)
+    writer = _Writer(part, info.width, info.height, fps, audio_rate=_audio_rate(video),
+                     sample_aspect_ratio=sar,
+                     container_format=target.suffix.lstrip(".").lower() or "mp4")
+    # 从这里到 writer.close() 全程只写 .part。出任何岔子都只放开句柄、把原始错误抛出去，
+    # 成品路径在这期间始终是空的——所以"崩在渲染中途"绝不可能留下一个半成品成品文件。
     try:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_index)
-        log(f"[{spec.clip_start:.2f}] START NORMAL PLAYBACK")
-        last_bgr: np.ndarray | None = None
-        for _ in range(play_frames):
+        cap = cv2.VideoCapture(str(video))
+        if not cap.isOpened():
+            raise RuntimeError(f"OpenCV 打不开视频：{video}")
+
+        freeze_bgr: np.ndarray | None = None
+        written_play = 0
+        report(0, total_frames, "正常播放段")
+        try:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, start_index)
+            log(f"[{spec.clip_start:.2f}] START NORMAL PLAYBACK")
+            last_bgr: np.ndarray | None = None
+            for _ in range(play_frames):
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                last_bgr = frame
+                writer.write_rgb(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+                written_play += 1
+                report(written_play, total_frames, "正常播放段")
+            # 冻帧点这一刻的最后有效帧
             ok, frame = cap.read()
-            if not ok:
-                break
-            last_bgr = frame
-            writer.write_rgb(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            written_play += 1
-            report(written_play, total_frames, "正常播放段")
-        # 冻帧点这一刻的最后有效帧
-        ok, frame = cap.read()
-        freeze_bgr = frame if ok else last_bgr
-        if freeze_bgr is None:
-            raise RuntimeError("抓不到高光冻帧，检查起剪点 / 冻帧点是否落在视频范围内")
+            freeze_bgr = frame if ok else last_bgr
+            if freeze_bgr is None:
+                raise RuntimeError("抓不到高光冻帧，检查起剪点 / 冻帧点是否落在视频范围内")
 
-    finally:
-        cap.release()
+        finally:
+            cap.release()
 
-    log(f"[{spec.freeze_time:.2f}] FREEZE HIGH LIGHT FRAME"
-        f"（原视频第 {start_index + written_play} 帧）")
-    log(f"[{spec.freeze_time:.2f} → {spec.clip_end:.2f}] FREEZE EFFECT")
+        log(f"[{spec.freeze_time:.2f}] FREEZE HIGH LIGHT FRAME"
+            f"（原视频第 {start_index + written_play} 帧）")
+        log(f"[{spec.freeze_time:.2f} → {spec.clip_end:.2f}] FREEZE EFFECT")
 
-    base = Image.fromarray(cv2.cvtColor(freeze_bgr, cv2.COLOR_BGR2RGB))
-    base = ImageEnhance.Color(base).enhance(1.06)      # 轻微画面增强
-    base = ImageEnhance.Contrast(base).enhance(1.04)
-    base = ImageEnhance.Brightness(base).enhance(1.02)
+        base = Image.fromarray(cv2.cvtColor(freeze_bgr, cv2.COLOR_BGR2RGB))
+        base = ImageEnhance.Color(base).enhance(1.06)      # 轻微画面增强
+        base = ImageEnhance.Contrast(base).enhance(1.04)
+        base = ImageEnhance.Brightness(base).enhance(1.02)
 
-    for glyph in glyphs:
-        log(f"[{spec.freeze_time + glyph.appear_at:.2f}] TEXT: {glyph.char}")
-
-    zoom_cache: dict[int, Image.Image] = {}
-    white = Image.new("RGB", base.size, (255, 255, 255))
-    for i in range(freeze_frames):
-        elapsed = i / fps
-        scale = _zoom_scale(elapsed)
-        key = int(round(scale * 1000))
-        canvas = zoom_cache.get(key)
-        if canvas is None:
-            canvas = _zoom(base, scale)
-            zoom_cache[key] = canvas
-        canvas = canvas.copy()
-        if elapsed < FLASH_SECONDS:
-            alpha = FLASH_STRENGTH * (1.0 - elapsed / FLASH_SECONDS)
-            canvas = Image.blend(canvas, white, alpha)
         for glyph in glyphs:
-            if elapsed + 1e-9 < glyph.appear_at:
-                continue  # 还没到这个字
-            tile = glyph.image
-            char_scale = _pop_scale(elapsed - glyph.appear_at, pop)
-            if abs(char_scale - 1.0) > 1e-3:
-                size = (max(1, int(round(tile.width * char_scale))),
-                        max(1, int(round(tile.height * char_scale))))
-                tile = tile.resize(size, Image.LANCZOS)
-            canvas.paste(tile, (int(round(glyph.center_x - tile.width / 2)),
-                                int(round(glyph.center_y - tile.height / 2))), tile)
-        writer.write_rgb(np.asarray(canvas))
-        report(written_play + i + 1, total_frames, "冻帧特效")
+            log(f"[{spec.freeze_time + glyph.appear_at:.2f}] TEXT: {glyph.char}")
 
-    report(total_frames, total_frames, "写音频并封装")
-    sfx_info = _write_audio(writer, video, grid_start, live_seconds, total_seconds, log, sfx)
-    writer.close()
+        zoom_cache: dict[int, Image.Image] = {}
+        white = Image.new("RGB", base.size, (255, 255, 255))
+        for i in range(freeze_frames):
+            elapsed = i / fps
+            scale = _zoom_scale(elapsed)
+            key = int(round(scale * 1000))
+            canvas = zoom_cache.get(key)
+            if canvas is None:
+                canvas = _zoom(base, scale)
+                zoom_cache[key] = canvas
+            canvas = canvas.copy()
+            if elapsed < FLASH_SECONDS:
+                alpha = FLASH_STRENGTH * (1.0 - elapsed / FLASH_SECONDS)
+                canvas = Image.blend(canvas, white, alpha)
+            for glyph in glyphs:
+                if elapsed + 1e-9 < glyph.appear_at:
+                    continue  # 还没到这个字
+                tile = glyph.image
+                char_scale = _pop_scale(elapsed - glyph.appear_at, pop)
+                if abs(char_scale - 1.0) > 1e-3:
+                    size = (max(1, int(round(tile.width * char_scale))),
+                            max(1, int(round(tile.height * char_scale))))
+                    tile = tile.resize(size, Image.LANCZOS)
+                canvas.paste(tile, (int(round(glyph.center_x - tile.width / 2)),
+                                    int(round(glyph.center_y - tile.height / 2))), tile)
+            writer.write_rgb(np.asarray(canvas))
+            report(written_play + i + 1, total_frames, "冻帧特效")
+
+        report(total_frames, total_frames, "写音频并封装")
+        sfx_info = _write_audio(writer, video, grid_start, live_seconds, total_seconds, log, sfx)
+        writer.close()          # moov 写进 .part：到这一刻 .part 才是一份完整视频
+    except BaseException:       # 含 KeyboardInterrupt：句柄必须放开，错误原样上抛
+        writer.abort()
+        raise
+    # 只有完整收尾之后才把成品搬到最终位置：同目录 rename，原子替换旧成品（不先删）
+    try:
+        os.replace(part, target)
+    except OSError as exc:
+        raise RuntimeError(f"成品提交失败，{target.name} 可能正被占用（残片留在 "
+                           f"{part.name}）：{exc}") from exc
+
     log(f"[{spec.clip_end:.2f}] END CLIP")
 
     out_duration = total_frames / fps

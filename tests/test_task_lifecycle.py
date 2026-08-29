@@ -76,6 +76,37 @@ def fake_video(cfg, name: str) -> Path:
     return path
 
 
+def real_mp4(path: Path, frames: int = 6, size: int = 64, fps: int = 25) -> Path:
+    """现场编一份最小的合法 mp4（无声）。
+
+    成品这一种 artifact 登记前要过 `video_io.is_complete_video`（P1-4），所以"盘上有个
+    非空文件"已经不够用了，必须是一份真封装完整的视频。不下载素材、不依赖 test.mp4。
+    """
+    from fractions import Fraction  # noqa: PLC0415
+
+    import av  # noqa: PLC0415
+    import numpy as np  # noqa: PLC0415
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with av.open(str(path), mode="w", format="mp4") as container:
+        stream = container.add_stream("libx264", rate=fps)
+        stream.width = size
+        stream.height = size
+        stream.pix_fmt = "yuv420p"
+        stream.codec_context.time_base = Fraction(1, fps)
+        stream.options = {"crf": "30", "preset": "ultrafast"}
+        for i in range(frames):
+            frame = av.VideoFrame.from_ndarray(
+                np.full((size, size, 3), (i * 9) % 256, dtype=np.uint8), format="rgb24")
+            frame.pts = i
+            for packet in stream.encode(frame):
+                container.mux(packet)
+        for packet in stream.encode():
+            container.mux(packet)
+    return path
+
+
+
 # ------------------------------------------------------------------ 1 幂等
 def test_enqueue_is_idempotent(tmp_path: Path) -> None:
     cfg, db = make_project(tmp_path)
@@ -373,7 +404,7 @@ def test_resume_reconciles_before_recovery(tmp_path: Path) -> None:
     assert db_repo.get_ai_task(db, tid)["status"] == "processing"
 
     product = Path(str(cfg.bridge["ai_output_dir"])) / (video.stem + "_高光时刻.mp4")
-    product.write_bytes(b"z" * 8192)   # 只是"盘上有个成品文件"，不假装 FFmpeg 跑过
+    real_mp4(product)   # 一份真封装完整的成品；非空假 mp4 已经不算成品了（P1-4）
     assert db_repo.artifact_path(db, vid, "final_video") is None, "登记之前库里当然没有"
 
     refresh_from_disk(cfg, db, folders=[cfg.path("input_dir")], ai_out=product.parent)
