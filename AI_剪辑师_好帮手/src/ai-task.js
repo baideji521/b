@@ -36,6 +36,8 @@ const READY_TIMEOUT_MS = 60000;
 const ATTACH_VERIFY_MS = 5000;
 // 都挂上之后再确认一下没在转圈，很短；到点就直接按回车
 const SETTLE_TIMEOUT_MS = 30000;
+// 「+」只是个软信号：等一小会儿认不出就往下走，别把整条流程卡在这儿
+const PLUS_READY_MS = 6000;
 
 
 // 半自动模式等你手动把文件选进去的上限
@@ -559,20 +561,34 @@ function pagePlusReady(labels) {
   const want = new RegExp(labels || "添加照片和文件|添加文件|上传|attach|upload", "i");
   const avoid = /云端|硬盘|drive|发送|send|停止|stop|录音|mic/i;
   let found = false;
-  for (const node of document.querySelectorAll("button, [role='button']")) {
-    const icon = node.querySelector("mat-icon")?.getAttribute("fonticon") || "";
+  // 认不出来的时候，把输入框附近的按钮长什么样一起报回去，省得靠猜
+  const seen = [];
+  const editor = document.querySelector(".ql-editor, textarea, [contenteditable='true']");
+  const box = editor?.closest("form, fieldset, [class*='input-area'], [class*='composer']")
+    || document.body;
+  for (const node of (box || document).querySelectorAll("button, [role='button']")) {
+    const icon = node.querySelector("mat-icon, gem-icon, [fonticon], [data-icon]");
+    const iconName = `${icon?.getAttribute("fonticon") || ""} ${icon?.getAttribute("data-icon") || ""} `
+      + `${icon?.getAttribute("name") || ""} ${(icon?.textContent || "").trim().slice(0, 12)}`;
     const label = `${node.getAttribute("aria-label") || ""} `
       + `${node.getAttribute("mattooltip") || ""} ${node.getAttribute("data-test-id") || ""} `
       + `${String(node.className || "")}`;
-    // 「+」常常一个字都没有，只挂个 add 图标，所以图标名也算命中
-    if (!(want.test(label) || /^add/i.test(icon)) || avoid.test(label)) continue;
+    const off = node.disabled || node.getAttribute("aria-disabled") === "true";
+    if (seen.length < 8) {
+      seen.push(`${node.tagName}${off ? "(灰)" : ""}[${(label + iconName).trim()
+        .replace(/\s+/g, " ").slice(0, 40)}]`);
+    }
+    // 「+」常常一个字都没有，只挂个 add / attach 图标，所以图标名和类名也算命中
+    const hit = want.test(label) || want.test(iconName)
+      || /^\s*add|attach|plus/i.test(iconName) || /add|attach|upload|plus/i.test(label);
+    if (!hit || avoid.test(label)) continue;
     found = true;
-    if (!(node.disabled || node.getAttribute("aria-disabled") === "true")) {
+    if (!off) {
       return { found: true, enabled: true,
-               label: (label.trim().replace(/\s+/g, " ") || icon).slice(0, 30) };
+               label: (label.trim().replace(/\s+/g, " ") || iconName.trim()).slice(0, 30) };
     }
   }
-  return { found, enabled: false };
+  return { found, enabled: false, seen };
 }
 
 
@@ -1261,8 +1277,9 @@ async function handleAiTask(task) {
     }
 
     // 等「+」变亮：它能点了才说明这个对话框真的准备好收文件了。
-    // 输入框先渲染、工具键后启用，这中间塞文件多半白塞。
-    const plusDeadline = Date.now() + READY_TIMEOUT_MS;
+    // 只等一小会儿——这是个软信号，认不出来也别耽误正事（paste 那条路不靠它），
+    // 认不出来时把输入框附近的按钮长什么样打进日志，下一轮就能把选择器定死。
+    const plusDeadline = Date.now() + PLUS_READY_MS;
     let plusReady = null;
     for (;;) {
       plusReady = await runInTab(tabId, pagePlusReady, [site.upload || ""]).catch(() => null);
@@ -1271,7 +1288,8 @@ async function handleAiTask(task) {
         break;
       }
       if (Date.now() > plusDeadline) {
-        log("+ 一直不能点，照样往下试", JSON.stringify(plusReady || {}));
+        log("没认出「+」，直接往下挂文件", `找到=${plusReady?.found ? "灰的" : "没有"}`,
+            `附近的键：${(plusReady?.seen || []).join(" ｜ ")}`);
         break;
       }
       if (await cancelled("waiting_editor", "等「+」变成可点状态")) return;
