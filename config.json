@@ -4,6 +4,7 @@
     "output_dir": "output",
     "video_dir": "",
     "cache_dir": "cache",
+    "db_dir": "database",
     "log_dir": "logs",
     "model_dir": "models"
   },

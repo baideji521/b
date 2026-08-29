@@ -351,6 +351,46 @@ def cmd_cache(cfg: Config, args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------------- 数据库
+def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
+    """SQLite 库：建库 / 导入旧缓存 / 跟磁盘对账 / 看现状。
+
+    库只记状态（视频、分析批次、事件、逐词时间戳、AI 任务与结果、片段、文件），
+    分析结果照旧落 output/ 和 cache/，导入不会删任何文件。
+    """
+    from vidscribe.db import db_path, open_db  # noqa: PLC0415
+    from vidscribe.db import repo  # noqa: PLC0415
+    from vidscribe.db.importer import import_all, reconcile  # noqa: PLC0415
+
+    db = open_db(cfg)
+    logger.info("库文件 %s", db_path(cfg))
+    if args.do_import:
+        stats = import_all(cfg, db)
+        logger.info("导入：视频 %d，分析 %d，视觉事件 %d，语音段 %d，逐词 %d，"
+                    "文件 %d，AI 结果 %d，片段 %d（跳过 %d 份没记视频路径的缓存）",
+                    stats["videos"], stats["analyses"], stats["visual_events"],
+                    stats["speech_segments"], stats["speech_words"], stats["artifacts"],
+                    stats["ai_results"], stats["clips"], stats["skipped"])
+    if args.reconcile:
+        changed = reconcile(cfg, db)
+        logger.info("对账：视频没了 %d / 又回来了 %d；文件没了 %d / 又回来了 %d",
+                    changed["videos_gone"], changed["videos_back"],
+                    changed["artifacts_gone"], changed["artifacts_back"])
+    if args.recover:
+        tasks = repo.recover_stale_ai_tasks(
+            db, float(cfg.runtime.get("ai_task_timeout_minutes", 30)))
+        runs = repo.recover_stale_analyses(
+            db, float(cfg.runtime.get("analysis_timeout_minutes", 180)))
+        logger.info("恢复：%d 个卡住的 AI 任务退回等待，%d 条没跑完的分析标成失败", tasks, runs)
+
+    rows = repo.counts(db)
+    logger.info("表内容：%s", "，".join(f"{k} {v}" for k, v in rows.items()))
+    stats = repo.get_statistics(db)
+    logger.info("统计：总任务 %d / 未剪辑 %d / 已获取 JSON %d / 成品 %d",
+                stats["total"], stats["todo"], stats["json"], stats["done"])
+    return 0
+
+
 # ------------------------------------------------------------------ 高光剪辑
 def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
     """按 AI JSON 剪高光：clip.start 起剪，clip.end 冻帧，片尾由 --text-offset 决定。"""
@@ -656,6 +696,16 @@ def build_parser() -> argparse.ArgumentParser:
                          help="多少天没动过算过期，默认取 runtime.cache_max_age_days（3）。"
                               "只影响 --clean 删哪些，不加 --clean 什么都不删")
     p_cache.set_defaults(func=cmd_cache)
+
+    p_db = sub.add_parser("db", help="SQLite 库：建库 / 导入旧缓存 / 跟磁盘对账 / 看现状")
+    p_db.add_argument("--import", dest="do_import", action="store_true",
+                      help="扫 cache/、output/、视频库、AI 目录，把已有结果导进库（不删任何文件）")
+    p_db.add_argument("--reconcile", action="store_true",
+                      help="对账：库里记的视频/文件还在不在盘上，只改状态不删记录")
+    p_db.add_argument("--recover", action="store_true",
+                      help="恢复：卡住的 AI 任务退回等待，没跑完的分析标失败")
+    p_db.set_defaults(func=cmd_db)
+
 
     p_hl = sub.add_parser("highlight", help="按 AI JSON 剪高光片段（起剪 / 冻帧 / 收尾三个时间严格照做）")
     p_hl.add_argument("--json", default=None, help="AI JSON 文件路径；不给则从标准输入读")

@@ -17,6 +17,8 @@ output/
 cache/
 work/
 logs/
+# SQLite 库（缓存状态、分析结果、AI 任务）：本机数据，用 run.py db --import 重建
+database/
 FINAL_REPORT.txt
 gui_settings.json
 

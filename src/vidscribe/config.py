@@ -17,6 +17,8 @@ DEFAULTS: dict[str, Any] = {
         "video_dir": "",
         # 缓存根目录（断点、窗口缓存、预览音轨），见 vidscribe/cache.py
         "cache_dir": "cache",
+        # SQLite 库放哪（库文件固定叫 video.db）：缓存状态、分析结果、AI 任务都记在里面
+        "db_dir": "database",
         "log_dir": "logs",
         "model_dir": "models",
     },
@@ -216,6 +218,10 @@ DEFAULTS: dict[str, Any] = {
         # 分析完就把这个视频的 preview_audio.wav 删掉：cache 里只剩 json，省几百兆。
         # 代价是下次要看波形/听预览得重新解一遍音轨（几秒到几十秒）
         "drop_preview_audio": False,
+        # 崩溃恢复：卡在 uploading/waiting/processing 的 AI 任务超过这么多分钟就退回 pending，
+        # 跑了一半的分析记录超过这么久就标 failed。别设太短，长视频分析本身就慢
+        "ai_task_timeout_minutes": 30,
+        "analysis_timeout_minutes": 180,
 
     },
     "mirrors": {
