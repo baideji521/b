@@ -38,6 +38,8 @@ const ATTACH_VERIFY_MS = 5000;
 const SETTLE_TIMEOUT_MS = 30000;
 // 「+」只是个软信号：等一小会儿认不出就往下走，别把整条流程卡在这儿
 const PLUS_READY_MS = 6000;
+// 挂完文件先缓一下再看发送键：页面要过一拍才把卡片画出来、发送键才从灰变亮
+const ATTACH_GRACE_MS = 2000;
 
 
 // 半自动模式等你手动把文件选进去的上限
@@ -1476,7 +1478,10 @@ async function handleAiTask(task) {
     // 「+」菜单这类浮层会盖住输入框，回车也发不出去，先关掉
     const closed = await runInTab(tabId, pageCloseOverlays).catch(() => null);
     if (closed?.backdrops || closed?.menus) log("关掉浮层", JSON.stringify(closed));
-    await sleep(300);
+    // 刚挂完文件别急着看发送键：页面要过一拍才把卡片画出来、把发送键从灰变亮，
+    // 早看一眼容易误判成「还没传完」。固定缓一下再开始判。
+    log(`挂完先等 ${ATTACH_GRACE_MS / 1000} 秒，让页面把发送键状态刷出来`);
+    await sleep(ATTACH_GRACE_MS);
 
 
     // 附件没挂稳就发送必然是错的：Gemini 会拿着半成品去回答，或者干脆无视附件。
