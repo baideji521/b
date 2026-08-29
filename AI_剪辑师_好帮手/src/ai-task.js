@@ -202,6 +202,8 @@ const SITES = {
     // 这层只有在页面收到 dragenter/dragover 之后才渲染出来，所以要先撩一下再往它上面砸。
     drops: ["file-drop-indicator .overlay-container", "file-drop-indicator",
             "fieldset.input-area-container", "rich-textarea"],
+    // 实测有效的那一条：带 files 的 ClipboardEvent 派给 .ql-editor，一次就挂上
+    pasteFirst: true,
     // 它有正规发送键，绝不许走「输入框旁边最后一个图标键」那条兜底：
     // 旁边就是建议卡片和图片生成那排工具，误点一下就变成它替你出题。
     nearFallback: false,
@@ -1243,8 +1245,11 @@ async function handleAiTask(task) {
       // 注意每个 plan 都必须带上 target 这个数字——executeScript 的 args 里出现
       // undefined 会直接报「Value is unserializable」。
       const plans = [];
-      // zone 排第一：实测真人拖文件时，文件是落在「将文件拖放到此处」那层覆盖层上的，
-      // 覆盖层要先收到 dragenter/dragover 才会出来，所以这条最像真人。
+      // 实测：Gemini 上真正一次就成的是「粘贴」（带 files 的 ClipboardEvent 派给输入框），
+      // 上一轮日志里 zone、整页 drop、逐个 drop 全没出卡片，最后是 paste 把两个文件挂上的。
+      // 所以这种站点直接把 paste 排第一，别再来回换方式——换来换去反而互相打断。
+      if (site.pasteFirst) plans.push({ mode: "paste", batch: true, target: 0 });
+      // zone：先撩出「将文件拖放到此处」覆盖层再往它上面砸，留着当第二手
       if ((site.drops || []).length) plans.push({ mode: "zone", batch: true, target: 0 });
       // 拖放怎么砸看站点：Gemini 只有一处收，砸整页最稳（target=-1）；
       // DeepSeek 那几层各挂一个监听，只能一次砸一个，砸完数卡片，没进去才换下一个目标。
@@ -1254,7 +1259,7 @@ async function handleAiTask(task) {
         for (let t = 0; t < 6; t += 1) plans.push({ mode: "drop", batch: true, target: t });
       }
       plans.push({ mode: "drop", batch: false, target: site.dropAll ? -1 : 0 });
-      plans.push({ mode: "paste", batch: true, target: 0 });
+      if (!site.pasteFirst) plans.push({ mode: "paste", batch: true, target: 0 });
       plans.push({ mode: "input", batch: true, target: 0 });
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
