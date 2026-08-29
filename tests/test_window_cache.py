@@ -150,6 +150,21 @@ def test_atomic_write(work: Path) -> None:
     print("PASS 原子写")
 
 
+def test_reset_clears_tmp(work: Path) -> None:
+    video = work / "reset.mp4"
+    video.write_bytes(b"reset-test" * 64)
+    ck = Checkpoint(work / "cache4", video)
+    cache_file = ck.window_cache_file()
+    tmp = cache_file.with_name(cache_file.name + ".tmp")
+    ck.save_window_cache({key(0): window(0)}, visual_config_hash(BASE, backend="qwen3vl"))
+    tmp.write_text('{"version": 2, "windows": {"half', encoding="utf-8")
+    assert cache_file.is_file() and tmp.is_file()
+    ck.reset()
+    assert not cache_file.exists(), "reset 要删掉窗口缓存"
+    assert not tmp.exists(), "reset 也要带走上次崩溃留下的 .tmp"
+    print("PASS reset 清干净")
+
+
 def main() -> None:
     work = Path(tempfile.mkdtemp(prefix="window_cache_test_"))
     try:
@@ -157,6 +172,7 @@ def main() -> None:
         test_v2_hit_and_legacy(work)
         test_resume(work)
         test_atomic_write(work)
+        test_reset_clears_tmp(work)
         print("全部通过")
     finally:
         shutil.rmtree(work, ignore_errors=True)

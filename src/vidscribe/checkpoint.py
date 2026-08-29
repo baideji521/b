@@ -83,7 +83,10 @@ class Checkpoint:
         self.state["stages"] = {}
         for stage in STAGES:
             self.artifact(stage).unlink(missing_ok=True)
-        self.window_cache_file().unlink(missing_ok=True)
+        cache_file = self.window_cache_file()
+        cache_file.unlink(missing_ok=True)
+        # 上一次崩在写盘中途留下的半截 .tmp：reset 是"从头再来"，别把它留在目录里
+        cache_file.with_name(cache_file.name + ".tmp").unlink(missing_ok=True)
         self._flush()
 
     # --- 窗口级续跑（长视频视觉分析用）---
