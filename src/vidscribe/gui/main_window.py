@@ -382,21 +382,66 @@ class HighlightWorker(QThread):
             self.log.emit(f"[SFX] 不混音效：{chosen.reason}")
         return chosen
 
+    def _plan_result(self, video: Path, payload: Any = None):
+        """跑剪辑引擎：逐词时间戳从库里取、时长现探，日志逐行发回界面。"""
+        from ..highlight import clip_engine  # noqa: PLC0415
+
+        if payload is None:
+            payload = json.loads(self.payload_text)
+
+        segments: tuple = ()
+        try:
+            from ..db import open_db, repo  # noqa: PLC0415
+
+            db = open_db(self.cfg)
+            try:
+                row = repo.find_video(db, video)
+                if row is not None:
+                    segments = clip_engine.segments_for_video(db, int(row["id"]))
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
+            self.log.emit(f"[剪辑引擎] 取不到逐词时间戳（{exc}），本次不修边界")
+        if segments:
+            self.log.emit(f"[剪辑引擎] 逐词时间戳：{len(segments)} 句")
+        else:
+            self.log.emit("[剪辑引擎] 库里没有逐词时间戳，AI 区间原样使用（只受 15 秒上限约束）")
+
+        duration = None
+        try:
+            from ..video_io import probe_video  # noqa: PLC0415
+
+            duration = float(probe_video(video).duration) or None
+        except Exception as exc:  # noqa: BLE001 - 探不到就不按时长收尾
+            self.log.emit(f"[剪辑引擎] 探不到视频时长（{exc}），不按时长收尾")
+
+        result = clip_engine.plan_clips(payload, segments,
+                                       video_duration=duration, source_video=str(video))
+        for line in clip_engine.describe_result(result):
+            if line:
+                self.log.emit(line)
+        return result
+
     def run(self) -> None:
         try:
             from ..highlight import (  # noqa: PLC0415 - 重依赖（av/cv2/PIL）延迟导入
-                default_target, parse_spec, render_highlight, resolve_video,
+                clip_engine, default_target, parse_spec, render_highlight, resolve_video,
             )
             from ..timeline.exporters import write_json  # noqa: PLC0415
+            from ..video_io import is_complete_video  # noqa: PLC0415
 
-            spec = parse_spec(json.loads(self.payload_text))
+            payload = json.loads(self.payload_text)
+            try:
+                spec = parse_spec(payload)      # 先解一遍：既校验 JSON，也用来定位源视频
+            except ValueError:
+                # 多条写法（clips: [...]）parse_spec 认不了，用第一条定位源视频
+                alt = clip_engine.first_clip_payload(payload)
+                if alt is None:
+                    raise
+                spec = parse_spec(alt)
             start_delta, end_delta, text_delta = self.offsets
             self.log.emit(f"[OFFSET] JSON 原始 clip.start={spec.clip_start:.2f} "
                           f"clip.end={spec.clip_end:.2f}")
-            spec = spec.shifted(start_delta, end_delta, text_delta)
-            self.log.emit(f"[OFFSET] 起始{start_delta:+.2f} / 结束{end_delta:+.2f} / "
-                          f"文本{text_delta:+.2f} 秒 → 起剪={spec.clip_start:.2f} "
-                          f"冻帧={spec.freeze_time:.2f} 片尾={spec.clip_end:.2f}")
 
             video = resolve_video(spec, self.cfg.path("output_dir"),
                                   self.cfg.path("input_dir"), self.fallback)
@@ -404,23 +449,45 @@ class HighlightWorker(QThread):
             directory = (self.export_dir if self.export_dir and self.export_dir.is_dir()
                          else self.cfg.path("output_dir") / video.stem)
             target = default_target(directory, video)
-            result = render_highlight(video, spec, target, on_log=self.log.emit,
-                                      on_progress=self.progress.emit,
-                                      sfx=self._sfx_plan(video, spec.freeze_time))
-            if not self.video_only:
-                write_json(target.with_suffix(".json"),
-                           {"spec": spec.raw,
-                            "offsets": {"start": start_delta, "end": end_delta,
-                                        "text": text_delta},
 
-                            "result": result})
+            # 先让剪辑引擎把 AI 的粗区间修到语义边界上，再交给既有渲染
+            plans = self._plan_result(video, payload).plans
+            if not plans:
+                raise ValueError("剪辑引擎没给出任何可剪片段，这条不开剪")
+            jobs: list[tuple[Any, Path]] = []
+            for index, plan in enumerate(plans, start=1):
+                one = parse_spec(clip_engine.payload_for(plan))
+                one = one.shifted(start_delta, end_delta, text_delta)
+                out_path = (target if index == 1
+                            else target.with_name(f"{target.stem}_{index}{target.suffix}"))
+                jobs.append((one, out_path))
+                self.log.emit(f"[OFFSET] 第 {index} 段 起始{start_delta:+.2f} / "
+                              f"结束{end_delta:+.2f} / 文本{text_delta:+.2f} 秒 → "
+                              f"起剪={one.clip_start:.2f} 冻帧={one.freeze_time:.2f} "
+                              f"片尾={one.clip_end:.2f}")
+
+            for index, (job, out_path) in enumerate(jobs, start=1):
+                self.log.emit(f"[剪辑引擎] 开始渲染第 {index}/{len(jobs)} 段 -> {out_path.name}")
+                result = render_highlight(video, job, out_path, on_log=self.log.emit,
+                                          on_progress=self.progress.emit,
+                                          sfx=self._sfx_plan(video, job.freeze_time))
+                if not is_complete_video(out_path):   # 和登记闸门同一个判断（Batch 4）
+                    raise RuntimeError(f"成片封装不完整，不当成成品：{out_path}")
+                self.log.emit("[剪辑引擎] 成片验证通过")
+                if not self.video_only:
+                    write_json(out_path.with_suffix(".json"),
+                               {"spec": job.raw,
+                                "offsets": {"start": start_delta, "end": end_delta,
+                                            "text": text_delta},
+
+                                "result": result})
 
         except Exception as exc:
             self.log.emit(f"[错误] {type(exc).__name__}: {exc}")
             self.done.emit(False, f"{type(exc).__name__}: {exc}")
             return
-        self.output = target
-        self.done.emit(True, str(target))
+        self.output = jobs[0][1]
+        self.done.emit(True, str(self.output))
 
 
 class AudioWorker(QThread):
@@ -1894,6 +1961,7 @@ class MainWindow(QMainWindow):
                         + ("，等扩展领取" if state["extension_online"]
                            else "；扩展当前离线，先确认扩展已装好并配对"))
         mode = str(cfg.get("upload_mode") or "manual")
+        self._mark_auto_waiting()   # 已经交给扩展/网页版了，剩下的时间都在等 AI
         if mode == "manual":
             self.append_log(f"[AI 对接] 半自动模式：{spec['label']} 打开后请自己把这两个文件"
                             "选进去，挂好之后扩展会自动发送并回传")
@@ -1952,6 +2020,7 @@ class MainWindow(QMainWindow):
         self.ai_worker.log.connect(self.append_log)
         self.ai_worker.done.connect(self.on_api_done)
         self.ai_worker.start()
+        self._mark_auto_waiting()   # 请求已经发出去了，接下来就是纯等 AI
 
     def on_api_done(self, text: str, error: str) -> None:
         """接口回来了：走和扩展回传完全一样的后续（抠 JSON -> 自动剪辑）。"""
@@ -2167,6 +2236,7 @@ class MainWindow(QMainWindow):
                 self._last_highlight_json = resumed
                 self._auto_save_script()  # 脚本文件可能还没落地，补一份留档
                 self._set_auto_step(video.stem, "剪辑")
+                self._mark_auto_rendering()   # 素材齐了，这条从这一刻起是"在剪"
                 self.run_highlight(resumed, ai=True)
                 return
         text_file = self._auto_text_file(video)
@@ -2210,6 +2280,35 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 任务 #{task_id} 状态写不进去：{exc}")
             return outcome
+
+    def _mark_auto_waiting(self) -> None:
+        """东西已经交给 AI 了：当前任务 uploading -> waiting（等 AI 回话那一段）。
+
+        写不进去不算致命：状态只是显示和恢复用的，跑批不该因为它停下。
+        """
+        task_id = self._auto_task_id
+        db = self._db()
+        if task_id is None or db is None:
+            return
+        try:
+            db_repo.mark_ai_task_waiting(db, task_id)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 任务 #{task_id} 标「等 AI」失败：{exc}")
+
+    def _mark_auto_rendering(self) -> None:
+        """JSON 已经确认能开剪：当前任务 -> processing（`processing` 就是"正在渲染"）。
+
+        调用点必须都在真的要起 HighlightWorker 之前，而且手上那份 JSON 已经过了
+        「解得开 + 是 dict + 抠得出片段」这三道；等 AI 的阶段一律不许走到这里。
+        """
+        task_id = self._auto_task_id
+        db = self._db()
+        if task_id is None or db is None:
+            return
+        try:
+            db_repo.mark_ai_task_rendering(db, task_id)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 任务 #{task_id} 标「剪辑中」失败：{exc}")
 
     def _touch_auto_task(self) -> None:
         """给当前这条任务刷心跳。没有在跑的任务就什么都不做。"""
@@ -2350,6 +2449,7 @@ class MainWindow(QMainWindow):
             return
         self.append_log(f"[自动剪辑] 按现成脚本剪：{script.name}")
         self._last_highlight_json = text
+        self._mark_auto_rendering()   # 这一串不问 AI，领到手就直接进渲染
         self.run_highlight(text, ai=True)
 
     def _db(self):
@@ -2457,9 +2557,14 @@ class MainWindow(QMainWindow):
         prompt = self._last_prompt or {}
         try:
             clips = db_repo.clips_from_payload(parsed)
+            # 抠不出片段的回复（AI 回了 {"error": ...} 这种）不能算「已校验」，
+            # 否则以后查库分不出哪份 JSON 真的能剪。和 importer 那条路保持一致。
             result_id = db_repo.save_ai_result(
                 db, vid, task_id=self._auto_task_id, raw_response=raw_text or None,
-                json_data=parsed, candidate_count=len(clips) or None, validated=True,
+                json_data=parsed, candidate_count=len(clips) or None,
+                winner_score=clips[0]["score"] if clips else None,
+                validated=bool(clips),
+                validation_error=None if clips else "JSON 里抠不出可用片段",
                 prompt_hash=prompt.get("prompt_hash"), prompt_path=prompt.get("prompt_path"),
                 prompt_size=prompt.get("prompt_size"))
             for spec in clips:
@@ -2674,9 +2779,15 @@ class MainWindow(QMainWindow):
                 else:
                     self._auto_advance("failed", "脚本没存进 AI_输出目录")
                 return
+            # 是 dict 还不够：抠不出片段的 JSON 剪不出东西，绝不让它进"剪辑中"
+            if not db_repo.clips_from_payload(parsed):
+                self.append_log("[自动剪辑] AI 的 JSON 里抠不出可用片段，这条不开剪")
+                self._auto_advance("failed", "AI JSON 里没有可用片段")
+                return
             self.append_log("[自动剪辑] 拿到 JSON，按主界面高光配置开剪")
             if self._auto_video is not None:
                 self._set_auto_step(self._auto_video.stem, "剪辑")
+            self._mark_auto_rendering()   # 等 AI 那一段到此结束，接下来是真正的渲染
             self.run_highlight(self._last_highlight_json, ai=True)
             return
 

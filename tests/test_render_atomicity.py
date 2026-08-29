@@ -144,7 +144,8 @@ def orphan_task(cfg, db, video: Path, mode: str = "full", *, merged_txt: bool = 
         txt.write_text("merged text for AI", encoding="utf-8")
         db_repo.register_artifact(db, vid, "merged_txt", txt)
     task_id, _ = db_repo.enqueue_ai_task(db, vid, mode=mode)
-    db_repo.claim_next_ai_task(db, mode=mode, worker_id="gui-dead")
+    # 显式落 processing：模拟"崩在渲染那一步"。领取本身现在只落 uploading（Batch 7 拆状态）
+    db_repo.claim_next_ai_task(db, mode=mode, worker_id="gui-dead", status="processing")
     with db.tx() as conn:
         conn.execute("UPDATE ai_tasks SET heartbeat_at = ? WHERE id = ?", (LONG_AGO, task_id))
     assert db_repo.get_ai_task(db, task_id)["status"] == "processing"
@@ -171,6 +172,7 @@ class Win:
     _auto_product_ready = mw.MainWindow._auto_product_ready
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
+    _mark_auto_rendering = mw.MainWindow._mark_auto_rendering   # 真写库：复用 JSON 就进 processing
 
     def __init__(self, cfg, db):
         self.cfg = cfg
@@ -422,7 +424,7 @@ def test_orphan_with_part_leftover_is_re_rendered(tmp_path: Path) -> None:
     assert win._auto_task_id == task_id, "孤儿任务必须被捞回来接着跑"
     assert db_repo.artifact_path(db, vid, "final_video") is None, "残片不许变成成品"
     assert win.settled == [], "更不许直接结算 completed"
-    assert db_repo.get_ai_task(db, task_id)["status"] == "processing", "是被本进程领走了，不是干完了"
+    assert db_repo.get_ai_task(db, task_id)["status"] == "uploading", "是被本进程领走了，不是干完了"
     assert win.calls["send_file_to_ai"] == 1, "没有 AI 结果就照常问一次 AI"
     assert part.is_file(), "残片不用清，下次渲染会覆盖"
     assert not (out / f"{video.stem}{FINAL_TAIL}").exists()

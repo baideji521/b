@@ -93,7 +93,8 @@ def orphan_task(cfg, db, name: str, mode: str = "full", *, heartbeat: str = LONG
         txt.write_text("merged text for AI", encoding="utf-8")
         db_repo.register_artifact(db, vid, "merged_txt", txt)
     task_id, _ = db_repo.enqueue_ai_task(db, vid, mode=mode)
-    db_repo.claim_next_ai_task(db, mode=mode, worker_id="gui-dead")
+    # 显式落 processing：模拟"崩在渲染那一步"。领取本身现在只落 uploading（Batch 7 拆状态）
+    db_repo.claim_next_ai_task(db, mode=mode, worker_id="gui-dead", status="processing")
     with db.tx() as conn:
         conn.execute("UPDATE ai_tasks SET heartbeat_at = ? WHERE id = ?", (heartbeat, task_id))
     assert db_repo.get_ai_task(db, task_id)["status"] == "processing"
@@ -117,6 +118,7 @@ class Win:
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
     _settle_auto_task = mw.MainWindow._settle_auto_task
+    _mark_auto_rendering = mw.MainWindow._mark_auto_rendering   # 真写库：复用 JSON 就进 processing
 
     def __init__(self, cfg, db, started_at: str | None = None):
         self.cfg = cfg
@@ -272,7 +274,7 @@ def test_second_call_keeps_own_task(tmp_path: Path) -> None:
     with db.tx() as conn:
         conn.execute("UPDATE ai_tasks SET heartbeat_at = ? WHERE id = ?", (FAR_AHEAD, task_id))
     assert win._reclaim_orphan_tasks(db) == 0, "不能把自己刚领的活退回去"
-    assert db_repo.get_ai_task(db, task_id)["status"] == "processing"
+    assert db_repo.get_ai_task(db, task_id)["status"] == "uploading"
     db.close()
 
 
@@ -466,6 +468,53 @@ def test_close_releases_current_task(tmp_path: Path) -> None:
     db.close()
 
 
+# --------------------------------------------------- AI 结果留档的真实性（手动那条路）
+def test_error_reply_is_not_marked_validated(tmp_path: Path) -> None:
+    """AI 回的是报错对象：照样留档，但不许标成「已校验」，也不许建 clip。"""
+    cfg, db = make_project(tmp_path)
+    video = fake_video(cfg, "err.mp4")
+    win = Win(cfg, db)
+    win._auto_video = video                 # 手动单发：没有任务行，task_id 是空的
+    win._save_ai_result({"error": "rules file not provided"}, '{"error": "..."}')
+
+    vid = db_repo.find_video(db, video)["id"]
+    row = db_repo.get_ai_result(db, vid)
+    assert row is not None, "报错回复也要留档，方便追溯 AI 到底回了什么"
+    assert int(row["validated"]) == 0, "抠不出片段的回复不算已校验"
+    assert row["validation_error"], "得写清为什么不算数"
+    assert row["task_id"] is None and row["raw_response"], (dict(row),)
+    assert db_repo.get_clips(db, vid) == [] or len(db_repo.get_clips(db, vid)) == 0
+    assert db_repo.reusable_json_videos(db, [vid]) == set(), "这份结果不能被当成可复用"
+    db.close()
+
+
+def test_overlay_evaluation_lands_in_clips(tmp_path: Path) -> None:
+    """现行提示词把中文评价放在 clip.overlays.evaluation，落库时不能丢。"""
+    cfg, db = make_project(tmp_path)
+    video = fake_video(cfg, "eva.mp4")
+    evaluation = "情绪反差鲜明，信息完整"
+    payload = {"video": video.name,
+               "clip": {"start": 31.89, "end": 39.99, "duration": 8.1, "score": 92,
+                        "type": "搞笑", "reason": "赌注揭晓后的反应最强",
+                        "overlays": {"comment": {"time": 35.0, "text": "wow", "kind": "comment"},
+                                     "evaluation": evaluation}}}
+    win = Win(cfg, db)
+    win._auto_video = video
+    win._save_ai_result(payload, json.dumps(payload, ensure_ascii=False))
+
+    vid = db_repo.find_video(db, video)["id"]
+    row = db_repo.get_ai_result(db, vid)
+    assert int(row["validated"]) == 1 and row["validation_error"] is None
+    assert int(row["candidate_count"]) == 1 and float(row["winner_score"]) == 92.0
+    clips = db_repo.get_clips(db, vid)
+    assert len(clips) == 1, clips
+    clip = clips[0]
+    assert clip["evaluation"] == evaluation, "中文评价必须原样落库，不许变 NULL"
+    assert clip["reason"] == "赌注揭晓后的反应最强" and clip["clip_type"] == "搞笑"
+    assert float(clip["start_time"]) == 31.89 and float(clip["end_time"]) == 39.99
+    db.close()
+
+
 # ------------------------------------------------------------------ 直接跑
 TESTS = (
     test_orphan_with_ai_result_renders_without_ai,
@@ -482,6 +531,8 @@ TESTS = (
     test_lock_unavailable_degrades,
     test_recovery_runs_even_when_auto_resume_off,
     test_close_releases_current_task,
+    test_error_reply_is_not_marked_validated,
+    test_overlay_evaluation_lands_in_clips,
 )
 
 

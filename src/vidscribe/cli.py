@@ -406,6 +406,41 @@ def _db_report_stats(stats: dict[str, Any], cache: dict[str, Any]) -> None:
                 "上面的「重复跑过」才是确凿的未命中次数")
 
 
+def _db_report_queue(cfg: Config, db: Any) -> None:
+    """自动剪辑总览。和 GUI 那八格是同一个数：同一个函数、同一个目录、同一个 done_key。
+
+    命令行自己不做任何加减：范围来自 `videos_under(AI_输入目录)`，分桶来自
+    `repo.video_queue_statistics`，这样 `db --stats` 和面板不可能各说一套。
+    """
+    from vidscribe.db import repo  # noqa: PLC0415
+    from vidscribe.db.importer import _bridge_dir  # noqa: PLC0415
+
+    in_dir = _bridge_dir(cfg, "ai_input_dir")
+    if in_dir is None:
+        logger.info("自动剪辑总览：AI_输入目录没配或不在盘上（bridge.ai_input_dir），跳过")
+        return
+    ids = [int(row["id"]) for row in repo.videos_under(db, in_dir)]
+    job = str(cfg.bridge.get("ai_job") or "full")
+    # 收取脚本这一串拿到 JSON 就算完事，其余两串要出成品才算——跟 AI 面板同一行判断
+    done_key = "json" if job == "collect" else "clipped"
+    st = repo.video_queue_statistics(db, ids, mode=job, done_key=done_key)
+    logger.info("自动剪辑总览（%s，干的是 %s）", in_dir, job)
+    logger.info("  总视频 %d / 已获取 JSON %d（横切指标，和下面的桶会重叠）",
+                st["total"], st["json"])
+    logger.info("  已完成 %d / 剪辑中 %d / 等待 AI %d / 待剪辑 %d / 失败 %d / 已取消 %d / "
+                "未获取 JSON %d",
+                st["done"], st["rendering"], st["waiting_ai"], st["pending_render"],
+                st["failed"], st["cancelled"], st["no_json"])
+    buckets = (st["done"] + st["rendering"] + st["waiting_ai"] + st["pending_render"]
+               + st["failed"] + st["cancelled"] + st["no_json"])
+    if buckets != st["total"]:
+        logger.error("  分桶合计 %d ≠ 总视频 %d（统计口径出问题了）", buckets, st["total"])
+    missing = repo.missing_input_videos(db, in_dir)
+    if missing:
+        logger.info("  另有 %d 个登记过但现在盘上找不着的输入视频（不进上面的分桶）：%s",
+                    len(missing), "，".join(row["file_name"] for row in missing[:5]))
+
+
 def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
     """SQLite 库：建库 / 导入旧缓存 / 对账 / 体检 / 备份恢复 / 瘦身 / 查孤儿。
 
@@ -501,9 +536,7 @@ def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
 
     rows = repo.counts(db)
     logger.info("表内容：%s", "，".join(f"{k} {v}" for k, v in rows.items()))
-    stats = repo.get_statistics(db)
-    logger.info("统计：总任务 %d / 未剪辑 %d / 已获取 JSON %d / 成品 %d",
-                stats["total"], stats["todo"], stats["json"], stats["done"])
+    _db_report_queue(cfg, db)
     return code
 
 
@@ -512,6 +545,8 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
     """按 AI JSON 剪高光：clip.start 起剪，clip.end 冻帧，片尾由 --text-offset 决定。"""
 
     from vidscribe.highlight import default_target, parse_spec, render_highlight, resolve_video  # noqa: PLC0415
+    from vidscribe.highlight import clip_engine  # noqa: PLC0415
+    from vidscribe.video_io import is_complete_video  # noqa: PLC0415
 
     try:  # Windows 控制台默认 GBK，日志里的中文字幕会花屏
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -534,15 +569,22 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
         return 2
 
     try:
-        spec = parse_spec(json.loads(raw))
-        spec = spec.shifted(args.start_offset, args.end_offset, args.text_offset)
+        payload = json.loads(raw)
     except json.JSONDecodeError as exc:
         logger.error("JSON 解析失败: %s", exc)
         return 2
+    try:
+        spec = parse_spec(payload)          # 先解一遍：既校验 JSON，也用来定位源视频
     except ValueError as exc:
-        logger.error("JSON 内容不合规: %s", exc)
-        return 2
-
+        # 多条写法（clips: [...]）走引擎时，用第一条来定位源视频；单条写法照旧报错
+        alt = None if args.no_engine else clip_engine.first_clip_payload(payload)
+        try:
+            spec = parse_spec(alt) if alt else None
+        except ValueError:
+            spec = None
+        if spec is None:
+            logger.error("JSON 内容不合规: %s", exc)
+            return 2
 
     fallback = None
     if args.video:
@@ -561,20 +603,95 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
     else:
         target = default_target(_export_dir(cfg, video), video)
 
-    try:
-        result = render_highlight(video, spec, target, on_log=lambda line: print(line, flush=True))
-    except Exception as exc:
-        logger.error("剪辑失败: %s", exc)
-        logger.debug(traceback.format_exc())
-        return 1
-    write_json(target.with_suffix(".json"),
-               {"spec": spec.raw,
-                "offsets": {"start": args.start_offset, "end": args.end_offset,
-                            "text": args.text_offset},
-                "result": result})
+    # ---- 剪辑引擎：用逐词时间戳把 AI 的粗区间修成语义边界（--no-engine 可关掉）----
+    jobs: list[tuple[Any, Path]] = []
+    if args.no_engine:
+        try:
+            jobs.append((spec.shifted(args.start_offset, args.end_offset, args.text_offset),
+                         target))
+        except ValueError as exc:
+            logger.error("加减秒数不合规: %s", exc)
+            return 2
+    else:
+        result = _clip_plans(cfg, video, payload, args.max_seconds)
+        for line in clip_engine.describe_result(result):
+            print(line, flush=True)
+        if not result.plans:
+            logger.error("剪辑引擎没给出任何可剪片段，不启动渲染")
+            return 2
+        if args.dry_run:
+            logger.info("dry-run：只算不剪，已跳过渲染")
+            return 0
+        for index, plan in enumerate(result.plans, start=1):
+            try:
+                one = parse_spec(clip_engine.payload_for(plan))
+                one = one.shifted(args.start_offset, args.end_offset, args.text_offset)
+            except ValueError as exc:
+                logger.error("第 %d 段修正后的区间不能渲染: %s", index, exc)
+                return 2
+            jobs.append((one, _numbered_target(target, index)))
 
-    logger.info("高光片段已生成: %s", target)
+    for index, (job, out_path) in enumerate(jobs, start=1):
+        print(f"[剪辑引擎] 开始渲染第 {index}/{len(jobs)} 段 -> {out_path.name}", flush=True)
+        try:
+            result_info = render_highlight(video, job, out_path,
+                                           on_log=lambda line: print(line, flush=True))
+        except Exception as exc:
+            logger.error("剪辑失败: %s", exc)
+            logger.debug(traceback.format_exc())
+            return 1
+        if not is_complete_video(out_path):     # 和登记闸门同一个判断（Batch 4）
+            logger.error("成片封装不完整，不当成成品: %s", out_path)
+            return 1
+        print("[剪辑引擎] 成片验证通过", flush=True)
+        write_json(out_path.with_suffix(".json"),
+                   {"spec": job.raw,
+                    "offsets": {"start": args.start_offset, "end": args.end_offset,
+                                "text": args.text_offset},
+                    "result": result_info})
+        logger.info("高光片段已生成: %s", out_path)
     return 0
+
+
+def _numbered_target(target: Path, index: int) -> Path:
+    """多段高光的输出名：第一段用原名，后面的加 _2 / _3，互不覆盖。"""
+    if index <= 1:
+        return target
+    return target.with_name(f"{target.stem}_{index}{target.suffix}")
+
+
+def _clip_plans(cfg: Config, video: Path, payload: Any,
+                max_seconds: float | None) -> Any:
+    """跑剪辑引擎：逐词时间戳从库里取，视频时长现探；取不到就退化成只做合法性校验。"""
+    from vidscribe.highlight import clip_engine  # noqa: PLC0415
+    from vidscribe.video_io import probe_video  # noqa: PLC0415
+
+    segments: tuple[Any, ...] = ()
+    try:
+        from vidscribe.db import open_db, repo  # noqa: PLC0415
+
+        db = open_db(cfg)
+        try:
+            row = repo.find_video(db, video)
+            if row is not None:
+                segments = clip_engine.segments_for_video(db, int(row["id"]))
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
+        logger.warning("取不到逐词时间戳（%s），本次不修正边界", exc)
+    if not segments:
+        logger.warning("库里没有这个视频的逐词时间戳，AI 区间将原样使用（只受 15 秒上限约束）")
+    else:
+        logger.info("逐词时间戳：%d 句", len(segments))
+    duration: float | None = None
+    try:
+        duration = float(probe_video(video).duration) or None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("探不到视频时长（%s），不按时长收尾", exc)
+    return clip_engine.plan_clips(payload, segments, video_duration=duration,
+                                  max_seconds=max_seconds or clip_engine.MAX_SECONDS,
+                                  source_video=str(video))
+
 
 
 def _export_dir(cfg: Config, video: Path) -> Path:
@@ -852,6 +969,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="冻帧点 = clip.end + 本值，秒；正数晚一点冻结")
     p_hl.add_argument("--text-offset", type=float, default=0.0,
                       help="冻帧+字幕这段的时长，秒；0 只留一帧，不能为负")
+    p_hl.add_argument("--dry-run", action="store_true",
+                      help="只跑剪辑引擎算区间并打印中文报告，不渲染、不写文件")
+    p_hl.add_argument("--no-engine", action="store_true",
+                      help="不修正边界，clip.start / clip.end 原样照剪（老行为）")
+    p_hl.add_argument("--max-seconds", type=float, default=None,
+                      help="普通片段时长上限，秒；默认 15，收尾片段不受限")
+
 
     p_hl.set_defaults(func=cmd_highlight)
 

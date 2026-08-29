@@ -14,6 +14,22 @@
 10. 提示词指纹：dispatch 时才记，内容变了 hash 就变，任务与结果两侧能关联
 11. P1-2：开机自动恢复必须先跟磁盘对账，避免把"已经剪好但没登记"的任务白剪一遍
 
+Batch 7 追加（状态机拆分：`waiting` = 等 AI，`processing` = 正在渲染）：
+  T29 claim：pending -> uploading
+  T30 uploading -> waiting（completed 不许被盖回去）
+  T31 waiting/uploading -> processing；pending 与已结束状态一律不许倒退进来
+  T32 processing -> completed
+  T33 AI JSON 解不开 -> failed/pending，绝不进 processing（含生产代码闸门顺序）
+  T34 AI JSON 抠不出片段 -> failed/pending，绝不进 processing
+  T35 waiting 能刷心跳
+  T36 processing 能刷心跳
+  T37 waiting 孤儿 -> pending
+  T38 processing 孤儿 -> pending
+  T39 uploading 孤儿 -> pending
+  T40 孤儿回收不碰本进程正在跑的任务
+  T41 一堆历史任务不重复影响视频统计
+
+
 测试只用临时目录里的临时库，**绝不碰项目真实数据库**。
 可以直接 `python tests/test_task_lifecycle.py`，也可以 `pytest tests/test_task_lifecycle.py`。
 """
@@ -172,7 +188,7 @@ def test_claim_is_atomic(tmp_path: Path) -> None:
     assert len(grabbed) == 12, "12 条任务应该全被领走：%d" % len(grabbed)
     assert len(set(grabbed)) == 12, "同一条任务被领了两次"
     counts = db_repo.queue_counts(db, mode="mw")
-    assert counts["pending"] == 0 and counts["processing"] == 12, counts
+    assert counts["pending"] == 0 and counts["uploading"] == 12, counts
     db.close()
 
 
@@ -182,7 +198,7 @@ def test_heartbeat_and_recovery(tmp_path: Path) -> None:
     vid = db_repo.upsert_video(db, fake_video(cfg, "hb.mp4"))
     tid, _ = db_repo.enqueue_ai_task(db, vid, mode="full")
     claimed = db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
-    assert claimed is not None and claimed["status"] == "processing"
+    assert claimed is not None and claimed["status"] == "uploading"
 
     assert db_repo.touch_ai_task(db, tid) is True
     assert db_repo.recover_stale_ai_tasks(db, 30.0) == 0, "心跳新鲜的不该被捞回"
@@ -400,7 +416,8 @@ def test_resume_reconciles_before_recovery(tmp_path: Path) -> None:
     video = fake_video(cfg, "crashed.mp4")
     vid = db_repo.upsert_video(db, video)
     tid, _ = db_repo.enqueue_ai_task(db, vid, mode="full")
-    db_repo.claim_next_ai_task(db, mode="full", worker_id="gui-dead")  # 上次卡在 processing
+    # 显式落 processing：模拟"上次卡在渲染那一步"（领取本身只落 uploading）
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="gui-dead", status="processing")
     assert db_repo.get_ai_task(db, tid)["status"] == "processing"
 
     product = Path(str(cfg.bridge["ai_output_dir"])) / (video.stem + "_高光时刻.mp4")
@@ -419,6 +436,278 @@ def test_resume_reconciles_before_recovery(tmp_path: Path) -> None:
     db.close()
 
 
+# ============================ Batch 7：状态机拆分（等 AI ≠ 在剪） ============================
+def _task(cfg, db, name: str, mode: str = "full") -> tuple[int, int]:
+    """一个视频 + 一条 pending 任务。返回 (video_id, task_id)。"""
+    vid = db_repo.upsert_video(db, fake_video(cfg, name))
+    task_id, _ = db_repo.enqueue_ai_task(db, vid, mode=mode, max_attempts=1)
+    return vid, task_id
+
+
+def _status(db, task_id: int) -> str:
+    return str(db_repo.get_ai_task(db, task_id)["status"])
+
+
+# ------------------------------------------------------------------ T29
+def test_claim_moves_pending_to_uploading(tmp_path: Path) -> None:
+    cfg, db = make_project(tmp_path)
+    _vid, task_id = _task(cfg, db, "t29.mp4")
+    assert _status(db, task_id) == "pending"
+
+    claimed = db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    assert claimed is not None and int(claimed["id"]) == task_id
+    row = db_repo.get_ai_task(db, task_id)
+    assert row["status"] == "uploading", "领到手是「正在提交给 AI」，不是「正在渲染」"
+    assert row["worker_id"] == "w1"
+    assert row["started_at"] and row["heartbeat_at"] and row["finished_at"] is None
+    assert db_repo.claim_next_ai_task(db, mode="full", worker_id="w2") is None, "不许被领第二次"
+    db.close()
+
+
+# ------------------------------------------------------------------ T30
+def test_uploading_moves_to_waiting(tmp_path: Path) -> None:
+    cfg, db = make_project(tmp_path)
+    _vid, task_id = _task(cfg, db, "t30.mp4")
+    assert db_repo.mark_ai_task_waiting(db, task_id) is False, "还没领就不该能标「等 AI」"
+
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    assert db_repo.mark_ai_task_waiting(db, task_id) is True
+    assert _status(db, task_id) == "waiting"
+    assert db_repo.mark_ai_task_waiting(db, task_id) is False, "重复标不该再改一次"
+    assert _status(db, task_id) == "waiting"
+
+    # completed 绝不能被 waiting 盖回去
+    db_repo.complete_ai_task(db, task_id)
+    assert db_repo.mark_ai_task_waiting(db, task_id) is False
+    assert _status(db, task_id) == "completed"
+    db.close()
+
+
+# ------------------------------------------------------------------ T31
+def test_waiting_moves_to_rendering(tmp_path: Path) -> None:
+    cfg, db = make_project(tmp_path)
+    _vid, task_id = _task(cfg, db, "t31.mp4")
+    assert db_repo.mark_ai_task_rendering(db, task_id) is False, "pending 不许直接跳去渲染"
+
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    db_repo.mark_ai_task_waiting(db, task_id)
+    assert db_repo.mark_ai_task_rendering(db, task_id) is True
+    assert _status(db, task_id) == "processing", "processing 从现在起只表示「正在渲染」"
+
+    # 脚本剪辑那一串不问 AI：uploading 也可以直接进渲染
+    _vid2, script_id = _task(cfg, db, "t31_script.mp4", mode="script")
+    db_repo.claim_next_ai_task(db, mode="script", worker_id="w1")
+    assert _status(db, script_id) == "uploading"
+    assert db_repo.mark_ai_task_rendering(db, script_id) is True
+    assert _status(db, script_id) == "processing"
+
+    # 已经结束的一律不许被拉回 processing
+    for name, killer in (("done", db_repo.complete_ai_task),
+                         ("cancel", db_repo.cancel_ai_task)):
+        _v, tid = _task(cfg, db, f"t31_{name}.mp4")
+        db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+        killer(db, tid)
+        before = _status(db, tid)
+        assert db_repo.mark_ai_task_rendering(db, tid) is False, f"{before} 不许倒退成 processing"
+        assert _status(db, tid) == before
+    db.close()
+
+
+# ------------------------------------------------------------------ T32
+def test_rendering_moves_to_completed(tmp_path: Path) -> None:
+    cfg, db = make_project(tmp_path)
+    _vid, task_id = _task(cfg, db, "t32.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    db_repo.mark_ai_task_waiting(db, task_id)
+    db_repo.mark_ai_task_rendering(db, task_id)
+
+    db_repo.complete_ai_task(db, task_id)
+    row = db_repo.get_ai_task(db, task_id)
+    assert row["status"] == "completed" and row["finished_at"]
+    assert row["worker_id"] is None and row["error"] is None
+    assert db_repo.touch_ai_task(db, task_id) is False, "干完的任务不该被心跳弄活"
+    db.close()
+
+
+def _mw_calls(func_name: str) -> list[str]:
+    """main_window 里某个方法按源码顺序调用了哪些名字（只看名字，不执行 GUI）。"""
+    tree = ast.parse(MAIN_WINDOW.read_text(encoding="utf-8"))
+    target = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef) and n.name == func_name), None)
+    assert target is not None, f"main_window 里找不到 {func_name}"
+    out: list[tuple[int, int, str]] = []
+    for node in ast.walk(target):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+            out.append((node.lineno, node.col_offset, name))
+    # ast.walk 是广度优先，不是源码顺序；要判断"谁在谁前面"必须自己按位置排
+    return [name for _line, _col, name in sorted(out)]
+
+
+# ------------------------------------------------------------------ T33
+def test_broken_ai_json_never_reaches_rendering(tmp_path: Path) -> None:
+    """AI 回来的东西解不开：这条只能失败/退回，绝不能变成「剪辑中」。"""
+    cfg, db = make_project(tmp_path)
+    vid, task_id = _task(cfg, db, "t33.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    db_repo.mark_ai_task_waiting(db, task_id)
+    db_repo.save_ai_result(db, vid, task_id=task_id, raw_response="AI 只回了一句话")
+    with db.tx() as conn:      # 塞一段解不开的文本，绕过 _dumps
+        conn.execute("UPDATE ai_results SET json_data = ? WHERE video_id = ?",
+                     ("{不是 JSON", vid))
+
+    assert db_repo.reusable_json_videos(db, [vid]) == set(), "解不开的 JSON 不算可复用"
+    assert db_repo.fail_or_requeue_ai_task(db, task_id, "没拿到可用 JSON") == "failed"
+    assert _status(db, task_id) == "failed"
+    assert db_repo.mark_ai_task_rendering(db, task_id) is False, "failed 不许被拉进 processing"
+
+    # 生产代码里这道闸门必须排在「标记剪辑中」和「起渲染」之前
+    calls = _mw_calls("on_bridge_result")
+    assert "clips_from_payload" in calls, "on_bridge_result 必须先看抠不抠得出片段"
+    assert calls.index("clips_from_payload") < calls.index("_mark_auto_rendering")
+    assert calls.index("clips_from_payload") < calls.index("run_highlight")
+    db.close()
+
+
+# ------------------------------------------------------------------ T34
+def test_json_without_clip_never_reaches_rendering(tmp_path: Path) -> None:
+    """JSON 合法但抠不出片段：同样不许进「剪辑中」。"""
+    cfg, db = make_project(tmp_path)
+    vid, task_id = _task(cfg, db, "t34.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    db_repo.mark_ai_task_waiting(db, task_id)
+    db_repo.save_ai_result(db, vid, task_id=task_id, json_data={"note": "没有 clip"},
+                           candidate_count=9, validated=True)
+
+    row = db_repo.ai_result_for_task(db, task_id)
+    assert row is not None and db_repo.clips_from_payload(json.loads(row["json_data"])) == []
+    assert db_repo.reusable_json_videos(db, [vid]) == set(), "validated=True 也不算数"
+
+    final = db_repo.fail_or_requeue_ai_task(db, task_id, "AI JSON 里没有可用片段")
+    assert final in ("failed", "pending"), final
+    assert _status(db, task_id) != "processing"
+    db.close()
+
+
+# ------------------------------------------------------------------ T35 / T36
+def _heartbeat_survives(tmp_path: Path, state: str) -> None:
+    cfg, db = make_project(tmp_path)
+    _vid, task_id = _task(cfg, db, f"hb_{state}.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    db_repo.mark_ai_task_waiting(db, task_id)
+    if state == "processing":
+        db_repo.mark_ai_task_rendering(db, task_id)
+    assert _status(db, task_id) == state
+
+    with db.tx() as conn:      # 先把心跳压到很久以前
+        conn.execute("UPDATE ai_tasks SET heartbeat_at = '2000-01-01T00:00:00' WHERE id = ?",
+                     (task_id,))
+    assert db_repo.touch_ai_task(db, task_id) is True, f"{state} 必须能刷心跳"
+    fresh = db_repo.get_ai_task(db, task_id)
+    assert str(fresh["heartbeat_at"]) > "2000-01-01T00:00:00"
+    assert fresh["status"] == state, "刷心跳不许顺手改状态"
+    assert db_repo.recover_stale_ai_tasks(db, 30.0) == 0, "心跳新鲜的不该被捞回"
+    db.close()
+
+
+def test_waiting_heartbeat_keeps_task_alive(tmp_path: Path) -> None:
+    _heartbeat_survives(tmp_path, "waiting")
+
+
+def test_rendering_heartbeat_keeps_task_alive(tmp_path: Path) -> None:
+    _heartbeat_survives(tmp_path, "processing")
+
+
+# ------------------------------------------------------------------ T37 / T38 / T39
+def _orphan_goes_back(tmp_path: Path, state: str) -> None:
+    cfg, db = make_project(tmp_path)
+    _vid, task_id = _task(cfg, db, f"orphan_{state}.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="gui-dead")
+    if state in ("waiting", "processing"):
+        db_repo.mark_ai_task_waiting(db, task_id)
+    if state == "processing":
+        db_repo.mark_ai_task_rendering(db, task_id)
+    assert _status(db, task_id) == state
+    with db.tx() as conn:      # 上次进程被强杀：心跳停在过去
+        conn.execute("UPDATE ai_tasks SET heartbeat_at = '2000-01-01T00:00:00' WHERE id = ?",
+                     (task_id,))
+
+    assert db_repo.recover_orphaned_ai_tasks(db, "2026-01-01T00:00:00") == 1, state
+    row = db_repo.get_ai_task(db, task_id)
+    assert row["status"] == "pending", f"{state} 的孤儿必须退回 pending"
+    assert int(row["retry_count"] or 0) == 0, "回收不算失败"
+    assert row["worker_id"] is None and row["finished_at"] is None
+    # 超时那条路（拿不到锁时走的）对三个状态一样管用
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="gui-dead")
+    with db.tx() as conn:
+        conn.execute("UPDATE ai_tasks SET status = ?, heartbeat_at = '2000-01-01T00:00:00' "
+                     "WHERE id = ?", (state, task_id))
+    assert db_repo.recover_stale_ai_tasks(db, 30.0) == 1, state
+    assert _status(db, task_id) == "pending"
+    db.close()
+
+
+def test_waiting_orphan_goes_back_to_pending(tmp_path: Path) -> None:
+    _orphan_goes_back(tmp_path, "waiting")
+
+
+def test_rendering_orphan_goes_back_to_pending(tmp_path: Path) -> None:
+    _orphan_goes_back(tmp_path, "processing")
+
+
+def test_uploading_orphan_goes_back_to_pending(tmp_path: Path) -> None:
+    _orphan_goes_back(tmp_path, "uploading")
+
+
+# ------------------------------------------------------------------ T40
+def test_recovery_leaves_this_process_task_alone(tmp_path: Path) -> None:
+    """拆出 waiting 之后，孤儿回收照旧只动"本次进程启动之前"的任务。"""
+    cfg, db = make_project(tmp_path)
+    _old_vid, old_id = _task(cfg, db, "t40_old.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="gui-dead")
+    db_repo.mark_ai_task_waiting(db, old_id)
+    with db.tx() as conn:
+        conn.execute("UPDATE ai_tasks SET heartbeat_at = '2000-01-01T00:00:00' WHERE id = ?",
+                     (old_id,))
+
+    started = "2025-01-01T00:00:00"      # 假装本次进程是这时候起来的
+    _new_vid, new_id = _task(cfg, db, "t40_new.mp4")
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="gui-live")   # 心跳＝现在
+    db_repo.mark_ai_task_waiting(db, new_id)
+
+    assert db_repo.recover_orphaned_ai_tasks(db, started) == 1, "只该退回上次留下的那条"
+    assert _status(db, old_id) == "pending"
+    assert _status(db, new_id) == "waiting", "本进程正在等 AI 的活不许被抢走"
+    db.close()
+
+
+# ------------------------------------------------------------------ T41
+def test_history_tasks_do_not_double_count(tmp_path: Path) -> None:
+    """同一个视频攒了一堆历史任务：总览里它仍然只算一个视频、只落一个桶。"""
+    cfg, db = make_project(tmp_path)
+    vid = db_repo.upsert_video(db, fake_video(cfg, "t41.mp4"))
+    for reason in ("failed", "cancelled"):
+        task_id, _ = db_repo.enqueue_ai_task(db, vid, mode="full", max_attempts=1)
+        db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+        if reason == "failed":
+            db_repo.fail_or_requeue_ai_task(db, task_id, "boom")
+        else:
+            db_repo.cancel_ai_task(db, task_id, "人工停的")
+    live, _ = db_repo.enqueue_ai_task(db, vid, mode="full", max_attempts=1)
+    db_repo.claim_next_ai_task(db, mode="full", worker_id="w1")
+    db_repo.mark_ai_task_waiting(db, live)
+
+    st = db_repo.video_queue_statistics(db, [vid], mode="full")
+    assert st["total"] == 1
+    assert st["waiting_ai"] == 1, st
+    buckets = ("no_json", "pending_render", "waiting_ai", "rendering",
+               "done", "failed", "cancelled")
+    assert sum(st[key] for key in buckets) == 1, f"只能落一个桶：{st}"
+    assert st["failed"] == 0 and st["cancelled"] == 0, "历史任务不许再各算一次"
+    db.close()
+
+
 # ------------------------------------------------------------------ 直接跑
 TESTS = (
     test_enqueue_is_idempotent,
@@ -432,6 +721,19 @@ TESTS = (
     test_reconcile_is_idempotent,
     test_prompt_fingerprint,
     test_resume_reconciles_before_recovery,
+    test_claim_moves_pending_to_uploading,
+    test_uploading_moves_to_waiting,
+    test_waiting_moves_to_rendering,
+    test_rendering_moves_to_completed,
+    test_broken_ai_json_never_reaches_rendering,
+    test_json_without_clip_never_reaches_rendering,
+    test_waiting_heartbeat_keeps_task_alive,
+    test_rendering_heartbeat_keeps_task_alive,
+    test_waiting_orphan_goes_back_to_pending,
+    test_rendering_orphan_goes_back_to_pending,
+    test_uploading_orphan_goes_back_to_pending,
+    test_recovery_leaves_this_process_task_alone,
+    test_history_tasks_do_not_double_count,
 )
 
 

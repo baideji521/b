@@ -494,15 +494,30 @@ def task_with_video(db: Database, task_id: int) -> sqlite3.Row | None:
         (task_id,))
 
 
+# 「等 AI」和「正在剪」是从 TASK_ACTIVE 里切出来的两段，不新增状态、不动 schema：
+#   uploading  正在准备/提交给 AI      -> 界面上的「等待 AI」
+#   waiting    已提交，等 AI 回话       -> 界面上的「等待 AI」
+#   processing AI JSON 到手，正在渲染   -> 界面上的「剪辑中」
+TASK_WAITING_AI = ("uploading", "waiting")
+TASK_RENDERING = ("processing",)
+
+
 def claim_next_ai_task(db: Database, *, mode: str | None = None,
+
                        task_type: str = AUTO_TASK_TYPE, worker_id: str | None = None,
-                       status: str = "processing") -> sqlite3.Row | None:
+                       status: str = "uploading") -> sqlite3.Row | None:
     """从队列里领一条任务：挑 pending 里优先级最高（数字最小）、最早的那条占下来。
 
     整个"挑 + 占"在一个 BEGIN IMMEDIATE 事务里，`UPDATE ... WHERE status='pending'`
     的 rowcount 决定谁抢到——两个 worker 同时来，只有一个能把某条从 pending 改走，
     另一个 rowcount=0 就往下一条试。不会出现同一条任务被领两次。
+
+    领到手先落 `uploading`（= 已经归我、正在准备/提交给 AI）。往后由
+    `mark_ai_task_waiting`（提交完，等 AI 回话）和 `mark_ai_task_rendering`
+    （JSON 到手，真正开剪）推进，所以 `processing` 只表示"正在渲染"。
+    调用方要模拟别的阶段可以显式传 `status`。
     """
+
     sql = "SELECT id FROM ai_tasks WHERE status = 'pending' AND task_type = ?"
     params: list[Any] = [task_type]
     if mode:
@@ -529,7 +544,49 @@ def claim_next_ai_task(db: Database, *, mode: str | None = None,
     return task_with_video(db, claimed)
 
 
+def mark_ai_task_waiting(db: Database, task_id: int) -> bool:
+    """提交给 AI 之后：uploading -> waiting（东西发出去了，现在等 AI 回话）。
+
+    只认 uploading：completed / failed / cancelled 碰不着，被孤儿恢复退回 pending 的
+    也碰不着（状态不能倒退回 active）。已经在 waiting 就返回 False，重复调用无副作用。
+    顺手刷心跳——等 AI 可能很久，这条时间戳是恢复逻辑判活的唯一依据。
+    """
+    stamp = now()
+    with db.tx() as conn:
+        cur = conn.execute(
+            """
+            UPDATE ai_tasks SET status = 'waiting', heartbeat_at = ?, updated_at = ?
+             WHERE id = ? AND status = 'uploading'
+            """,
+            (stamp, stamp, task_id))
+        return bool(cur.rowcount)
+
+
+def mark_ai_task_rendering(db: Database, task_id: int) -> bool:
+    """真正开剪之前：uploading / waiting -> processing（`processing` = 正在渲染）。
+
+    调用方必须**先**确认手上这份 AI JSON 能直接开剪（解得开、是 dict、抠得出片段），
+    否则不许调这里——`processing` 的含义就是"素材齐了，正在出片"。
+    脚本剪辑那一串不问 AI，领到手（uploading）就直接进渲染，所以 uploading 也算合法起点。
+
+    `processing` 自己也在允许的旧状态里：历史遗留的 processing 记录（拆分之前写下的，
+    分不清当时是在等 AI 还是在渲染）继续按 processing 处理，重复调用也不会失败。
+    pending / completed / failed / cancelled 一概不动：状态只能往前走。
+    """
+    marks = ", ".join("?" for _ in (*TASK_WAITING_AI, *TASK_RENDERING))
+    stamp = now()
+    with db.tx() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE ai_tasks SET status = 'processing', heartbeat_at = ?, updated_at = ?
+             WHERE id = ? AND status IN ({marks})
+            """,
+            (stamp, stamp, task_id, *TASK_WAITING_AI, *TASK_RENDERING))
+        return bool(cur.rowcount)
+
+
 def fail_or_requeue_ai_task(db: Database, task_id: int, error: str) -> str:
+
     """任务失败：尝试次数 +1，还没到 max_attempts 就退回 pending，到了就定格 failed。
 
     默认 max_attempts=1（跟改造前一样：失败就跳过，不自动重跑）。
@@ -844,6 +901,9 @@ def clips_from_payload(payload: Any) -> list[dict[str, Any]]:
     except (TypeError, ValueError):
         duration = round(end - start, 3)
     evaluation = clip.get("evaluation") or payload.get("evaluation")
+    if not evaluation and isinstance(clip.get("overlays"), dict):
+        # 现行提示词把中文评价放在 clip.overlays.evaluation 里，别漏掉
+        evaluation = clip["overlays"].get("evaluation")
     return [{
         "start": start,
         "end": end,
@@ -952,12 +1012,16 @@ def get_artifacts(db: Database, video_id: int, kind: str | None = None) -> list[
 
 
 def artifact_path(db: Database, video_id: int, kind: str) -> Path | None:
-    """某种产物的路径（只认还在盘上的那条）。没有就 None。"""
+    """某种产物的路径（只认还在盘上的那条）。没有就 None。
+
+    同一秒内登记的两条 updated_at 会一模一样（now() 只到秒），只按它排序时选谁全看
+    SQLite 心情。补一个 id DESC 兜底：同时间就认后登记的那条，结果才是确定的。
+    """
     row = db.one(
         """
         SELECT path FROM artifacts
          WHERE video_id = ? AND type = ? AND exists_on_disk = 1 AND COALESCE(size, 0) > 0
-         ORDER BY updated_at DESC LIMIT 1
+         ORDER BY updated_at DESC, id DESC LIMIT 1
         """, (video_id, kind))
     return Path(row["path"]) if row else None
 
@@ -967,19 +1031,38 @@ def has_artifact(db: Database, video_id: int, kind: str) -> bool:
 
 
 # ===================================================================== 统计
-def videos_under(db: Database, folder: str | Path | None) -> list[sqlite3.Row]:
-    """某个目录（含子目录）里、还在盘上的视频。界面列任务表就用这个，不去翻目录。"""
-    if folder is None:
-        return []
+def _folder_like(folder: str | Path) -> str:
+    """把目录变成 LIKE 用的前缀。带上分隔符，免得 AI_输入 顺手把 AI_输入_old 也捞进来。"""
     prefix = str(Path(folder).resolve())
     if not prefix.endswith(os.sep):
         prefix += os.sep
     # 文件名里可能真带 % 或 _，得转义，否则 LIKE 会把它们当通配符
-    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def videos_under(db: Database, folder: str | Path | None) -> list[sqlite3.Row]:
+    """某个目录（含子目录）里、还在盘上的视频。界面列任务表就用这个，不去翻目录。"""
+    if folder is None:
+        return []
     return db.all(
         "SELECT * FROM videos WHERE exists_on_disk = 1 AND file_path LIKE ? ESCAPE '\\' "
         "ORDER BY file_name",
-        (escaped + "%",))
+        (_folder_like(folder),))
+
+
+def missing_input_videos(db: Database, folder: str | Path | None) -> list[sqlite3.Row]:
+    """登记过、但现在盘上找不着的输入视频（同一个目录口径）。
+
+    和 `videos_under` 正好互补：那边是 exists_on_disk = 1，这边是 0。文件被挪走或删掉时，
+    视频不会从统计总数里凭空少掉——它只是不在 `videos_under` 的范围里了，这里能查出来。
+    """
+    if folder is None:
+        return []
+    return db.all(
+        "SELECT * FROM videos WHERE exists_on_disk = 0 AND file_path LIKE ? ESCAPE '\\' "
+        "ORDER BY file_name",
+        (_folder_like(folder),))
+
 
 
 def states_for_videos(db: Database, video_ids: list[int],
@@ -1036,11 +1119,14 @@ def states_for_videos(db: Database, video_ids: list[int],
     return out
 
 
-
 def statistics_for(db: Database, video_ids: list[int], *,
                    done_key: str = "clipped",
                    sig: dict[str, Any] | None = None) -> dict[str, int]:
-    """AI 面板四格统计：总任务 / 未剪辑（未完成）/ 已获取 JSON / 成品。
+    """【遗留】旧四格统计：总任务 / 未剪辑（未完成）/ 已获取 JSON / 成品。
+
+    自动剪辑总览已经统一走 `video_queue_statistics`（按视频互斥分桶），这里的 "todo"
+    是 `总数 - 完成` 的减法口径，一个视频可能同时算进好几个含义，不要再用于新的展示。
+    留着是因为口径和 `states_for_videos` 绑在一起，历史行为还有测试在盯。
 
     `done_key` 决定"算完成"的口径：剪辑成片和脚本剪辑看成品（clipped），
     收取脚本只要拿到 JSON 就算完成（json）。
@@ -1052,6 +1138,133 @@ def statistics_for(db: Database, video_ids: list[int], *,
         "todo": len(video_ids) - done,
         "json": sum(1 for s in states.values() if s["json"]),
         "done": done,
+    }
+
+
+def artifact_videos(db: Database, video_ids: list[int], kind: str) -> set[int]:
+    """这些视频里，哪些有一份**还在盘上且非空**的该类产物。一条 SQL，按视频去重。
+
+    口径跟 `artifact_path` / `states_for_videos` 完全一致（exists_on_disk = 1 且 size > 0），
+    所以同一个视频有好几条历史 artifacts（改过名、换过输出目录）也只算一次。
+    """
+    if not video_ids:
+        return set()
+    marks = ", ".join("?" for _ in video_ids)
+    return {int(row["video_id"]) for row in db.all(
+        f"""
+        SELECT DISTINCT video_id FROM artifacts
+         WHERE video_id IN ({marks}) AND type = ?
+           AND exists_on_disk = 1 AND COALESCE(size, 0) > 0
+        """, [*video_ids, kind])}
+
+
+def reusable_json_videos(db: Database, video_ids: list[int]) -> set[int]:
+    """这些视频里，哪些手上有一份**能直接开剪**的 AI JSON。按视频去重。
+
+    判据跟崩溃续跑（`main_window._resume_existing_ai_json`）逐条一致：
+    json_data 解得开 → 是 dict → `clips_from_payload` 至少抠出一个片段。
+    故意不看 `validated` / `candidate_count`：那两个是写入当时的自我声明，
+    真正决定「这份结果能不能拿去剪」的是 json_data 本身，两边必须同一个口径，
+    否则界面说「已获取 JSON」而队列又去重新问一遍 AI。
+    """
+    if not video_ids:
+        return set()
+    marks = ", ".join("?" for _ in video_ids)
+    ok: set[int] = set()
+    for row in db.all(
+            f"""
+            SELECT video_id, json_data FROM ai_results
+             WHERE video_id IN ({marks}) AND json_data IS NOT NULL AND json_data <> ''
+             ORDER BY id DESC
+            """, list(video_ids)):
+        vid = int(row["video_id"])
+        if vid in ok:
+            continue
+        try:
+            parsed = json.loads(str(row["json_data"]))
+        except (TypeError, ValueError):
+            continue  # 存着的是坏 JSON，跟没有一样
+        if isinstance(parsed, dict) and clips_from_payload(parsed):
+            ok.add(vid)
+    return ok
+
+
+def task_videos(db: Database, video_ids: list[int], states: tuple[str, ...], *,
+                mode: str | None = None, task_type: str = AUTO_TASK_TYPE) -> set[int]:
+    """这些视频里，哪些有处于给定状态的任务。按视频去重（一个视频有几条历史任务都只算一次）。"""
+    if not video_ids or not states:
+        return set()
+    vmarks = ", ".join("?" for _ in video_ids)
+    smarks = ", ".join("?" for _ in states)
+    sql = (f"SELECT DISTINCT video_id FROM ai_tasks WHERE task_type = ? "
+           f"AND video_id IN ({vmarks}) AND status IN ({smarks})")
+    params: list[Any] = [task_type, *video_ids, *states]
+    if mode:
+        sql += " AND mode = ?"
+        params.append(mode)
+    return {int(row["video_id"]) for row in db.all(sql, params)}
+
+
+def video_queue_statistics(db: Database, video_ids: list[int], *,
+                           mode: str | None = None, done_key: str = "clipped",
+                           task_type: str = AUTO_TASK_TYPE) -> dict[str, int]:
+    """自动剪辑总览：**按视频**统计，每个视频只落进一个桶。
+
+    输入就是界面那份视频集合（`videos_under` 给的，已经限定"还在盘上 + 在 AI_输入目录里"），
+    所有数字都从这同一个集合推导，不会各自用不同范围。
+
+    六组集合运算，不写巨型 JOIN：
+      done       有效成品（done_key='json' 的收取脚本口径下改成"有可复用 JSON"）
+      json_ok    有可复用 AI JSON
+      rendering  有 processing 的任务（JSON 到手，正在出片）
+      waiting_ai 有 uploading / waiting 的任务（正在提交 / 等 AI 回话）
+      failed     有 failed 的任务
+      cancelled  有 cancelled 的任务
+
+    互斥优先级（成品优先，历史任务状态不能盖过实际产物；同一视频两条活任务时取走得更远的）：
+      有成品                 -> done
+      否则在渲染             -> rendering（界面：剪辑中）
+      否则在等 AI            -> waiting_ai（界面：等待 AI）
+      否则有可复用 JSON      -> failed / cancelled / pending_render
+      否则                   -> no_json
+
+    所以 done + rendering + waiting_ai + pending_render + failed + cancelled + no_json
+    == total 恒成立。`json` 是一个横切指标（可能和任何桶重叠），单独给出来方便界面显示。
+    """
+    ids = {int(v) for v in video_ids}
+    ordered = sorted(ids)
+    json_ok = reusable_json_videos(db, ordered) & ids
+    done = (json_ok if done_key == "json"
+            else artifact_videos(db, ordered, "final_video") & ids)
+    # 旧成品还在就算完成，别让重排的任务把它抢走
+    rendering = (task_videos(db, ordered, TASK_RENDERING,
+                             mode=mode, task_type=task_type) & ids) - done
+    waiting_ai = (task_videos(db, ordered, TASK_WAITING_AI, mode=mode, task_type=task_type)
+                  & ids) - done - rendering
+    failed_ids = task_videos(db, ordered, ("failed",), mode=mode, task_type=task_type)
+    cancelled_ids = task_videos(db, ordered, ("cancelled",), mode=mode, task_type=task_type)
+
+    pending_render = failed = cancelled = no_json = 0
+    for vid in ids - done - rendering - waiting_ai:
+        if vid not in json_ok:
+            no_json += 1          # 基础数据都还没到位，历史上失败过也不归到"失败"
+        elif vid in failed_ids:
+            failed += 1
+        elif vid in cancelled_ids:
+            cancelled += 1
+        else:
+            pending_render += 1
+    return {
+        "total": len(ids),
+        "json": len(json_ok),
+        "no_json": no_json,
+        "pending_render": pending_render,
+        "waiting_ai": len(waiting_ai),
+        "rendering": len(rendering),
+
+        "done": len(done),
+        "failed": failed,
+        "cancelled": cancelled,
     }
 
 
@@ -1076,7 +1289,12 @@ def video_state(db: Database, video_id: int, sig: dict[str, Any] | None = None) 
 
 
 def get_statistics(db: Database, video_ids: list[int] | None = None) -> dict[str, int]:
-    """AI 面板那四格：总任务 / 未剪辑 / 已获取 JSON / 成品。一条 SQL 聚合出来。"""
+    """【遗留】整库四格：总任务 / 未剪辑 / 已获取 JSON / 成品。一条 SQL 聚合出来。
+
+    口径是"整库所有视频"，而且 json 只要有 ai_results 行就算（不看能不能开剪），
+    跟自动剪辑总览（`video_queue_statistics`）不是一回事。新的展示一律用后者，
+    这里只服务于"看一眼整库大概多少东西"。
+    """
     scope = ""
     params: list[Any] = []
     if video_ids is not None:
@@ -1094,13 +1312,15 @@ def get_statistics(db: Database, video_ids: list[int] | None = None) -> dict[str
         FROM videos v
         LEFT JOIN (
             SELECT video_id, COUNT(*) AS n FROM artifacts
-             WHERE type = 'final_video' AND exists_on_disk = 1 GROUP BY video_id
+             WHERE type = 'final_video' AND exists_on_disk = 1 AND COALESCE(size, 0) > 0
+             GROUP BY video_id
         ) done ON done.video_id = v.id
         LEFT JOIN (
             SELECT video_id, COUNT(*) AS n FROM (
                 SELECT video_id FROM ai_results
                 UNION ALL
-                SELECT video_id FROM artifacts WHERE type = 'ai_script' AND exists_on_disk = 1
+                SELECT video_id FROM artifacts
+                 WHERE type = 'ai_script' AND exists_on_disk = 1 AND COALESCE(size, 0) > 0
             ) GROUP BY video_id
         ) js ON js.video_id = v.id
         {scope}

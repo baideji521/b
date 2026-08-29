@@ -265,21 +265,36 @@ class AiPanel(QDialog):
         return box
 
     def _build_stats(self) -> QWidget:
-        box = QGroupBox("AI 任务统计")
+        """自动剪辑总览。九个数字互不重叠，每个视频只落进一个桶（见 repo.video_queue_statistics）。"""
+        box = QGroupBox("自动剪辑任务总览")
         grid = QGridLayout(box)
         self._stat_labels: dict[str, QLabel] = {}
-        for col, (key, title) in enumerate((("total", "总任务"), ("todo", "未剪辑"),
-                                           ("json", "已获取 JSON"), ("done", "成品"))):
+        boxes = (("total", "总视频"), ("json", "已获取 JSON"), ("no_json", "未获取 JSON"),
+                 ("pending_render", "待剪辑"), ("waiting_ai", "等待 AI"), ("rendering", "剪辑中"),
+                 ("done", "已完成"), ("failed", "失败"), ("cancelled", "已取消"))
+        tips = {"total": "AI_输入目录里、文件还在盘上的视频",
+                "json": "手上有一份能直接开剪的 AI JSON（解得开、抠得出片段）",
+                "no_json": "还没有可用 AI JSON，也没在跑、也没成品",
+                "pending_render": "AI JSON 已就位、没成品、当前没有在跑的任务",
+                "waiting_ai": "任务在 uploading / waiting：正在提交给 AI，或者已提交在等回话",
+                "rendering": "任务在 processing：JSON 已确认可用，正在渲染成品",
+                "done": "有还在盘上的有效成品",
+                "failed": "有 JSON 但任务记成 failed，且没有成品",
+                "cancelled": "有 JSON 但任务被取消，且没有成品"}
+        for index, (key, title) in enumerate(boxes):
+            line, col = divmod(index, 3)   # 九格排成 3×3：总量 / 在跑 / 结局各占一行
             head = QLabel(title)
             head.setAlignment(Qt.AlignCenter)
+            head.setToolTip(tips[key])
             value = QLabel("0")
             value.setAlignment(Qt.AlignCenter)
+            value.setToolTip(tips[key])
             font = value.font()
-            font.setPointSize(font.pointSize() + 6)
+            font.setPointSize(font.pointSize() + 4)
             font.setBold(True)
             value.setFont(font)
-            grid.addWidget(head, 0, col)
-            grid.addWidget(value, 1, col)
+            grid.addWidget(head, line * 2, col)
+            grid.addWidget(value, line * 2 + 1, col)
             self._stat_labels[key] = value
         return box
 
@@ -444,7 +459,7 @@ class AiPanel(QDialog):
         states_by_id = db_repo.states_for_videos(db, ids)
         # 收取脚本这一串拿到 JSON 就算完事，其余两串要出成品才算
         done_key = "json" if self._job == "collect" else "clipped"
-        stats = db_repo.statistics_for(db, ids, done_key=done_key)
+        stats = db_repo.video_queue_statistics(db, ids, mode=self._job, done_key=done_key)
         self.table.setRowCount(len(videos))
         for row, (video, vid) in enumerate(zip(videos, ids)):
             states = states_by_id.get(vid, {"analysed": False, "txt": False,

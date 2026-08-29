@@ -253,7 +253,7 @@ def test_collect_and_script_untouched(tmp_path: Path) -> None:
     vid, task_id = claimed_task(cfg, db, "collect.mp4", mode="collect")
     db_repo.save_ai_result(db, vid, task_id=task_id, json_data=GOOD_JSON, validated=True)
     counts = db_repo.queue_counts(db, mode="collect")
-    assert counts["processing"] == 1, counts
+    assert counts["active"] == 1, counts
     db.close()
 
 
