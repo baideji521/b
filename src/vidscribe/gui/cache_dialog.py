@@ -32,6 +32,9 @@ from PyQt5.QtWidgets import (
 )
 
 from .. import cache as cache_mod
+from ..db import open_db
+from ..db import repo as db_repo
+from ..db.importer import refresh_from_disk
 
 KIND_TEXT = {"video": "视频缓存", "log": "日志"}
 
@@ -44,6 +47,9 @@ class CacheDialog(QDialog):
         self.cfg = cfg
         self._log = log
         self._items: list[dict[str, Any]] = []
+        self._db_handle = None
+        self._db_failed = False
+        self._db_videos: dict[str, Any] = {}
         self.setWindowTitle("缓存管理")
         self.resize(860, 480)
 
@@ -138,10 +144,59 @@ class CacheDialog(QDialog):
         self.reload()
 
     # --------------------------------------------------------------- 读
+    def _db(self):
+        """数据库句柄。打不开就记一句，「视频」列显示「不清楚」，别让对话框崩。"""
+        if self._db_handle is None and not self._db_failed:
+            try:
+                self._db_handle = open_db(self.cfg)
+            except Exception as exc:  # noqa: BLE001
+                self._db_failed = True
+                if self._log:
+                    self._log(f"[缓存] 数据库打不开，视频在不在只能显示不清楚：{exc}")
+        return self._db_handle
+
+    def _load_db_videos(self) -> None:
+        """打开/刷新时跟磁盘对一次账，然后把 videos 表整张读进内存备查。
+
+        「占多少空间」「多久没动」这两列必须来自磁盘（那是文件本身的属性），
+        「视频」这一列的在不在 / 在不在库则一律来自数据库。
+        """
+        self._db_videos = {}
+        db = self._db()
+        if db is None:
+            return
+        try:
+            refresh_from_disk(self.cfg, db)
+            for row in db_repo.list_videos(db):
+                self._db_videos[str(row["file_path"])] = row
+        except Exception as exc:  # noqa: BLE001
+            if self._log:
+                self._log(f"[缓存] 对账失败，视频状态可能不准：{exc}")
+
+    def _db_row(self, video: Any):
+        """按 state.json 里记的视频路径在库里找那一行。找不到返回 None（显示「不清楚」）。"""
+        if not video:
+            return None
+        row = self._db_videos.get(str(video))
+        if row is not None:
+            return row
+        try:
+            return self._db_videos.get(str(Path(video).resolve()))
+        except OSError:
+            return None
+
     def reload(self) -> None:
         self._loading = True
+        self._load_db_videos()
         self._items = sorted(cache_mod.entries(self.cfg),
                              key=lambda it: it["bytes"], reverse=True)
+        for item in self._items:
+            if item["kind"] != "video":
+                continue
+            row = self._db_row(item.get("video"))
+            if row is not None:
+                item["video_exists"] = bool(row["exists_on_disk"])
+                item["in_library"] = None if row["in_library"] is None else bool(row["in_library"])
         self.table.setRowCount(len(self._items))
         for row, item in enumerate(self._items):
             name = QTableWidgetItem(str(item["name"]))

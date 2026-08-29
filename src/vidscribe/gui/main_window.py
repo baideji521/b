@@ -54,6 +54,9 @@ from PyQt5.QtWidgets import (
 
 from ..config import Config
 from ..constants import VIDEO_SUFFIXES
+from ..db import open_db
+from ..db import repo as db_repo
+from ..db.importer import refresh_from_disk
 from ..emotions import display_name as emotion_display
 from . import flow
 from .flow import FlowLayout
@@ -471,6 +474,9 @@ class MainWindow(QMainWindow):
         self._auto_total = 0
         self._auto_video: Path | None = None
         self._auto_job = ""
+        # 状态都从数据库读，句柄按需打开；打不开就退回「什么都没有」，界面照样能用
+        self._db_handle = None
+        self._db_failed = False
         # AI 面板（第二主界面）：非模态，只开一个
         self.ai_panel = None
 
@@ -1788,6 +1794,8 @@ class MainWindow(QMainWindow):
         # 自己指定了 AI_输入目录就当归档留着，别偷偷删用户自己的目录
         self._bridge_temp_files = [] if ai_in else [merged_path]
         if ai_in:
+            # 落在 cache 的那份任务结束就删了，不进库；归档的这份才登记
+            self._register_artifact(self.video_path, "merged_txt", merged_path)
             self.append_log(f"[AI 对接] 合并 txt 写到 AI_输入目录：{merged_path}")
         return merged_path, count
 
@@ -2009,6 +2017,7 @@ class MainWindow(QMainWindow):
         self._set_auto_state(False)
         self._set_auto_step("", "")
         self._set_auto_progress(0)
+        self._sync_disk()  # 手动丢进目录的 TXT/JSON/成品先进库，后面每一步只查库
         already = sum(1 for v in videos if self._auto_done_file(v) is not None)
 
 
@@ -2076,42 +2085,118 @@ class MainWindow(QMainWindow):
         self._last_highlight_json = text
         self.run_highlight(text, ai=True)
 
+    def _db(self):
+        """数据库句柄。打不开就记一句日志，之后所有状态查询都当「没有」。"""
+        if self._db_handle is None and not self._db_failed:
+            try:
+                self._db_handle = open_db(self.cfg)
+            except Exception as exc:  # noqa: BLE001 - 界面不能因为库打不开就崩
+                self._db_failed = True
+                self.append_log(f"[数据库] 打不开，状态判断退回空：{exc}")
+        return self._db_handle
+
+    def _db_video_id(self, video: Path, *, create: bool = False) -> int | None:
+        """视频在库里的 id。create=True 时没有就登记一条（产出文件时才需要）。"""
+        db = self._db()
+        if db is None:
+            return None
+        row = db_repo.find_video(db, video)
+        if row is not None:
+            return int(row["id"])
+        if not create:
+            return None
+        try:
+            return db_repo.upsert_video(db, video)
+        except Exception as exc:  # noqa: BLE001 - 视频读不了也不该让界面挂掉
+            self.append_log(f"[数据库] 登记视频失败：{exc}")
+            return None
+
+    def _register_artifact(self, video: Path | None, kind: str, path: Path) -> None:
+        """刚生成的文件立刻进库，免得下一步还得靠扫目录才看得见。"""
+        if video is None:
+            return
+        db = self._db()
+        if db is None:
+            return
+        vid = self._db_video_id(video, create=True)
+        if vid is None:
+            return
+        try:
+            db_repo.register_artifact(db, vid, kind, path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 登记 {kind} 失败：{exc}")
+
+    def _sync_disk(self) -> None:
+        """开跑前跟磁盘对一次账：手动丢进目录的视频/TXT/JSON/成品都登记进库。
+
+        磁盘扫描只在这儿（以及 AI 面板刷新）发生，后面每一步的状态判断都只查库。
+        """
+        db = self._db()
+        if db is None:
+            return
+        folders = [p for p in (self.ai_dir("ai_input_dir"),) if p is not None]
+        try:
+            refresh_from_disk(self.cfg, db, folders=folders,
+                              ai_out=self.ai_dir("ai_output_dir") or self.export_root())
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 对账失败，状态可能不准：{exc}")
+
+    def _register_final_video(self, output: str) -> None:
+        """成品刚出炉：登记 final_video，并把这个视频的 clip 标成已渲染。"""
+        video = self._auto_video or self.video_path
+        if video is None or not output:
+            return
+        target = Path(output)
+        if not target.is_file():
+            return
+        self._register_artifact(video, "final_video", target)
+        db = self._db()
+        vid = self._db_video_id(video)
+        if db is None or vid is None:
+            return
+        try:
+            for clip in db_repo.get_clips(db, vid):
+                if clip["status"] != "rendered":
+                    db_repo.update_clip(db, int(clip["id"]), status="rendered",
+                                        output_path=target)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 标记片段已渲染失败：{exc}")
+
     def _auto_text_file(self, video: Path) -> Path | None:
-        """视频旁边的同名文本。空文件不算，免得拿个 0 字节的去糊弄 AI。"""
-        for name in (f"{video.stem}.txt", f"{video.stem}_merged.txt"):
-            candidate = video.parent / name
-            if candidate.is_file() and candidate.stat().st_size > 0:
-                return candidate
-        return None
+        """给 AI 看的合并文本。查 artifacts.merged_txt，路径由库里给。"""
+        db = self._db()
+        vid = self._db_video_id(video)
+        if db is None or vid is None:
+            return None
+        return db_repo.artifact_path(db, vid, "merged_txt")
 
     def _auto_script_file(self, video: Path) -> Path | None:
-        for name in (f"{video.stem}_脚本.json", f"{video.stem}.json"):
-            candidate = video.parent / name
-            if candidate.is_file():
-                return candidate
-        return None
+        """脚本 JSON。查 artifacts.ai_script（视频旁边和 AI_输出目录都登记在这一类）。"""
+        db = self._db()
+        vid = self._db_video_id(video)
+        if db is None or vid is None:
+            return None
+        return db_repo.artifact_path(db, vid, "ai_script")
 
     def _auto_done_file(self, video: Path) -> Path | None:
-        """AI_输出目录里已经有这个视频的成品就返回它，用来跳过剪过的。
+        """这个视频算干完了没有——干完了就返回成品路径，用来跳过。
 
-        剪辑成片 / 脚本剪辑看 <视频名>_高光时刻.mp4（成品名字被手改过也认：同名开头
-        的视频文件都算），收取脚本看 <视频名>_脚本.json。0 字节不算，那是上次剪废的。
+        收取脚本看 ai_script（脚本已经存下来了），剪辑成片 / 脚本剪辑看 final_video。
+        判断全部来自数据库，不再 is_file() / st_size；真实路径存在 artifacts 里。
         """
-        out = self.ai_dir("ai_output_dir") or self.export_root()
-        if not out.is_dir():
+        db = self._db()
+        vid = self._db_video_id(video)
+        if db is None or vid is None:
             return None
         if self._auto_job == "collect":
-            hit = out / f"{video.stem}_脚本.json"
-            return hit if hit.is_file() and hit.stat().st_size > 0 else None
-        hit = out / f"{video.stem}_高光时刻.mp4"
-        if hit.is_file() and hit.stat().st_size > 0:
-            return hit
-        for item in sorted(out.iterdir()):
-            if (item.is_file() and item.stem.startswith(video.stem)
-                    and item.suffix.lower() in self.VIDEO_SUFFIXES
-                    and item.stat().st_size > 0):
-                return item
-        return None
+            out = self.ai_dir("ai_output_dir") or self.export_root()
+            hit = db_repo.artifact_path(db, vid, "ai_script")
+            # 收取脚本只认存到 AI_输出目录的那份，视频旁边自带的脚本不算干完
+            if hit is not None and hit.parent == out:
+                return hit
+            return None
+        return db_repo.artifact_path(db, vid, "final_video")
+
 
 
     def _auto_after_analyze(self) -> None:
@@ -2143,6 +2228,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"[自动剪辑] 脚本存不下来：{exc}")
             return
         self.append_log(f"[自动剪辑] 脚本已存：{target}")
+        self._register_artifact(self._auto_video, "ai_script", target)
 
     # ---------------------------------------------------- 面板上的状态回显
     def _set_auto_step(self, stem: str, step: str) -> None:
@@ -2247,6 +2333,7 @@ class MainWindow(QMainWindow):
 
             self.statusBar().showMessage(f"高光片段已生成：{message}", 10000)
             self.append_log(f"[剪辑高光] 已生成 {message}")
+            self._register_final_video(message)
         else:
             self.lbl_stage.setText("失败")
             self.append_log(f"[剪辑高光] 失败：{message}")

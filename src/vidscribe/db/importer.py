@@ -276,6 +276,102 @@ def _scan_dirs(cfg: Any) -> list[Path]:
     return unique
 
 
+def _known_video(db: Database, video: Path) -> int | None:
+    """路径和大小都跟库里对得上就直接用那条记录，省掉重新算指纹的 IO。
+
+    指纹要读文件头中尾各 1MB，界面每次刷新对 40 个视频都算一遍就是上百 MB 读盘；
+    大小变了或者路径没见过才真去算。
+    """
+    row = repo.get_video_by_path(db, video)
+    if row is None:
+        return None
+    try:
+        if int(row["file_size"] or -1) != video.stat().st_size:
+            return None
+    except OSError:
+        return None
+    return int(row["id"])
+
+
+def register_video_files(cfg: Any, db: Database, video: Path, video_id: int,
+                         ai_out: Path | None) -> int:
+    """把这个视频相关的实际文件登记进 artifacts：原片、merged TXT、AI 脚本、成品。
+
+    这是磁盘扫描唯一允许出现的地方（登记/对账）。登记完之后界面上的状态判断
+    一律查库，不再自己 is_file()。
+    """
+    stem = video.stem
+    found = 0
+    candidates: list[tuple[str, Path]] = [("source_video", video)]
+    for name in (f"{stem}.txt", f"{stem}_merged.txt"):
+        candidates.append(("merged_txt", video.parent / name))
+    # 脚本剪辑那一串脚本就放在视频旁边，所以两处都看
+    for name in (f"{stem}_脚本.json", f"{stem}.json"):
+        candidates.append(("ai_script", video.parent / name))
+        if ai_out is not None:
+            candidates.append(("ai_script", ai_out / name))
+    if ai_out is not None:
+        candidates.append(("final_video", ai_out / f"{stem}_高光时刻.mp4"))
+        # 成品名字被手改过也认：AI_输出目录里同名开头的视频文件都算成品
+        if ai_out.is_dir():
+            for item in sorted(ai_out.iterdir()):
+                if (item.is_file() and item.stem.startswith(stem)
+                        and item.suffix.lower() in VIDEO_SUFFIXES):
+                    candidates.append(("final_video", item))
+    for kind, path in candidates:
+        try:
+            if path.is_file() and path.stat().st_size > 0:
+                repo.register_artifact(db, video_id, kind, path)
+                found += 1
+        except OSError as exc:
+            logger.warning("登记文件失败 %s：%s", path, exc)
+    return found
+
+
+def sync_inputs(cfg: Any, db: Database | None = None, folders: list[Path] | None = None,
+                ai_out: Path | None = None) -> dict[str, int]:
+    """扫输入目录，把新出现的视频和文件登记进库（你手动丢进去的也能认）。
+
+    只做登记，不跑分析、不删文件。重复跑不会重复插——视频按指纹/路径去重，
+    文件按 (video, type, path) 唯一约束更新。
+    """
+    db = db or open_db(cfg)
+    if folders is None:
+        folders = _scan_dirs(cfg)
+    if ai_out is None:
+        ai_out = _bridge_dir(cfg, "ai_output_dir")
+    stats = {"videos_seen": 0, "videos_new": 0, "artifacts": 0}
+    for folder in folders:
+        if not folder.is_dir():
+            continue
+        for video in sorted(p for p in folder.rglob("*")
+                            if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES):
+            stats["videos_seen"] += 1
+            video_id = _known_video(db, video)
+            if video_id is None:
+                try:
+                    video_id = repo.upsert_video(db, video, cache_slug=cache_mod.slug_for(video))
+                except OSError as exc:
+                    logger.warning("登记视频失败 %s：%s", video, exc)
+                    continue
+                stats["videos_new"] += 1
+            stats["artifacts"] += register_video_files(cfg, db, video, video_id, ai_out)
+    return stats
+
+
+def refresh_from_disk(cfg: Any, db: Database | None = None, folders: list[Path] | None = None,
+                      ai_out: Path | None = None) -> dict[str, int]:
+    """界面刷新时调这一个：先登记新文件，再跟磁盘对账，然后一切查库。
+
+    这样磁盘扫描只发生在这里一次，状态判断函数（面板的四个状态、队列的三个
+    文件判断）全都只查数据库，不会每个视频再去翻目录。
+    """
+    db = db or open_db(cfg)
+    stats = sync_inputs(cfg, db, folders=folders, ai_out=ai_out)
+    stats.update(reconcile(cfg, db))
+    return stats
+
+
 def reconcile(cfg: Any, db: Database | None = None) -> dict[str, int]:
     """对账：库里记的文件还在不在盘上，视频还在不在视频库里。只改状态，不删记录。
 

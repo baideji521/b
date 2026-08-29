@@ -45,6 +45,9 @@ from PyQt5.QtWidgets import (
 )
 
 from ..bridge import providers
+from ..db import open_db
+from ..db import repo as db_repo
+from ..db.importer import refresh_from_disk
 
 # 任务表里每一步的记号：干完了 / 正在干 / 还没轮到 / 砸了
 DONE, RUNNING, WAITING, FAILED = "✓", "●", "—", "✕"
@@ -156,11 +159,12 @@ def _browse_into(owner, edit: DropDirEdit, title: str) -> None:
 class AiPanel(QDialog):
     """自动剪辑的操作台：选模式、指目录、看每个 mp4 卡在哪一步、开跑。
 
-    表里的四个状态是各自独立查出来的，不靠猜：
-    - 分析：output/<视频名>/timeline.json 在不在
-    - TXT：AI_输入目录里有没有 <视频名>.txt
-    - JSON：AI_输出目录里有没有 <视频名>_脚本.json
-    - 成品：AI_输出目录里有没有 <视频名>_高光时刻.mp4
+    表里的四个状态是各自独立查出来的，不靠猜，全部来自数据库：
+    - 分析：analysis_runs 里有跑成功的记录
+    - TXT：artifacts 里有 merged_txt
+    - JSON：有 ai_results，或者 artifacts 里有 ai_script
+    - 成品：artifacts 里有 final_video，或者 clips 里有 rendered
+    新出现的文件是在打开面板 / 点刷新时登记进库的，不在这儿翻目录。
     """
 
     def __init__(self, cfg: Any, parent=None, log=None):
@@ -171,6 +175,9 @@ class AiPanel(QDialog):
         self._job = str(cfg.bridge.get("ai_job") or "full")
         self._active_stem = ""
         self._active_step = ""
+        # 状态全部来自数据库；句柄懒加载，开不起来就只记一句日志
+        self._db_handle: Any = None
+        self._db_failed = False
 
         self.setWindowTitle("AI 自动剪辑")
         self.setModal(False)
@@ -190,7 +197,8 @@ class AiPanel(QDialog):
         outer.addWidget(self._build_table(), 1)
         outer.addWidget(self._build_log())
         outer.addLayout(self._build_buttons())
-        self.refresh_tasks()
+        # 打开面板先登记一次（你手动丢进目录的 mp4/txt 也认），之后只查库
+        self.refresh_tasks(sync=True)
 
     # ------------------------------------------------------------ 各块界面
     def _build_header(self) -> QHBoxLayout:
@@ -317,7 +325,8 @@ class AiPanel(QDialog):
         self.btn_stop.setToolTip("中止排着的队，并取消正在跑的 AI 任务")
         self.btn_stop.clicked.connect(self.on_stop)
         self.btn_refresh = QPushButton("刷新")
-        self.btn_refresh.clicked.connect(self.refresh_tasks)
+        self.btn_refresh.setToolTip("登记目录里新出现的文件、跟磁盘对一次账，然后按数据库刷新")
+        self.btn_refresh.clicked.connect(lambda: self.refresh_tasks(sync=True))
         self.btn_api = QPushButton("AI接口…")
         self.btn_api.setToolTip("找哪家 AI、走接口还是网页版扩展、key、模型、端口")
         self.btn_api.clicked.connect(self.on_api_options)
@@ -353,26 +362,20 @@ class AiPanel(QDialog):
         return None
 
     def _states(self, video: Path) -> dict[str, bool]:
-        """一个 mp4 的四个状态，各自独立查磁盘，不互相推断。"""
-        stem = video.stem
-        out = self._out_dir()
-        analysed = (self.cfg.path("output_dir") / stem / "timeline.json").is_file()
-        txt = any((video.parent / name).is_file() and (video.parent / name).stat().st_size > 0
-                  for name in (f"{stem}.txt", f"{stem}_merged.txt"))
-        script = False
-        clipped = False
-        if out is not None:
-            for name in (f"{stem}_脚本.json", f"{stem}.json"):
-                hit = out / name
-                if hit.is_file() and hit.stat().st_size > 0:
-                    script = True
-                    break
-            product = out / f"{stem}_高光时刻.mp4"
-            clipped = product.is_file() and product.stat().st_size > 0
-        if self._job == "script":  # 脚本剪辑：脚本在输入目录里
-            script = script or any((video.parent / n).is_file()
-                                   for n in (f"{stem}_脚本.json", f"{stem}.json"))
-        return {"analysed": analysed, "txt": txt, "json": script, "clipped": clipped}
+        """一个 mp4 的四个状态。全部来自数据库，这里不碰磁盘。
+
+        分析看 analysis_runs、TXT 看 artifacts.merged_txt、JSON 看 ai_results / artifacts.ai_script、
+        成品看 artifacts.final_video 或 clips.rendered —— 四个各自独立，不互相推断。
+        新文件是在刷新时的 refresh_from_disk() 里登记的，不是在这儿扫出来的。
+        """
+        empty = {"analysed": False, "txt": False, "json": False, "clipped": False}
+        db = self._db()
+        if db is None:
+            return empty
+        row = db_repo.find_video(db, video)
+        if row is None:
+            return empty
+        return db_repo.video_state(db, int(row["id"]))
 
     def _row_marks(self, video: Path, states: dict[str, bool]) -> tuple[list[str], str]:
         """把四个状态翻成表里的记号和一句状态。正在跑的那一步用 ●。"""
@@ -399,21 +402,54 @@ class AiPanel(QDialog):
         return marks, "未处理"
 
     # ------------------------------------------------------------ 对外接口
-    def refresh_tasks(self) -> None:
-        """重扫目录，刷新统计和任务表。开跑前、每一步之后都会调。"""
-        folder = self._in_dir()
-        videos = []
-        if folder is not None:
-            videos = sorted(p for p in folder.iterdir()
-                            if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES)
-        stats = {"total": len(videos), "todo": 0, "json": 0, "done": 0}
+    def _db(self):
+        """数据库句柄。开不起来就记一句，界面不崩（状态会显示为全空）。"""
+        if self._db_handle is None and not self._db_failed:
+            try:
+                self._db_handle = open_db(self.cfg)
+            except Exception as exc:
+                self._db_failed = True
+                self.append_log(f"[AI 面板] 数据库打不开，状态无法显示：{exc}")
+        return self._db_handle
+
+    def _sync_disk(self) -> None:
+        """磁盘扫描只在这里发生：登记新出现的视频/TXT/JSON/成品，再跟磁盘对账。
+
+        打开面板和点「刷新」时各来一次。之后所有状态判断都只查库。
+        """
+        db = self._db()
+        if db is None:
+            return
+        folders = [p for p in (self._in_dir(),) if p is not None]
+        try:
+            refresh_from_disk(self.cfg, db, folders=folders or None, ai_out=self._out_dir())
+        except Exception as exc:
+            self.append_log(f"[AI 面板] 登记/对账失败：{exc}")
+
+    def refresh_tasks(self, sync: bool = False) -> None:
+        """刷新统计和任务表。状态一律查库。
+
+        sync=True（打开面板、点刷新）时先登记新文件并对账；跑批过程中每一步只查库，
+        40 个视频也就是几条 SQL，不会每个视频再去翻目录。
+        """
+        db = self._db()
+        if db is None:
+            self.table.setRowCount(0)
+            return
+        if sync:
+            self._sync_disk()
+        rows = db_repo.videos_under(db, self._in_dir())
+        videos = [Path(r["file_path"]) for r in rows]
+        ids = [int(r["id"]) for r in rows]
+        states_by_id = db_repo.states_for_videos(db, ids)
+        # 收取脚本这一串拿到 JSON 就算完事，其余两串要出成品才算
+        done_key = "json" if self._job == "collect" else "clipped"
+        stats = db_repo.statistics_for(db, ids, done_key=done_key)
         self.table.setRowCount(len(videos))
-        for row, video in enumerate(videos):
-            states = self._states(video)
+        for row, (video, vid) in enumerate(zip(videos, ids)):
+            states = states_by_id.get(vid, {"analysed": False, "txt": False,
+                                            "json": False, "clipped": False})
             marks, status = self._row_marks(video, states)
-            stats["json"] += int(states["json"])
-            stats["done"] += int(states["clipped"])
-            stats["todo"] += int(not states["clipped"])
             cells = [video.name, *marks, status]
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
