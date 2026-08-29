@@ -89,7 +89,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     (async () => {
       const result = await saveCloseTab(message.value);
       if (result.ok) {
-        log(result.closeTab ? "拿到数据后关掉自己开的标签页" : "拿到数据后留着标签页");
+        log(result.closeTab ? "拿到数据" : "拿到数据保留标签页");
       }
       sendResponse(result);
     })();
