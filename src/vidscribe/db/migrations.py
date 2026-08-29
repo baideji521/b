@@ -21,7 +21,32 @@ def _create_all(conn: sqlite3.Connection) -> None:
 
 
 # 版本 N 的升级脚本：从 N-1 升到 N 要干什么。v1 就是建全套表。
-_STEPS: dict[int, list[str]] = {}
+_STEPS: dict[int, list[str]] = {
+    # v2：ai_tasks 变成真正的持久化队列——任务种类、优先级、尝试次数上限、
+    # 是谁在跑、最后一次改动时间；再加一个「同一视频同一任务只能有一条没跑完」的唯一索引。
+    2: [
+        "ALTER TABLE ai_tasks ADD COLUMN task_type TEXT NOT NULL DEFAULT 'auto_clip'",
+        "ALTER TABLE ai_tasks ADD COLUMN priority INTEGER NOT NULL DEFAULT 100",
+        "ALTER TABLE ai_tasks ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1",
+        "ALTER TABLE ai_tasks ADD COLUMN worker_id TEXT",
+        "ALTER TABLE ai_tasks ADD COLUMN updated_at TEXT",
+        # 老库里万一已经有重复的未完成任务，先留最早那条，其余标 cancelled，
+        # 否则下面这个唯一索引建不起来。
+        """
+        UPDATE ai_tasks SET status = 'cancelled', finished_at = COALESCE(finished_at, created_at)
+         WHERE status IN ('pending', 'uploading', 'waiting', 'processing')
+           AND id NOT IN (
+               SELECT MIN(id) FROM ai_tasks
+                WHERE status IN ('pending', 'uploading', 'waiting', 'processing')
+                GROUP BY video_id, task_type, mode)
+        """,
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_open_unique
+            ON ai_tasks(video_id, task_type, mode)
+         WHERE status IN ('pending', 'uploading', 'waiting', 'processing')
+        """,
+    ],
+}
 
 
 def apply(conn: sqlite3.Connection) -> int:
@@ -36,10 +61,12 @@ def apply(conn: sqlite3.Connection) -> int:
     conn.execute("BEGIN IMMEDIATE")
     try:
         if current == 0:
+            # 新库：schema.py 里的建表语句本身就是当前版本，不用再走升级脚本
             _create_all(conn)
-        for version in range(max(current, 1) + 1, SCHEMA_VERSION + 1):
-            for statement in _STEPS.get(version, []):
-                conn.execute(statement)
+        else:
+            for version in range(current + 1, SCHEMA_VERSION + 1):
+                for statement in _STEPS.get(version, []):
+                    conn.execute(statement)
         conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         conn.execute(
             "INSERT INTO schema_meta(key, value) VALUES('version', ?) "

@@ -222,6 +222,9 @@ DEFAULTS: dict[str, Any] = {
         # 跑了一半的分析记录超过这么久就标 failed。别设太短，长视频分析本身就慢
         "ai_task_timeout_minutes": 30,
         "analysis_timeout_minutes": 180,
+        # 开程序时把上次没跑完的自动剪辑任务捞回来接着跑。
+        # 关掉就只是把它们退回 pending 等你手点「自动剪辑」，不自动开工
+        "auto_resume_queue": True,
 
     },
     "mirrors": {

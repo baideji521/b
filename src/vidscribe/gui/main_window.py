@@ -469,8 +469,11 @@ class MainWindow(QMainWindow):
         # 发给扩展的临时文件（合并导出），任务结束就删
         self._bridge_temp_files: list[Path] = []
         self._last_highlight_json = ""
-        # 「自动剪辑」的队列：扫 AI_输入目录得到的视频挨个跑，一次只跑一个
-        self._auto_queue: list[Path] = []
+        # 「自动剪辑」的队列在数据库里（ai_tasks），这里只留跑当前这一条要用的东西：
+        # 关掉程序再开，没跑完的任务还在，能接着跑
+        self._auto_task_id: int | None = None
+        self._auto_active = False
+        self._auto_done = 0            # 只用来显示进度，状态不看它
         self._auto_total = 0
         self._auto_video: Path | None = None
         self._auto_job = ""
@@ -517,6 +520,9 @@ class MainWindow(QMainWindow):
 
         if video:
             self.load_video(video)
+        # 上次没跑完的自动剪辑任务：等窗口先显示出来，再捞回来接着跑
+        QTimer.singleShot(0, self._resume_auto_queue)
+
 
     # --------------------------------------------------------------- 设置
     def _splitters(self) -> tuple[tuple[QSplitter, str], ...]:
@@ -1915,7 +1921,7 @@ class MainWindow(QMainWindow):
             self.lbl_stage.setText("失败")
             self.append_log(f"[AI 接口] 失败：{error}")
             if self.auto_running():
-                self._auto_advance()
+                self._auto_advance("failed", f"AI 接口失败：{error}")
                 return
             QMessageBox.warning(self, "AI 接口", error)
             return
@@ -1949,7 +1955,7 @@ class MainWindow(QMainWindow):
 
     def on_bridge_stop(self) -> None:
         if self.auto_running():
-            self._auto_finish("已中止，剩下的不跑了")
+            self._auto_finish("已中止，剩下的不跑了", cancel=True)
         if self.bridge is None:
             return
 
@@ -1993,7 +1999,7 @@ class MainWindow(QMainWindow):
         脚本剪辑：跳过 AI，直接用现成的脚本 JSON 开剪。
 
         """
-        if self._auto_video is not None or self._auto_queue:
+        if self.auto_running():
             QMessageBox.information(self, "自动剪辑", "已经在跑了，要停就点「停止_AI」")
             return
         reason = self.auto_busy()
@@ -2009,39 +2015,102 @@ class MainWindow(QMainWindow):
         if not videos:
             QMessageBox.information(self, "自动剪辑", f"{ai_in} 里没有视频")
             return
+        db = self._db()
+        if db is None:
+            QMessageBox.warning(self, "自动剪辑",
+                                "数据库打不开，自动剪辑的队列就在数据库里，先解决数据库再跑")
+            return
         job = str(self.cfg.bridge.get("ai_job") or "full")
         labels = {"full": "剪辑成片", "collect": "收取脚本", "script": "脚本剪辑"}
-        self._auto_queue = list(videos)
-        self._auto_total = len(videos)
         self._auto_job = job
         self._set_auto_state(False)
         self._set_auto_step("", "")
         self._set_auto_progress(0)
         self._sync_disk()  # 手动丢进目录的 TXT/JSON/成品先进库，后面每一步只查库
-        already = sum(1 for v in videos if self._auto_done_file(v) is not None)
-
-
-        self.append_log(f"[自动剪辑] {labels.get(job, job)}：{ai_in} 里排了 {len(videos)} 个视频"
-                        + (f"，其中 {already} 个 AI_输出目录里已经有成品，会跳过" if already else ""))
-
+        created, reused, already = self._enqueue_auto_tasks(videos, job)
+        counts = db_repo.queue_counts(db, mode=job)
+        if not counts["open"]:
+            self._set_auto_state(True, "闲着")
+            self.append_log(f"[自动剪辑] {labels.get(job, job)}：{len(videos)} 个视频都已经有成品，没活可干")
+            return
+        self._auto_active = True
+        self._auto_done = 0
+        self._auto_total = counts["open"]
+        self.append_log(
+            f"[自动剪辑] {labels.get(job, job)}：队列里 {counts['open']} 条待办"
+            f"（新建 {created}，接上原有 {reused}"
+            + (f"，{already} 个已有成品不排队" if already else "") + "）")
         self._auto_step()
 
-    def _auto_step(self) -> None:
-        """轮到下一个视频。后面几步都靠各自的完成回调推进，这儿只负责起头。"""
-        if not self._auto_queue:
-            self._auto_finish("全部跑完")
-            return
-        video = self._auto_queue.pop(0)
-        self._auto_video = video
-        index = self._auto_total - len(self._auto_queue)
-        self.append_log(f"[自动剪辑] ({index}/{self._auto_total}) {video.name}")
-        self._set_auto_state(False, f"跑着 {index}/{self._auto_total}")
+    def _worker_id(self) -> str:
+        """谁在跑这条任务。以后多开一个进程也能看出是谁占的。"""
+        return f"gui-{os.getpid()}"
 
-        done = self._auto_done_file(video)
-        if done is not None:
-            self.append_log(f"[自动剪辑] AI_输出目录里已经有 {done.name}，这个跳过")
-            self._auto_advance()
+    def _enqueue_auto_tasks(self, videos: list[Path], job: str) -> tuple[int, int, int]:
+        """把这一批视频排进数据库队列，返回（新建、复用、已有成品跳过）。
+
+        幂等：同一个视频 + 同一种模式已经有没跑完的任务就复用那条，
+        所以连点五次「自动剪辑」也不会多出四条重复任务。
+        """
+        db = self._db()
+        if db is None:
+            return 0, 0, 0
+        created = reused = already = 0
+        for video in videos:
+            if self._auto_done_file(video) is not None:
+                already += 1
+                continue
+            vid = self._db_video_id(video, create=True)
+            if vid is None:
+                self.append_log(f"[自动剪辑] {video.name} 登记不进数据库，跳过")
+                continue
+            try:
+                _task_id, is_new = db_repo.enqueue_ai_task(
+                    db, vid, mode=job,
+                    provider=str(self.cfg.bridge.get("provider") or "") or None,
+                    model=str(self.cfg.bridge.get("api_model") or "") or None,
+                    prompt_version=str(self.cfg.bridge.get("task_type") or "") or None,
+                    max_attempts=1)
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[自动剪辑] {video.name} 入队失败：{exc}")
+                continue
+            if is_new:
+                created += 1
+            else:
+                reused += 1
+        return created, reused, already
+
+    def _auto_step(self) -> None:
+        """从数据库队列里领下一条任务。后面几步靠各自的完成回调推进，这儿只负责起头。"""
+        db = self._db()
+        if db is None:
+            self._auto_finish("数据库不可用，队列停下")
             return
+        while True:
+            task = db_repo.claim_next_ai_task(db, mode=self._auto_job,
+                                              worker_id=self._worker_id())
+            if task is None:
+                self._auto_finish("全部跑完")
+                return
+            video = Path(str(task["file_path"]))
+            self._auto_task_id = int(task["id"])
+            self._auto_video = video
+            self._auto_done += 1
+            total = max(self._auto_total, self._auto_done)
+            self.append_log(f"[自动剪辑] ({self._auto_done}/{total}) 任务 #{task['id']} {video.name}")
+            self._set_auto_state(False, f"跑着 {self._auto_done}/{total}")
+            if not video.is_file():
+                self.append_log(f"[自动剪辑] {video.name} 已经不在盘上，这条记 failed")
+                self._settle_auto_task("failed", "视频不在盘上了")
+                self._auto_video = None
+                continue
+            done = self._auto_done_file(video)
+            if done is not None:
+                self.append_log(f"[自动剪辑] AI_输出目录里已经有 {done.name}，这个跳过")
+                self._settle_auto_task("completed")
+                self._auto_video = None
+                continue
+            break
         self.load_video(video)
 
         if self._auto_job == "script":
@@ -2053,7 +2122,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"[自动剪辑] 已有 {text_file.name}，不再分析，直接发 AI")
             self._set_auto_step(video.stem, "发送")
             if not self.send_file_to_ai(text_file):
-                self._auto_advance()
+                self._auto_advance("failed", "发不出去（缺提示词或读文件失败）")
             return
         # 没有 txt，但缓存里有上次分析的结果（load_video 刚读过 output/<视频名>/），
         # 那就直接照缓存导出合并 txt，不用再跑一遍分析
@@ -2066,6 +2135,68 @@ class MainWindow(QMainWindow):
         self._set_auto_step(video.stem, "分析")
         self.on_analyze(False)
 
+    def _settle_auto_task(self, outcome: str, error: str | None = None) -> str:
+        """给当前这条任务落状态。返回数据库里最终的状态（可能被退回 pending 重试）。"""
+        db = self._db()
+        task_id = self._auto_task_id
+        self._auto_task_id = None
+        if db is None or task_id is None:
+            return outcome
+        try:
+            if outcome == "completed":
+                db_repo.complete_ai_task(db, task_id)
+                return "completed"
+            if outcome == "cancelled":
+                db_repo.update_ai_task(db, task_id, status="cancelled", error=error)
+                return "cancelled"
+            final = db_repo.fail_or_requeue_ai_task(db, task_id, error or "没说原因")
+            if final == "pending":
+                self.append_log(f"[自动剪辑] 任务 #{task_id} 失败，退回队列等下一轮")
+            else:
+                self.append_log(f"[自动剪辑] 任务 #{task_id} 记为 failed：{error or ''}")
+            return final
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 任务 #{task_id} 状态写不进去：{exc}")
+            return outcome
+
+    def _resume_auto_queue(self) -> None:
+        """开程序时把上次没跑完的任务捞回来接着跑（强关、崩溃都算）。
+
+        processing/uploading/waiting 且心跳超时的退回 pending，然后照常一条条领。
+        """
+        db = self._db()
+        if db is None:
+            return
+        timeout = float(self.cfg.runtime.get("ai_task_timeout_minutes", 30) or 30)
+        try:
+            recovered = db_repo.recover_stale_ai_tasks(db, timeout)
+            job = str(self.cfg.bridge.get("ai_job") or "full")
+            counts = db_repo.queue_counts(db, mode=job)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[自动剪辑] 队列恢复失败：{exc}")
+            return
+        if recovered:
+            self.append_log(f"[自动剪辑] 上次有 {recovered} 条任务没跑完，已退回等待")
+        if not counts["pending"]:
+            if counts["active"]:
+                self.append_log(f"[自动剪辑] 还有 {counts['active']} 条卡在跑着但没超时，先不动它们")
+            return
+        if not self.cfg.runtime.get("auto_resume_queue", True):
+            self.append_log(f"[自动剪辑] 队列里还有 {counts['pending']} 条待办"
+                            f"（auto_resume_queue 关着，点「自动剪辑」再继续）")
+            return
+        if self.auto_running() or self.auto_busy():
+            return
+        self._auto_job = job
+        self._auto_active = True
+        self._auto_done = 0
+        self._auto_total = counts["pending"]
+        self._set_auto_state(False)
+        self._set_auto_progress(0)
+        self.append_log(f"[自动剪辑] 接着上次跑：队列里还有 {counts['pending']} 条")
+        self._auto_step()
+
+
 
 
     def _auto_clip_from_script(self, video: Path) -> None:
@@ -2073,13 +2204,13 @@ class MainWindow(QMainWindow):
         script = self._auto_script_file(video)
         if script is None:
             self.append_log(f"[自动剪辑] {video.stem} 旁边没有脚本 JSON，跳过")
-            self._auto_advance()
+            self._auto_advance("failed", "没有脚本 JSON")
             return
         try:
             text = script.read_text(encoding="utf-8")
         except OSError as exc:
             self.append_log(f"[自动剪辑] 脚本读不了：{exc}，跳过")
-            self._auto_advance()
+            self._auto_advance("failed", f"脚本读不了：{exc}")
             return
         self.append_log(f"[自动剪辑] 按现成脚本剪：{script.name}")
         self._last_highlight_json = text
@@ -2162,6 +2293,30 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 标记片段已渲染失败：{exc}")
 
+    def _save_ai_result(self, parsed: dict, raw_text: str = "") -> None:
+        """AI 回的 JSON 进库，挂在当前这条任务下面（ai_results.task_id 指回 ai_tasks.id）。
+
+        手工单发（没有队列任务）时 task_id 是空的，结果照样留档，不会挂到别人身上。
+        """
+        video = self._auto_video or self.video_path
+        if video is None:
+            return
+        db = self._db()
+        if db is None:
+            return
+        vid = self._db_video_id(video, create=True)
+        if vid is None:
+            return
+        try:
+            clips = db_repo.clips_from_payload(parsed)
+            result_id = db_repo.save_ai_result(
+                db, vid, task_id=self._auto_task_id, raw_response=raw_text or None,
+                json_data=parsed, candidate_count=len(clips) or None, validated=True)
+            for spec in clips:
+                db_repo.create_clip(db, vid, spec, ai_result_id=result_id)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] AI 结果存不进去：{exc}")
+
     def _auto_text_file(self, video: Path) -> Path | None:
         """给 AI 看的合并文本。查 artifacts.merged_txt，路径由库里给。"""
         db = self._db()
@@ -2205,12 +2360,12 @@ class MainWindow(QMainWindow):
             return
         if not self.speech and not self.timeline:
             self.append_log("[自动剪辑] 分析完了却没读到结果，跳过这个")
-            self._auto_advance()
+            self._auto_advance("failed", "分析完了没读到结果")
             return
         prompt_path = self.resolve_prompt_file()
         if prompt_path is None:
             self.append_log("[自动剪辑] 找不到 prm_en.txt，整串停下")
-            self._auto_finish("缺提示词，已停")
+            self._auto_finish("缺提示词，已停", cancel=True)
             return
         merged_path, count = self.write_ai_text()
         self._set_auto_step(self._auto_video.stem, "发送")
@@ -2238,22 +2393,42 @@ class MainWindow(QMainWindow):
 
     def _set_auto_progress(self, done: int) -> None:
         if self.ai_panel is not None:
-            self.ai_panel.set_queue_progress(done, self._auto_total)
+            self.ai_panel.set_queue_progress(done, max(self._auto_total, done))
 
 
-    def _auto_advance(self) -> None:
-        """当前这个不管是成了、跳了还是砸了，都排队叫下一个。"""
+    def _auto_advance(self, outcome: str = "completed", error: str | None = None) -> None:
+        """当前这条落个状态，然后排队叫下一条。
+
+        outcome：completed（这个视频这一串走完了）/ failed（哪一步砸了，error 写进
+        last_error）/ cancelled（人工停的）。失败的任务由数据库按 max_attempts 决定
+        是退回 pending 还是定格 failed，这里不自己决定重试。
+        """
         if self._auto_video is None:
             return
+        self._settle_auto_task(outcome, error)
         self._auto_video = None
         self._set_auto_step("", "")
-        self._set_auto_progress(self._auto_total - len(self._auto_queue))
+        self._set_auto_progress(self._auto_done)
         QTimer.singleShot(0, self._auto_step)  # 让当前回调先返回，别在信号里套信号
 
-    def _auto_finish(self, why: str) -> None:
-        self._auto_queue = []
+    def _auto_finish(self, why: str, *, cancel: bool = False) -> None:
+        """整批收工。cancel=True（人工停 / 缺提示词停）时把没跑完的标 cancelled。"""
+        if cancel:
+            self._settle_auto_task("cancelled", why)
+            db = self._db()
+            if db is not None:
+                try:
+                    left = db_repo.cancel_open_ai_tasks(db, mode=self._auto_job)
+                except Exception as exc:  # noqa: BLE001
+                    self.append_log(f"[数据库] 取消剩余任务失败：{exc}")
+                else:
+                    if left:
+                        self.append_log(f"[自动剪辑] 还没跑的 {left} 条标成已取消")
+        self._auto_task_id = None
+        self._auto_active = False
         self._auto_video = None
         self._auto_total = 0
+        self._auto_done = 0
         self._set_auto_state(True, "闲着")
         self._set_auto_step("", "")
         self.append_log(f"[自动剪辑] {why}")
@@ -2266,7 +2441,9 @@ class MainWindow(QMainWindow):
 
 
     def auto_running(self) -> bool:
-        return self._auto_video is not None or bool(self._auto_queue)
+        """这一批还在跑没有。当前有领到的任务，或者这一批还没收工，都算在跑。"""
+        return self._auto_video is not None or self._auto_active
+
 
     def on_bridge_event(self, kind: str, data: object) -> None:
         """Bridge 的 HTTP 线程事件（已经过 BridgeEvents 搬到 GUI 线程）。"""
@@ -2293,7 +2470,7 @@ class MainWindow(QMainWindow):
             if text:
                 self.append_log(f"[AI 对接] AI 原文前 200 字：{text[:200]}")
             if self.auto_running():  # 批量里不弹窗拦着，记一笔接着下一个
-                self._auto_advance()
+                self._auto_advance("failed", f"没拿到可用 JSON：{reason}")
                 return
             QMessageBox.warning(self, "AI 对接", f"没拿到可用 JSON：{reason}")
             return
@@ -2301,12 +2478,13 @@ class MainWindow(QMainWindow):
         clip = parsed.get("clip") if isinstance(parsed.get("clip"), dict) else parsed
         self.append_log(f"[AI 对接] 收到 JSON：clip.start={clip.get('start')} "
                         f"clip.end={clip.get('end')}")
+        self._save_ai_result(parsed, str(info.get("text") or ""))
         idle = ((self.clip_worker is None or not self.clip_worker.isRunning())
                 and (self.worker is None or not self.worker.isRunning()))
         if self.auto_running():
             self._auto_save_script()  # 不管哪一串都留档，任务表的 JSON 列就看这个
             if self._auto_job == "collect":  # 收取脚本：只存不剪
-                self._auto_advance()
+                self._auto_advance("completed")
                 return
             self.append_log("[自动剪辑] 拿到 JSON，按主界面高光配置开剪")
             if self._auto_video is not None:
@@ -2342,7 +2520,9 @@ class MainWindow(QMainWindow):
         if self.auto_running():
             if self.ai_panel is not None:
                 self.ai_panel.refresh_tasks()
-            self._auto_advance()
+            # 剪辑砸了就是砸了，不许把任务标成 completed
+            self._auto_advance("completed" if ok else "failed",
+                               None if ok else f"剪辑失败：{message}")
 
 
 
@@ -2574,7 +2754,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"{label}失败：{message}")
             if self._auto_video is not None and label == "分析":
                 self.append_log("[自动剪辑] 这个分析没成，跳过")
-                self._auto_advance()
+                self._auto_advance("failed", f"分析失败：{message}")
                 return
             QMessageBox.warning(self, f"{label}失败", f"{message}\n详细日志见 logs/ 目录")
 

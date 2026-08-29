@@ -17,7 +17,7 @@ from typing import Any
 from ..logging_setup import get_logger
 from .db import Database
 from .fingerprint import config_hash, fingerprint
-from .schema import TASK_ACTIVE
+from .schema import AUTO_TASK_TYPE, TASK_ACTIVE, TASK_OPEN
 
 logger = get_logger(__name__)
 
@@ -397,18 +397,175 @@ def get_speech_words(db: Database, analysis_id: int) -> list[sqlite3.Row]:
 def create_ai_task(db: Database, video_id: int, *, mode: str = "full",
                    provider: str | None = None, model: str | None = None,
                    prompt_version: str | None = None,
-                   input_txt: str | Path | None = None) -> int:
+                   input_txt: str | Path | None = None,
+                   task_type: str = AUTO_TASK_TYPE, priority: int = 100,
+                   max_attempts: int = 1) -> int:
     stamp = now()
     with db.tx() as conn:
         cur = conn.execute(
             """
             INSERT INTO ai_tasks(video_id, mode, provider, model, status, prompt_version,
-                                 input_txt, created_at)
-            VALUES(?, ?, ?, ?, 'pending', ?, ?, ?)
+                                 input_txt, created_at, task_type, priority, max_attempts,
+                                 updated_at)
+            VALUES(?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?)
             """,
             (video_id, mode, provider, model, prompt_version,
-             str(input_txt) if input_txt else None, stamp))
+             str(input_txt) if input_txt else None, stamp, task_type, priority,
+             max_attempts, stamp))
         return int(cur.lastrowid)
+
+
+# ------------------------------------------------------------------ 持久化队列
+def open_ai_task(db: Database, video_id: int, *, mode: str,
+                 task_type: str = AUTO_TASK_TYPE) -> sqlite3.Row | None:
+    """这个视频这一种任务有没有还没跑完的（pending / 跑着一半）。"""
+    marks = ", ".join("?" for _ in TASK_OPEN)
+    return db.one(
+        f"""
+        SELECT * FROM ai_tasks
+         WHERE video_id = ? AND task_type = ? AND mode = ? AND status IN ({marks})
+         ORDER BY id LIMIT 1
+        """,
+        (video_id, task_type, mode, *TASK_OPEN))
+
+
+def enqueue_ai_task(db: Database, video_id: int, *, mode: str,
+                    task_type: str = AUTO_TASK_TYPE, provider: str | None = None,
+                    model: str | None = None, prompt_version: str | None = None,
+                    input_txt: str | Path | None = None, priority: int = 100,
+                    max_attempts: int = 1) -> tuple[int, bool]:
+    """入队，幂等。返回 (task_id, 是不是新建的)。
+
+    同一个视频 + 同一种任务 + 同一种模式已经有没跑完的任务，就复用那一条：
+    连点五次「自动剪辑」不会变成五条任务。并发下靠唯一索引兜底（撞了就回头拿现成那条）。
+    """
+    existing = open_ai_task(db, video_id, mode=mode, task_type=task_type)
+    if existing is not None:
+        return int(existing["id"]), False
+    try:
+        task_id = create_ai_task(db, video_id, mode=mode, provider=provider, model=model,
+                                 prompt_version=prompt_version, input_txt=input_txt,
+                                 task_type=task_type, priority=priority,
+                                 max_attempts=max_attempts)
+    except sqlite3.IntegrityError:
+        # 别的线程/进程刚好插进去了：唯一索引挡住我们，那就用它那条
+        existing = open_ai_task(db, video_id, mode=mode, task_type=task_type)
+        if existing is None:
+            raise
+        return int(existing["id"]), False
+    return task_id, True
+
+
+def task_with_video(db: Database, task_id: int) -> sqlite3.Row | None:
+    """任务连着视频路径一起取（队列要拿路径去跑）。"""
+    return db.one(
+        """
+        SELECT t.*, v.file_path, v.file_name FROM ai_tasks t
+          JOIN videos v ON v.id = t.video_id
+         WHERE t.id = ?
+        """,
+        (task_id,))
+
+
+def claim_next_ai_task(db: Database, *, mode: str | None = None,
+                       task_type: str = AUTO_TASK_TYPE, worker_id: str | None = None,
+                       status: str = "processing") -> sqlite3.Row | None:
+    """从队列里领一条任务：挑 pending 里优先级最高（数字最小）、最早的那条占下来。
+
+    整个"挑 + 占"在一个 BEGIN IMMEDIATE 事务里，`UPDATE ... WHERE status='pending'`
+    的 rowcount 决定谁抢到——两个 worker 同时来，只有一个能把某条从 pending 改走，
+    另一个 rowcount=0 就往下一条试。不会出现同一条任务被领两次。
+    """
+    sql = "SELECT id FROM ai_tasks WHERE status = 'pending' AND task_type = ?"
+    params: list[Any] = [task_type]
+    if mode:
+        sql += " AND mode = ?"
+        params.append(mode)
+    stamp = now()
+    claimed: int | None = None
+    with db.tx() as conn:
+        rows = conn.execute(sql + " ORDER BY priority, id", params).fetchall()
+        for row in rows:
+            cur = conn.execute(
+                """
+                UPDATE ai_tasks
+                   SET status = ?, worker_id = ?, started_at = COALESCE(started_at, ?),
+                       heartbeat_at = ?, updated_at = ?, finished_at = NULL
+                 WHERE id = ? AND status = 'pending'
+                """,
+                (status, worker_id, stamp, stamp, stamp, int(row["id"])))
+            if cur.rowcount:
+                claimed = int(row["id"])
+                break
+    if claimed is None:
+        return None
+    return task_with_video(db, claimed)
+
+
+def fail_or_requeue_ai_task(db: Database, task_id: int, error: str) -> str:
+    """任务失败：尝试次数 +1，还没到 max_attempts 就退回 pending，到了就定格 failed。
+
+    默认 max_attempts=1（跟改造前一样：失败就跳过，不自动重跑）。
+    崩溃退回（recover_stale_ai_tasks）不算失败、不吃这个额度，否则关一次程序任务就废了。
+    """
+    row = get_ai_task(db, task_id)
+    if row is None:
+        return "missing"
+    attempts = int(row["retry_count"] or 0) + 1
+    limit = max(1, int(row["max_attempts"] or 1))
+    status = "pending" if attempts < limit else "failed"
+    stamp = now()
+    with db.tx() as conn:
+        conn.execute(
+            """
+            UPDATE ai_tasks
+               SET status = ?, error = ?, retry_count = ?, updated_at = ?, heartbeat_at = ?,
+                   worker_id = NULL,
+                   finished_at = CASE WHEN ? = 'failed' THEN ? ELSE NULL END
+             WHERE id = ?
+            """,
+            (status, str(error)[:2000], attempts, stamp, stamp, status, stamp, task_id))
+    return status
+
+
+def cancel_open_ai_tasks(db: Database, *, mode: str | None = None,
+                         task_type: str = AUTO_TASK_TYPE, video_id: int | None = None,
+                         exclude_id: int | None = None) -> int:
+    """手动「停止」用：把还没跑完的任务标 cancelled，不留一堆假的「跑着」。"""
+    marks = ", ".join("?" for _ in TASK_OPEN)
+    sql = (f"UPDATE ai_tasks SET status = 'cancelled', finished_at = ?, updated_at = ?, "
+           f"worker_id = NULL WHERE status IN ({marks}) AND task_type = ?")
+    stamp = now()
+    params: list[Any] = [stamp, stamp, *TASK_OPEN, task_type]
+    if mode:
+        sql += " AND mode = ?"
+        params.append(mode)
+    if video_id is not None:
+        sql += " AND video_id = ?"
+        params.append(video_id)
+    if exclude_id is not None:
+        sql += " AND id <> ?"
+        params.append(exclude_id)
+    with db.tx() as conn:
+        return int(conn.execute(sql, params).rowcount or 0)
+
+
+def queue_counts(db: Database, *, mode: str | None = None,
+                 task_type: str = AUTO_TASK_TYPE) -> dict[str, int]:
+    """队列里各状态各有多少条。界面显示进度、判断还有没有活都用它。"""
+    sql = "SELECT status, COUNT(*) AS n FROM ai_tasks WHERE task_type = ?"
+    params: list[Any] = [task_type]
+    if mode:
+        sql += " AND mode = ?"
+        params.append(mode)
+    counts = {state: 0 for state in ("pending", "uploading", "waiting", "processing",
+                                     "completed", "failed", "cancelled")}
+    for row in db.all(sql + " GROUP BY status", params):
+        counts[str(row["status"])] = int(row["n"])
+    counts["active"] = sum(counts[s] for s in TASK_ACTIVE)
+    counts["open"] = counts["pending"] + counts["active"]
+    return counts
+
 
 
 def claim_ai_task(db: Database, task_id: int, status: str = "uploading") -> bool:
@@ -427,8 +584,8 @@ def claim_ai_task(db: Database, task_id: int, status: str = "uploading") -> bool
 def update_ai_task(db: Database, task_id: int, status: str | None = None,
                    error: str | None = None) -> None:
     """推进任务状态，同时刷心跳（崩溃恢复靠心跳判超时）。"""
-    sets = ["heartbeat_at = ?"]
-    params: list[Any] = [now()]
+    sets = ["heartbeat_at = ?", "updated_at = ?"]
+    params: list[Any] = [now(), now()]
     if status:
         sets.append("status = ?")
         params.append(status)
@@ -443,8 +600,9 @@ def update_ai_task(db: Database, task_id: int, status: str | None = None,
 def complete_ai_task(db: Database, task_id: int) -> None:
     with db.tx() as conn:
         conn.execute(
-            "UPDATE ai_tasks SET status = 'completed', finished_at = ?, error = NULL WHERE id = ?",
-            (now(), task_id))
+            "UPDATE ai_tasks SET status = 'completed', finished_at = ?, updated_at = ?, "
+            "worker_id = NULL, error = NULL WHERE id = ?",
+            (now(), now(), task_id))
 
 
 def fail_ai_task(db: Database, task_id: int, error: str, *, retry: bool = False) -> None:
@@ -472,6 +630,7 @@ def cancel_ai_tasks(db: Database, video_id: int | None = None) -> int:
 
 
 def pending_ai_tasks(db: Database, *, mode: str | None = None,
+                     task_type: str | None = None,
                      limit: int = 500) -> list[sqlite3.Row]:
     sql = ("SELECT t.*, v.file_path, v.file_name FROM ai_tasks t "
            "JOIN videos v ON v.id = t.video_id WHERE t.status = 'pending'")
@@ -479,8 +638,11 @@ def pending_ai_tasks(db: Database, *, mode: str | None = None,
     if mode:
         sql += " AND t.mode = ?"
         params.append(mode)
+    if task_type:
+        sql += " AND t.task_type = ?"
+        params.append(task_type)
     params.append(limit)
-    return db.all(sql + " ORDER BY t.id LIMIT ?", params)
+    return db.all(sql + " ORDER BY t.priority, t.id LIMIT ?", params)
 
 
 def get_ai_task(db: Database, task_id: int) -> sqlite3.Row | None:
@@ -495,16 +657,17 @@ def recover_stale_ai_tasks(db: Database, timeout_minutes: float = 30.0) -> int:
     cutoff = time.strftime("%Y-%m-%dT%H:%M:%S",
                            time.localtime(time.time() - timeout_minutes * 60))
     marks = ", ".join("?" for _ in TASK_ACTIVE)
+    stamp = now()
     with db.tx() as conn:
         cur = conn.execute(
             f"""
             UPDATE ai_tasks
                SET status = 'pending', error = '上次异常退出，已退回等待',
-                   retry_count = retry_count + 1
+                   worker_id = NULL, updated_at = ?, finished_at = NULL
              WHERE status IN ({marks})
                AND COALESCE(heartbeat_at, started_at, created_at) < ?
             """,
-            (*TASK_ACTIVE, cutoff))
+            (stamp, *TASK_ACTIVE, cutoff))
         return int(cur.rowcount or 0)
 
 

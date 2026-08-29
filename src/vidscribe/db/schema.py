@@ -18,13 +18,18 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
 TASK_STATES = ("pending", "uploading", "waiting", "processing",
                "completed", "failed", "cancelled")
 # 跑着一半的状态：程序崩了要靠超时把它们捞回 pending
 TASK_ACTIVE = ("uploading", "waiting", "processing")
+# 还没跑完的状态（含 pending）：幂等判重、取消剩余任务都看这一组
+TASK_OPEN = ("pending", *TASK_ACTIVE)
+# 任务种类：自动剪辑队列一种，手工单发一种（人工操作不进队列，互不干扰）
+AUTO_TASK_TYPE = "auto_clip"
+MANUAL_TASK_TYPE = "manual"
 
 ANALYSIS_STATES = ("running", "completed", "failed")
 
@@ -154,11 +159,23 @@ TABLES: tuple[str, ...] = (
         finished_at    TEXT,
         heartbeat_at   TEXT,
         retry_count    INTEGER NOT NULL DEFAULT 0,
-        error          TEXT
+        error          TEXT,
+        task_type      TEXT    NOT NULL DEFAULT 'auto_clip',
+        priority       INTEGER NOT NULL DEFAULT 100,
+        max_attempts   INTEGER NOT NULL DEFAULT 1,
+        worker_id      TEXT,
+        updated_at     TEXT
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON ai_tasks(status, created_at)",
     "CREATE INDEX IF NOT EXISTS idx_tasks_video ON ai_tasks(video_id, status)",
+    # 幂等的底线：同一个视频 + 同一种任务 + 同一种模式，同时只能有一条没跑完的。
+    # 连点五次「自动剪辑」也只会有一条 pending，靠数据库拦，不靠界面自觉。
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_open_unique
+        ON ai_tasks(video_id, task_type, mode)
+     WHERE status IN ('pending', 'uploading', 'waiting', 'processing')
+    """,
     """
     CREATE TABLE IF NOT EXISTS ai_results (
         id               INTEGER PRIMARY KEY AUTOINCREMENT,
