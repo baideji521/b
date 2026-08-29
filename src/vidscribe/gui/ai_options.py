@@ -1,12 +1,14 @@
-"""AI 选项对话框：找哪家 AI、走哪条路、用哪个模型、目录放哪儿、扩展怎么跑，都在这儿改。
+"""AI 面板（第二主界面）：找哪家 AI、走哪条路、用哪个模型、目录放哪儿、扩展怎么跑，
+还有「自动剪辑」这一串的开跑/停止和它自己的日志，都在这儿。
 
-改完直接写回 config.json（只写涉及的键，文件里其它内容不动），下次「发送_AI」立刻生效；
-只有端口要重启 GUI 才换得过去，因为 Bridge 服务在启动时就绑好了。
+改完点「保存设置」就写回 config.json（只写涉及的键，文件里其它内容不动），下次
+「发送_AI」立刻生效；只有端口要重启 GUI 才换得过去，因为 Bridge 服务在启动时就绑好了。
 AI_输入目录 / AI_输出目录 只归 AI 用：跟界面第一行的「导入文件」「导出目录…」互不相干，
 留空就按老规矩来（合并导出落 cache/，AI 自动剪的成品落导出目录）。
-
 提供方（Gemini / DeepSeek）各有自己的 key 和模型，切换时这两栏会跟着换，互不覆盖。
+这个窗口是非模态的：开着它照样能操作主界面，自动剪辑跑的过程也在这儿看。
 """
+
 
 from __future__ import annotations
 
@@ -20,16 +22,18 @@ from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QPlainTextEdit,
     QPushButton,
     QSpinBox,
+    QVBoxLayout,
 )
+
 
 from ..bridge import providers
 
@@ -86,18 +90,18 @@ def _open_dir(widget, raw: str) -> None:
     """在文件管理器里打开这个目录；不存在就问一句要不要建。"""
     text = (raw or "").strip()
     if not text:
-        QMessageBox.information(widget, "AI 选项", "先填个目录")
+        QMessageBox.information(widget, "AI 面板", "先填个目录")
         return
     path = Path(text)
     if not path.is_dir():
-        ok = QMessageBox.question(widget, "AI 选项", f"目录还不存在：\n{path}\n\n要现在建吗？",
+        ok = QMessageBox.question(widget, "AI 面板", f"目录还不存在：\n{path}\n\n要现在建吗？",
                                   QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
         if ok != QMessageBox.Yes:
             return
         try:
             path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
-            QMessageBox.warning(widget, "AI 选项", f"建不了：{exc}")
+            QMessageBox.warning(widget, "AI 面板", f"建不了：{exc}")
             return
     if os.name == "nt":
         os.startfile(str(path))  # noqa: S606 - 打开自己选的目录
@@ -106,7 +110,10 @@ def _open_dir(widget, raw: str) -> None:
 
 
 class AiOptionsDialog(QDialog):
-    """bridge 那一节配置 + 输入/输出目录的编辑器。点「保存」才落盘。"""
+    """AI 面板：bridge 那一节配置 + AI 专属目录 + 自动剪辑的开跑/停止和日志。
+
+    非模态：开着它照样能用主界面。设置点「保存设置」才落盘，点「自动剪辑」会先自动存一次。
+    """
 
     def __init__(self, cfg: Any, parent=None, log=None):
         super().__init__(parent)
@@ -114,9 +121,11 @@ class AiOptionsDialog(QDialog):
         self._log = log
         self._window = parent
 
-        self.setWindowTitle("AI 选项")
-        self.setMinimumWidth(560)
+        self.setWindowTitle("AI 面板")
+        self.setModal(False)
+        self.setMinimumWidth(640)
         bridge = cfg.bridge
+
 
         # --- 目录（只归 AI 用，跟界面的导入/导出目录各走各的）---
         self.edit_input = DropDirEdit(str(bridge.get("ai_input_dir") or ""))
@@ -194,13 +203,35 @@ class AiOptionsDialog(QDialog):
         self.hint.setProperty("role", "hint")
         self.hint.setWordWrap(True)
 
-        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Save).setText("保存")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
-        buttons.accepted.connect(self.save)
-        buttons.rejected.connect(self.reject)
+        # --- 跑起来那一块：自动剪辑 / 停止 + 状态 + 这个面板自己的日志 ---
+        self.btn_auto = QPushButton("自动剪辑")
+        self.btn_auto.setToolTip("按上面「自动剪辑干什么」选的那一串，把 AI_输入目录里的视频"
+                                 "挨个跑完；AI_输出目录里已经有同名成品的会跳过")
+        self.btn_auto.clicked.connect(self.on_auto)
+        self.btn_stop = QPushButton("停止")
+        self.btn_stop.setToolTip("中止排着的队，并取消正在跑的 AI 任务")
+        self.btn_stop.clicked.connect(self.on_stop)
+        self.btn_save = QPushButton("保存设置")
+        self.btn_save.clicked.connect(lambda: self.save(close=False))
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.close)
+        self.lbl_state = QLabel("闲着")
+        self.lbl_state.setProperty("role", "pill")
+        self.view_log = QPlainTextEdit()
+        self.view_log.setReadOnly(True)
+        self.view_log.setMaximumBlockCount(500)
+        self.view_log.setMinimumHeight(180)
+        self.view_log.setPlaceholderText("自动剪辑和 AI 对接的日志会出现在这儿")
 
-        form = QFormLayout(self)
+        run_row = QHBoxLayout()
+        run_row.setContentsMargins(0, 0, 0, 0)
+        run_row.addWidget(self.btn_auto)
+        run_row.addWidget(self.btn_stop)
+        run_row.addWidget(self.lbl_state, 1)
+        run_row.addWidget(self.btn_save)
+        run_row.addWidget(self.btn_close)
+
+        form = QFormLayout()
         form.addRow("AI_输入目录", self._dir_row(self.edit_input, "选择 AI_输入目录"))
         form.addRow("AI_输出目录", self._dir_row(self.edit_output, "选择 AI_输出目录"))
 
@@ -217,11 +248,37 @@ class AiOptionsDialog(QDialog):
         form.addRow(self.chk_focus)
         form.addRow(self.chk_clip)
         form.addRow(self.hint)
-        form.addRow(buttons)
+        outer = QVBoxLayout(self)
+        outer.addLayout(form)
+        outer.addLayout(run_row)
+        outer.addWidget(self.view_log, 1)
         self.cmb_mode.currentIndexChanged.connect(self.sync_enabled)
         self.cmb_provider.currentIndexChanged.connect(self.on_provider_changed)
         self.load_provider(self._provider)
         self.sync_enabled()
+
+    # --------------------------------------------------------- 跑自动剪辑
+    def append_log(self, line: str) -> None:
+        """主界面把 AI 相关的日志转播过来，跑的时候不用切回去看。"""
+        self.view_log.appendPlainText(line)
+
+    def set_running(self, running: bool, state: str = "") -> None:
+        """自动剪辑开跑 / 收工时由主界面调，用来锁按钮和改状态字。"""
+        self.btn_auto.setEnabled(not running)
+        self.lbl_state.setText(state or ("跑着" if running else "闲着"))
+
+
+    def on_auto(self) -> None:
+        self.save(close=False)  # 先把眼前这套设置落盘，跑的就是你看到的
+        run = getattr(self._window, "on_auto_clip", None)
+        if callable(run):
+            run()
+
+    def on_stop(self) -> None:
+        stop = getattr(self._window, "on_bridge_stop", None)
+        if callable(stop):
+            stop()
+
 
     # ------------------------------------------------------------- 组件
     def _dir_row(self, edit: DropDirEdit, title: str):
@@ -284,8 +341,10 @@ class AiOptionsDialog(QDialog):
             w.setEnabled(not api)
 
     # ------------------------------------------------------------- 保存
-    def save(self) -> None:
+    def save(self, close: bool = True) -> None:
+        """把当前这套写回 config.json。close=False 是面板里点「保存设置」，窗口留着。"""
         old_port = int(self.cfg.bridge.get("port") or 5998)
+
         self.stash_provider()
         bridge: dict[str, Any] = {
             "mode": self.cmb_mode.currentData(),
@@ -314,7 +373,7 @@ class AiOptionsDialog(QDialog):
         try:
             path = self.cfg.save_patch(patch)
         except OSError as exc:
-            QMessageBox.warning(self, "AI 选项", f"写 config.json 失败：{exc}")
+            QMessageBox.warning(self, "AI 面板", f"写 config.json 失败：{exc}")
             return
 
         if self._log:
@@ -326,7 +385,9 @@ class AiOptionsDialog(QDialog):
                       f"AI_输出目录 {bridge['ai_output_dir'] or '（留空，用导出目录）'}")
 
         if int(self.spin_port.value()) != old_port:
-            QMessageBox.information(self, "AI 选项",
+            QMessageBox.information(self, "AI 面板",
                                     "端口改了，要重开 GUI 才会换过去；"
                                     "扩展选项页里的地址也要跟着改。")
-        self.accept()
+        if close:
+            self.accept()
+

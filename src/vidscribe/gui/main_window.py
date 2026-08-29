@@ -469,6 +469,9 @@ class MainWindow(QMainWindow):
         self._auto_total = 0
         self._auto_video: Path | None = None
         self._auto_job = ""
+        # AI 面板（第二主界面）：非模态，只开一个
+        self.ai_panel = None
+
 
         # 剪辑高光的三个加减秒数（起始 / 结束 / 文本），从设置里带回来
 
@@ -651,12 +654,24 @@ class MainWindow(QMainWindow):
         CacheDialog(self.cfg, self, log=self.append_log).exec_()
 
     def on_ai_options(self) -> None:
-        """AI 选项：走接口还是网页版扩展、key、模型、端口、扩展上传方式。"""
+        """开 AI 面板（第二主界面）：AI 怎么跑、目录放哪儿，自动剪辑也在那儿点。
+
+        非模态而且只开一个：再点一次是把它拎到前面，不会又叠一个出来。
+        """
         from .ai_options import AiOptionsDialog  # noqa: PLC0415
 
-        dialog = AiOptionsDialog(self.cfg, self, log=self.append_log)
-        if dialog.exec_() == QDialog.Accepted:
-            self.refresh_bridge_label()
+        if self.ai_panel is None:
+            self.ai_panel = AiOptionsDialog(self.cfg, self, log=self.append_log)
+            self.ai_panel.finished.connect(lambda *_: self.on_ai_panel_closed())
+        self.ai_panel.set_running(self.auto_running())
+        self.ai_panel.show()
+        self.ai_panel.raise_()
+        self.ai_panel.activateWindow()
+
+    def on_ai_panel_closed(self) -> None:
+        self.ai_panel = None
+        self.refresh_bridge_label()
+
 
     # ------------------------------------------------------------- 导出目录
     def export_root(self) -> Path:
@@ -866,9 +881,10 @@ class MainWindow(QMainWindow):
         self.btn_bridge_pair.setToolTip("打开 120 秒配对窗口，扩展会自动把令牌领走；"
                                        "扩展选项页里的地址要填这里显示的端口")
         self.btn_bridge_pair.clicked.connect(self.on_bridge_pair)
-        self.btn_ai_options = QPushButton("AI 选项")
-        self.btn_ai_options.setToolTip("走接口还是网页版扩展、API key、模型、Bridge 端口、"
-                                      "扩展上传方式和自动开剪")
+        self.btn_ai_options = QPushButton("AI 面板")
+        self.btn_ai_options.setToolTip("第二主界面：走接口还是网页版扩展、API key、模型、Bridge 端口、"
+                                      "AI 专属目录，自动剪辑也在那儿点")
+
         self.btn_ai_options.clicked.connect(self.on_ai_options)
         # 「自动」勾上：分析一跑完就自己把文本发给 AI，拿到 JSON 再按 auto_clip 开剪，
         # 整条链路不用你点。状态存 gui_settings.json
@@ -883,11 +899,7 @@ class MainWindow(QMainWindow):
         self.btn_bridge_stop = QPushButton("停止_AI")
         self.btn_bridge_stop.setToolTip("取消正在跑的 AI 任务（自动剪辑排着的队也一并中止）")
         self.btn_bridge_stop.clicked.connect(self.on_bridge_stop)
-        self.btn_auto_clip = QPushButton("自动剪辑")
-        self.btn_auto_clip.setToolTip("扫 AI_输入目录里的视频，挨个跑完整串：有同名 .txt 就不再分析、"
-                                      "直接发 AI，回的 JSON 按主界面高光配置剪，成品落 AI_输出目录；"
-                                      "没有 .txt 就先分析生成。具体跑哪一串在「AI 选项 - 自动剪辑干什么」里选")
-        self.btn_auto_clip.clicked.connect(self.on_auto_clip)
+
 
         # 第二行按用起来的顺序排：发给 AI -> 停止 -> 剪辑高光。
         # 端口状态和配对按钮是扩展那边的杂事，钉到最右边，跟第一行的「高级选项」对齐
@@ -1042,11 +1054,11 @@ class MainWindow(QMainWindow):
         second_row = QHBoxLayout()
         second_row.setContentsMargins(0, 0, 0, 0)
         second_row.addWidget(flow.wrap(export_row), 1)
-        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 自动剪辑 | 停止_AI | 配对扩展 | AI 选项
+        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 停止_AI | 配对扩展 | AI 面板
         second_row.addWidget(self.chk_auto_ai, 0, Qt.AlignVCenter)
         second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
         second_row.addWidget(self.btn_bridge_send, 0, Qt.AlignTop)
-        second_row.addWidget(self.btn_auto_clip, 0, Qt.AlignTop)
+
 
         second_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
@@ -1906,7 +1918,7 @@ class MainWindow(QMainWindow):
         return ""
 
     def on_auto_clip(self) -> None:
-        """扫 AI_输入目录里的视频，挨个跑「AI 选项 - 自动剪辑干什么」选的那一串。
+        """扫 AI_输入目录里的视频，挨个跑「AI 面板 - 自动剪辑干什么」选的那一串。
 
         剪辑成片 / 收取脚本：有同名 .txt 就不再分析，直接把它发给 AI；没有就先按
         主界面配置分析、生成 <视频名>.txt，再发。回来的 JSON 按主界面高光配置剪，
@@ -1921,7 +1933,7 @@ class MainWindow(QMainWindow):
             return
         ai_in = self.ai_dir("ai_input_dir")
         if ai_in is None:
-            QMessageBox.information(self, "自动剪辑", "先在「AI 选项」里设好 AI_输入目录")
+            QMessageBox.information(self, "自动剪辑", "先在 AI 面板里设好 AI_输入目录")
             return
         videos = sorted(p for p in ai_in.iterdir()
                         if p.is_file() and p.suffix.lower() in self.VIDEO_SUFFIXES)
@@ -1933,8 +1945,9 @@ class MainWindow(QMainWindow):
         self._auto_queue = list(videos)
         self._auto_total = len(videos)
         self._auto_job = job
-        self.btn_auto_clip.setEnabled(False)
+        self._set_auto_state(False)
         already = sum(1 for v in videos if self._auto_done_file(v) is not None)
+
         self.append_log(f"[自动剪辑] {labels.get(job, job)}：{ai_in} 里排了 {len(videos)} 个视频"
                         + (f"，其中 {already} 个 AI_输出目录里已经有成品，会跳过" if already else ""))
 
@@ -1949,6 +1962,8 @@ class MainWindow(QMainWindow):
         self._auto_video = video
         index = self._auto_total - len(self._auto_queue)
         self.append_log(f"[自动剪辑] ({index}/{self._auto_total}) {video.name}")
+        self._set_auto_state(False, f"跑着 {index}/{self._auto_total}")
+
         done = self._auto_done_file(video)
         if done is not None:
             self.append_log(f"[自动剪辑] AI_输出目录里已经有 {done.name}，这个跳过")
@@ -2062,8 +2077,14 @@ class MainWindow(QMainWindow):
         self._auto_queue = []
         self._auto_video = None
         self._auto_total = 0
-        self.btn_auto_clip.setEnabled(True)
+        self._set_auto_state(True, "闲着")
         self.append_log(f"[自动剪辑] {why}")
+
+    def _set_auto_state(self, idle: bool, state: str = "") -> None:
+        """AI 面板上的「自动剪辑」按钮和状态字。面板没开着就什么都不用做。"""
+        if self.ai_panel is not None:
+            self.ai_panel.set_running(not idle, state)
+
 
     def auto_running(self) -> bool:
         return self._auto_video is not None or bool(self._auto_queue)
@@ -2523,6 +2544,10 @@ class MainWindow(QMainWindow):
 
     def append_log(self, text: str) -> None:
         self.log_view.appendPlainText(text)
+        # AI 面板开着就把 AI 相关的行也贴过去，跑批量时不用来回切窗口
+        if self.ai_panel is not None and text.lstrip().startswith(("[自动剪辑]", "[AI")):
+            self.ai_panel.append_log(text)
+
 
     # ------------------------------------------------------- 右键菜单：语音
     def selected_speech(self) -> list[int]:
