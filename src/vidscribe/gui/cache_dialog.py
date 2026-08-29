@@ -33,6 +33,7 @@ from PyQt5.QtWidgets import (
 
 from .. import cache as cache_mod
 from ..db import open_db
+from ..db import admin as db_admin
 from ..db import repo as db_repo
 from ..db.importer import refresh_from_disk
 
@@ -55,6 +56,15 @@ class CacheDialog(QDialog):
 
         self.lbl_summary = QLabel("正在扫描…")
         self.lbl_summary.setProperty("role", "hint")
+
+        # 数据库那一行：只显示现状 + 手动体检，管理主入口还是 CLI（run.py db --check 等）
+        self.lbl_db = QLabel("数据库：还没查")
+        self.lbl_db.setProperty("role", "hint")
+        btn_db_check = QPushButton("数据库检查")
+        btn_db_check.setToolTip("integrity_check、foreign_key_check、结构版本、表与索引、能不能写")
+        btn_db_check.clicked.connect(self.check_database)
+        btn_db_refresh = QPushButton("刷新数据库状态")
+        btn_db_refresh.clicked.connect(self.refresh_db_status)
 
         self.table = QTableWidget(0, 6)
         self.table.setHorizontalHeaderLabels(["名称", "类型", "视频", "大小", "多久没动", "路径"])
@@ -135,8 +145,14 @@ class CacheDialog(QDialog):
         library.addWidget(self.edit_library, 1)
         library.addWidget(btn_library)
 
+        dbline = QHBoxLayout()
+        dbline.addWidget(self.lbl_db, 1)
+        dbline.addWidget(btn_db_refresh)
+        dbline.addWidget(btn_db_check)
+
         layout = QVBoxLayout(self)
         layout.addWidget(self.lbl_summary)
+        layout.addLayout(dbline)
         layout.addLayout(library)
         layout.addLayout(picks)
         layout.addWidget(self.table, 1)
@@ -185,6 +201,54 @@ class CacheDialog(QDialog):
         except OSError:
             return None
 
+    def refresh_db_status(self) -> None:
+        """数据库现状一行文字：版本、几张表多少行、任务队列。数字全部来自库。"""
+        db = self._db()
+        if db is None:
+            self.lbl_db.setText("数据库：打不开")
+            return
+        try:
+            stats = db_repo.full_stats(db)
+        except Exception as exc:  # noqa: BLE001
+            self.lbl_db.setText(f"数据库：查不了（{exc}）")
+            return
+        tasks = stats["tasks"]
+        self.lbl_db.setText(
+            f"数据库 v{stats['schema_version']}：视频 {stats['videos']['total']}（在盘上 "
+            f"{stats['videos']['on_disk']}），文件记录 {stats['artifacts']['total']}（丢了 "
+            f"{stats['artifacts']['missing']}），AI 任务 等待 {tasks['pending']} / 跑着 "
+            f"{tasks['processing']} / 完成 {tasks['completed']} / 失败 {tasks['failed']}")
+
+    def check_database(self) -> None:
+        """手动体检。这里只看结果，备份、恢复、瘦身这些还是走 CLI。"""
+        db = self._db()
+        if db is None:
+            QMessageBox.warning(self, "数据库检查", "数据库打不开，先看日志里的原因")
+            return
+        try:
+            result = db_admin.health_check(db)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "数据库检查", f"检查没做完：{exc}")
+            return
+        lines = [f"完整性：{result['integrity']}",
+                 f"外键：{result['foreign_keys']}",
+                 f"结构版本：v{result['version']}（程序要 v{result['expected_version']}）",
+                 f"表：{'齐了' if not result['missing_tables'] else '缺 ' + '、'.join(result['missing_tables'])}",
+                 f"索引：{'齐了' if not result['missing_indexes'] else '缺 ' + '、'.join(result['missing_indexes'])}",
+                 f"日志模式：{result['journal_mode']}",
+                 f"可写：{'是' if result['writable'] else '否'}"]
+        if result["problems"]:
+            lines.append("")
+            lines.extend("问题：" + p for p in result["problems"])
+        text = "\n".join(lines)
+        if self._log:
+            self._log("[数据库] 体检：" + ("正常" if result["ok"] else "；".join(result["problems"])))
+        if result["ok"]:
+            QMessageBox.information(self, "数据库检查", text)
+        else:
+            QMessageBox.warning(self, "数据库检查", text)
+        self.refresh_db_status()
+
     def reload(self) -> None:
         self._loading = True
         self._load_db_videos()
@@ -213,6 +277,7 @@ class CacheDialog(QDialog):
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         self._loading = False
         self.refresh_summary()
+        self.refresh_db_status()
 
     @staticmethod
     def _library_text(item: dict[str, Any]) -> str:

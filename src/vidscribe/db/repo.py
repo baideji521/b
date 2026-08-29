@@ -17,7 +17,7 @@ from typing import Any
 from ..logging_setup import get_logger
 from .db import Database
 from .fingerprint import config_hash, fingerprint
-from .schema import AUTO_TASK_TYPE, TASK_ACTIVE, TASK_OPEN
+from .schema import ANALYSIS_STATES, AUTO_TASK_TYPE, TASK_ACTIVE, TASK_OPEN, TASK_STATES
 
 logger = get_logger(__name__)
 
@@ -659,6 +659,23 @@ def get_ai_task(db: Database, task_id: int) -> sqlite3.Row | None:
     return db.one("SELECT * FROM ai_tasks WHERE id = ?", (task_id,))
 
 
+def touch_ai_task(db: Database, task_id: int) -> bool:
+    """只刷心跳，不动状态。
+
+    长活（Qwen、Whisper、FFmpeg、等 AI 回话）随便跑多久都可能超过
+    `ai_task_timeout_minutes`；只要还在定期刷这个时间戳，恢复逻辑就不会把它当死任务。
+    只对还在跑的状态生效——已经 completed/failed 的别被心跳弄活。
+    """
+    marks = ", ".join("?" for _ in TASK_ACTIVE)
+    stamp = now()
+    with db.tx() as conn:
+        cur = conn.execute(
+            f"UPDATE ai_tasks SET heartbeat_at = ?, updated_at = ? "
+            f"WHERE id = ? AND status IN ({marks})",
+            (stamp, stamp, task_id, *TASK_ACTIVE))
+        return bool(cur.rowcount)
+
+
 def recover_stale_ai_tasks(db: Database, timeout_minutes: float = 30.0) -> int:
     """捞回卡死的任务：uploading/waiting/processing 且心跳超时的，退回 pending。
 
@@ -1005,3 +1022,72 @@ def counts(db: Database) -> dict[str, int]:
     tables = ("videos", "analysis_runs", "visual_events", "speech_segments", "speech_words",
               "ai_tasks", "ai_results", "clips", "artifacts")
     return {name: int(db.value(f"SELECT COUNT(*) FROM {name}", default=0)) for name in tables}
+
+
+def full_stats(db: Database) -> dict[str, Any]:
+    """整库现状，全部来自 SQL——不扫目录数文件，业务数字只认库。"""
+    def _by_status(table: str, states: tuple[str, ...]) -> dict[str, int]:
+        out = {state: 0 for state in states}
+        for row in db.all(f"SELECT status, COUNT(*) AS n FROM {table} GROUP BY status"):
+            out[str(row["status"])] = int(row["n"])
+        return out
+
+    videos_total = int(db.value("SELECT COUNT(*) FROM videos", default=0))
+    videos_here = int(db.value("SELECT COUNT(*) FROM videos WHERE exists_on_disk = 1", default=0))
+    artifacts_total = int(db.value("SELECT COUNT(*) FROM artifacts", default=0))
+    artifacts_here = int(db.value("SELECT COUNT(*) FROM artifacts WHERE exists_on_disk = 1",
+                                  default=0))
+    clips = _by_status("clips", ("planned", "rendered", "failed"))
+    return {
+        "schema_version": int(db.value("PRAGMA user_version", default=0) or 0),
+        "videos": {"total": videos_total, "on_disk": videos_here,
+                   "missing": videos_total - videos_here},
+        "analysis": _by_status("analysis_runs", ANALYSIS_STATES),
+        "tasks": _by_status("ai_tasks", TASK_STATES),
+        "ai_results": int(db.value("SELECT COUNT(*) FROM ai_results", default=0)),
+        "clips": {**clips, "total": int(db.value("SELECT COUNT(*) FROM clips", default=0))},
+        "artifacts": {"total": artifacts_total, "on_disk": artifacts_here,
+                      "missing": artifacts_total - artifacts_here},
+        "artifacts_by_type": {str(r["type"]): int(r["n"]) for r in db.all(
+            "SELECT type, COUNT(*) AS n FROM artifacts GROUP BY type ORDER BY type")},
+        "speech_words": int(db.value("SELECT COUNT(*) FROM speech_words", default=0)),
+        "speech_segments": int(db.value("SELECT COUNT(*) FROM speech_segments", default=0)),
+        "visual_events": int(db.value("SELECT COUNT(*) FROM visual_events", default=0)),
+    }
+
+
+def cache_stats(db: Database) -> dict[str, Any]:
+    """分析次数与模型分布。
+
+    说明清楚口径：库里记的是「真的跑过一次分析」（每次一条 analysis_runs），
+    **命中缓存那次什么都不写**，所以没法从库里数出准确的命中次数。
+    这里只给能确凿算出来的：跑过多少次、其中多少次是同一视频同一套配置又跑了一遍
+    （`reruns`，说明那次没吃到缓存），以及按模型的分布。
+    """
+    total = int(db.value("SELECT COUNT(*) FROM analysis_runs", default=0))
+    completed = int(db.value("SELECT COUNT(*) FROM analysis_runs WHERE status = 'completed'",
+                             default=0))
+    combos = int(db.value(
+        """
+        SELECT COUNT(*) FROM (
+            SELECT video_id, vision_model, vision_config_hash, asr_model, asr_config_hash
+              FROM analysis_runs WHERE status = 'completed'
+             GROUP BY video_id, vision_model, vision_config_hash, asr_model, asr_config_hash)
+        """, default=0))
+    return {
+        "runs_total": total,
+        "runs_completed": completed,
+        "runs_failed": int(db.value("SELECT COUNT(*) FROM analysis_runs WHERE status = 'failed'",
+                                    default=0)),
+        "runs_running": int(db.value("SELECT COUNT(*) FROM analysis_runs WHERE status = 'running'",
+                                     default=0)),
+        "distinct_configs": combos,
+        "reruns": max(completed - combos, 0),
+        "by_vision_model": {str(r["m"] or "(没记)"): int(r["n"]) for r in db.all(
+            "SELECT vision_model AS m, COUNT(*) AS n FROM analysis_runs "
+            "GROUP BY vision_model ORDER BY n DESC")},
+        "by_asr_model": {str(r["m"] or "(没记)"): int(r["n"]) for r in db.all(
+            "SELECT asr_model AS m, COUNT(*) AS n FROM analysis_runs "
+            "GROUP BY asr_model ORDER BY n DESC")},
+        "hit_events_recorded": False,
+    }

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import sys
 import time
 import traceback
@@ -352,18 +353,75 @@ def cmd_cache(cfg: Config, args: argparse.Namespace) -> int:
 
 
 # ------------------------------------------------------------------- 数据库
+def _db_report_check(result: dict[str, Any]) -> int:
+    """打印体检结果，返回 exit code（有问题就非 0）。"""
+    logger.info("数据库检查")
+    logger.info("--------------------")
+    logger.info("SQLite integrity : %s", result["integrity"])
+    logger.info("Foreign keys     : %s", result["foreign_keys"])
+    logger.info("Schema version   : v%s（程序要 v%s）",
+                result["version"], result["expected_version"])
+    logger.info("Tables           : %s",
+                "OK" if not result["missing_tables"] else "缺 " + "、".join(result["missing_tables"]))
+    logger.info("Indexes          : %s",
+                "OK" if not result["missing_indexes"]
+                else "缺 " + "、".join(result["missing_indexes"]))
+    logger.info("Journal mode     : %s", result["journal_mode"])
+    logger.info("Database         : %s", "OK" if result["writable"] else "写不进去")
+    for row in result["fk_violations"]:
+        logger.warning("外键不一致：%s", row)
+    if result["ok"]:
+        return 0
+    for problem in result["problems"]:
+        logger.error("有问题：%s", problem)
+    return 1
+
+
+def _db_report_stats(stats: dict[str, Any], cache: dict[str, Any]) -> None:
+    """整库统计。数字全部来自 SQL，不重新扫目录。"""
+    videos = stats["videos"]
+    logger.info("视频：总数 %d，在盘上 %d，已不在盘上 %d",
+                videos["total"], videos["on_disk"], videos["missing"])
+    logger.info("分析：%s", "，".join(f"{k} {v}" for k, v in stats["analysis"].items()))
+    logger.info("AI 任务：%s", "，".join(f"{k} {v}" for k, v in stats["tasks"].items()))
+    logger.info("AI 结果：%d", stats["ai_results"])
+    clips = stats["clips"]
+    logger.info("片段：总数 %d，已出片 %d，失败 %d，计划中 %d",
+                clips["total"], clips["rendered"], clips["failed"], clips["planned"])
+    art = stats["artifacts"]
+    logger.info("文件记录：总数 %d，还在 %d，丢了 %d", art["total"], art["on_disk"], art["missing"])
+    logger.info("文件按类型：%s", "，".join(f"{k} {v}" for k, v in stats["artifacts_by_type"].items())
+                or "（没有）")
+    logger.info("逐词 %d，语音段 %d，视觉事件 %d",
+                stats["speech_words"], stats["speech_segments"], stats["visual_events"])
+    logger.info("分析次数：总 %d（完成 %d / 失败 %d / 还在跑 %d），不同配置组合 %d，"
+                "同配置重复跑过 %d 次",
+                cache["runs_total"], cache["runs_completed"], cache["runs_failed"],
+                cache["runs_running"], cache["distinct_configs"], cache["reruns"])
+    logger.info("视觉模型：%s", "，".join(f"{k} {v}" for k, v in cache["by_vision_model"].items())
+                or "（没有）")
+    logger.info("ASR 模型：%s", "，".join(f"{k} {v}" for k, v in cache["by_asr_model"].items())
+                or "（没有）")
+    logger.info("说明：命中缓存那次不会写库（省下的就是没跑），所以命中次数没法从库里数出来；"
+                "上面的「重复跑过」才是确凿的未命中次数")
+
+
 def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
-    """SQLite 库：建库 / 导入旧缓存 / 跟磁盘对账 / 看现状。
+    """SQLite 库：建库 / 导入旧缓存 / 对账 / 体检 / 备份恢复 / 瘦身 / 查孤儿。
 
     库只记状态（视频、分析批次、事件、逐词时间戳、AI 任务与结果、片段、文件），
-    分析结果照旧落 output/ 和 cache/，导入不会删任何文件。
+    分析结果照旧落 output/ 和 cache/。这里的命令一律不删历史记录，也不删业务文件。
     """
-    from vidscribe.db import db_path, open_db  # noqa: PLC0415
+    from vidscribe import cache as cache_mod  # noqa: PLC0415
+    from vidscribe.db import admin, db_path, open_db  # noqa: PLC0415
     from vidscribe.db import repo  # noqa: PLC0415
     from vidscribe.db.importer import import_all, reconcile  # noqa: PLC0415
 
     db = open_db(cfg)
     logger.info("库文件 %s", db_path(cfg))
+    code = 0
+    if args.init:
+        logger.info("库已就绪，结构版本 v%s", db.value("PRAGMA user_version"))
     if args.do_import:
         stats = import_all(cfg, db)
         logger.info("导入：视频 %d，分析 %d，视觉事件 %d，语音段 %d，逐词 %d，"
@@ -382,13 +440,71 @@ def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
         runs = repo.recover_stale_analyses(
             db, float(cfg.runtime.get("analysis_timeout_minutes", 180)))
         logger.info("恢复：%d 个卡住的 AI 任务退回等待，%d 条没跑完的分析标成失败", tasks, runs)
+    if args.check:
+        code = _db_report_check(admin.health_check(db)) or code
+    if args.backup is not None:
+        try:
+            dest = admin.backup(db, args.backup or None)
+            checked = admin.verify_file(dest)
+            logger.info("备份：%s（%s，integrity %s，foreign_keys %s，v%s）",
+                        dest, cache_mod.human_size(dest.stat().st_size),
+                        checked["integrity"], checked["foreign_keys"], checked["version"])
+            if not checked["ok"]:
+                logger.error("备份文件不合格：%s", "；".join(checked["problems"]))
+                code = 1
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            logger.error("备份失败：%s", exc)
+            code = 1
+    if args.restore:
+        try:
+            report = admin.restore(db, args.restore)
+        except sqlite3.Error as exc:
+            logger.error("恢复失败：%s", exc)
+            return 1
+        if not report["restored"]:
+            logger.error("没恢复：%s", report.get("error", "备份不合格"))
+            return 1
+        logger.info("已恢复自 %s；当前库先备份到 %s", report["source"], report["safety_backup"])
+        logger.info("恢复后行数：%s", "，".join(f"{k} {v}" for k, v in report["counts"].items()))
+        code = _db_report_check(report["after_check"]) or code
+    if args.vacuum:
+        result = admin.vacuum(db, force=bool(args.force))
+        if not result["done"]:
+            logger.error("没做 VACUUM：%s", result.get("error", "未知原因"))
+            code = 1
+        else:
+            freed = result["size_before"] - result["size_after"]
+            logger.info("VACUUM 完成：%s -> %s（%s %s），journal_mode %s，integrity %s",
+                        cache_mod.human_size(result["size_before"]),
+                        cache_mod.human_size(result["size_after"]),
+                        "腾出" if freed >= 0 else "多占",
+                        cache_mod.human_size(abs(freed)),
+                        result["journal_mode"], result["integrity"])
+    if args.orphans:
+        found = admin.orphans(db)
+        for item in found["relations"]:
+            logger.warning("%s：%d 条（%s.%s 对不上 %s），例：%s", item["why"], item["count"],
+                           item["table"], item["column"], item["parent"], item["sample"])
+        if not found["relations"]:
+            logger.info("表之间的关联没有对不上的")
+        logger.info("登记着但文件已经没了：%d 条（只报告，不删记录）",
+                    found["artifacts_missing_total"])
+        for item in found["artifacts_missing"][:10]:
+            logger.info("  丢了：#%d %s %s", item["id"], item["type"], item["path"])
+        loose = admin.unregistered_files(cfg, db)
+        logger.info("盘上有、库里还没登记的视频：%d 个（跑 `db --reconcile` 或 `--import` 补登记）",
+                    loose["count"])
+        for name in loose["sample"][:10]:
+            logger.info("  没登记：%s", name)
+    if args.stats:
+        _db_report_stats(repo.full_stats(db), repo.cache_stats(db))
 
     rows = repo.counts(db)
     logger.info("表内容：%s", "，".join(f"{k} {v}" for k, v in rows.items()))
     stats = repo.get_statistics(db)
     logger.info("统计：总任务 %d / 未剪辑 %d / 已获取 JSON %d / 成品 %d",
                 stats["total"], stats["todo"], stats["json"], stats["done"])
-    return 0
+    return code
 
 
 # ------------------------------------------------------------------ 高光剪辑
@@ -697,13 +813,30 @@ def build_parser() -> argparse.ArgumentParser:
                               "只影响 --clean 删哪些，不加 --clean 什么都不删")
     p_cache.set_defaults(func=cmd_cache)
 
-    p_db = sub.add_parser("db", help="SQLite 库：建库 / 导入旧缓存 / 跟磁盘对账 / 看现状")
+    p_db = sub.add_parser("db", help="SQLite 库：建库 / 导入旧缓存 / 对账 / 体检 / 备份恢复 / 查孤儿")
+    p_db.add_argument("--init", action="store_true",
+                      help="建库/升级到当前结构版本（不给任何参数时也会做，这个只是把版本打出来）")
     p_db.add_argument("--import", dest="do_import", action="store_true",
                       help="扫 cache/、output/、视频库、AI 目录，把已有结果导进库（不删任何文件）")
     p_db.add_argument("--reconcile", action="store_true",
                       help="对账：库里记的视频/文件还在不在盘上，只改状态不删记录")
     p_db.add_argument("--recover", action="store_true",
                       help="恢复：卡住的 AI 任务退回等待，没跑完的分析标失败")
+    p_db.add_argument("--check", action="store_true",
+                      help="体检：integrity_check、foreign_key_check、版本、表与索引、能不能写。"
+                           "有问题时退出码非 0")
+    p_db.add_argument("--stats", action="store_true",
+                      help="整库统计（视频/分析/任务/结果/片段/文件/逐词/模型分布），数字全部来自 SQL")
+    p_db.add_argument("--backup", nargs="?", const="", default=None, metavar="路径",
+                      help="用 SQLite backup API 备份（WAL 一起进去）。不给路径就落 database/backups/")
+    p_db.add_argument("--restore", default=None, metavar="备份文件",
+                      help="从备份恢复：先验备份、再给当前库留一份安全备份，最后写回并复检")
+    p_db.add_argument("--vacuum", action="store_true",
+                      help="整理库文件（手动才做）。有任务在跑就拒绝，除非加 --force")
+    p_db.add_argument("--orphans", action="store_true",
+                      help="只报告不删：表之间对不上的记录、登记了但文件没了的产物、盘上没登记的视频")
+    p_db.add_argument("--force", action="store_true",
+                      help="配合 --vacuum：明知有任务在跑也要做")
     p_db.set_defaults(func=cmd_db)
 
 

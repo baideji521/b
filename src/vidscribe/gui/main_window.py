@@ -506,6 +506,15 @@ class MainWindow(QMainWindow):
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self.save_settings)
 
+        # 当前这条自动剪辑任务的心跳：Qwen / Whisper / FFmpeg / 等 AI 回话都可能比
+        # ai_task_timeout_minutes 还久，只要一直在刷心跳，恢复逻辑就不会把它当死任务捞走。
+        # 刷得比超时快得多（取超时的四分之一，10 秒到 60 秒之间）
+        timeout_ms = float(cfg.runtime.get("ai_task_timeout_minutes", 30) or 30) * 60_000
+        self._hb_timer = QTimer(self)
+        self._hb_timer.setInterval(int(max(10_000, min(60_000, timeout_ms / 4))))
+        self._hb_timer.timeout.connect(self._touch_auto_task)
+        self._hb_timer.start()
+
 
         self.setWindowTitle(theme.APP_TITLE)
         self.setWindowIcon(theme.app_icon())
@@ -2158,6 +2167,20 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 任务 #{task_id} 状态写不进去：{exc}")
             return outcome
+
+    def _touch_auto_task(self) -> None:
+        """给当前这条任务刷心跳。没有在跑的任务就什么都不做。"""
+        task_id = self._auto_task_id
+        if task_id is None:
+            return
+        db = self._db()
+        if db is None:
+            return
+        try:
+            db_repo.touch_ai_task(db, task_id)
+        except Exception:  # noqa: BLE001, S110
+            # 刷心跳失败不该打断正在跑的活，也别每分钟往日志面板刷一行
+            pass
 
     def _resume_auto_queue(self) -> None:
         """开程序时把上次没跑完的任务捞回来接着跑（强关、崩溃都算）。
