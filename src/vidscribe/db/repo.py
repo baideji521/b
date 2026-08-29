@@ -756,6 +756,17 @@ def get_ai_result(db: Database, video_id: int) -> sqlite3.Row | None:
                   (video_id,))
 
 
+def ai_result_for_task(db: Database, task_id: int) -> sqlite3.Row | None:
+    """**这一条任务**最新的那份 AI 结果。只读。
+
+    崩溃续跑要用它回答「这条任务是不是已经问过 AI 了」，所以只认 task_id 对得上的：
+    按 video_id 取（get_ai_result）会捞到同一个视频以前那些任务的结果，
+    拿旧结果去剪新任务是错的。同一条任务重发过几次就取 id 最大的那份。
+    """
+    return db.one("SELECT * FROM ai_results WHERE task_id = ? ORDER BY id DESC LIMIT 1",
+                  (task_id,))
+
+
 # ===================================================================== 片段
 def clips_from_payload(payload: Any) -> list[dict[str, Any]]:
     """从 AI JSON 里抠出片段。字段原样取，不做任何推算或改写。

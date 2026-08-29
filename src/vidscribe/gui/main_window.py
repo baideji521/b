@@ -2151,6 +2151,18 @@ class MainWindow(QMainWindow):
             self._set_auto_step(video.stem, "剪辑")
             self._auto_clip_from_script(video)
             return
+        if self._auto_job == "full":
+            # 上次可能是"AI 已经回话、成品还没剪"就被强关的：这条任务名下已经有 AI 结果，
+            # 就直接拿它开剪，别再问一遍 AI（那是真金白银的配额）
+            resumed = self._resume_existing_ai_json()
+            if resumed is not None:
+                self.append_log(f"[自动剪辑] 任务 #{self._auto_task_id} 之前已经拿到过 AI 结果，"
+                                "直接按它开剪，不再问 AI")
+                self._last_highlight_json = resumed
+                self._auto_save_script()  # 脚本文件可能还没落地，补一份留档
+                self._set_auto_step(video.stem, "剪辑")
+                self.run_highlight(resumed, ai=True)
+                return
         text_file = self._auto_text_file(video)
         if text_file is not None:
             self.append_log(f"[自动剪辑] 已有 {text_file.name}，不再分析，直接发 AI")
@@ -2383,6 +2395,37 @@ class MainWindow(QMainWindow):
                 db_repo.create_clip(db, vid, spec, ai_result_id=result_id)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] AI 结果存不进去：{exc}")
+
+    def _resume_existing_ai_json(self) -> str | None:
+        """这条任务是不是已经问过 AI 了。是就返回可以直接开剪的 JSON 文本，否则 None。
+
+        只认 `ai_results.task_id` 等于当前这条任务的那份结果：同一个视频以前那些任务
+        （用户手动重跑会新建一条任务）的结果不算数，拿旧结果剪新任务是错的。
+        `ai_script` 文件也不算证据——它没有任务归属，用户手放在视频旁边的脚本也会被登记成
+        这一类，证明不了"这次的 AI 已经回过话"。
+        存着的 JSON 解不开、或者抠不出可用片段，就当没有：宁可重新问一次 AI，
+        也不能让一份坏结果把任务卡死。查库出错同理（记一行日志，走原来的发送流程）。
+        """
+        db = self._db()
+        task_id = self._auto_task_id
+        if db is None or task_id is None:
+            return None
+        try:
+            row = db_repo.ai_result_for_task(db, task_id)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 任务 #{task_id} 的已有 AI 结果查不出来，按重新问 AI 处理：{exc}")
+            return None
+        if row is None or not row["json_data"]:
+            return None
+        try:
+            parsed = json.loads(str(row["json_data"]))
+        except (TypeError, ValueError) as exc:
+            self.append_log(f"[自动剪辑] 任务 #{task_id} 存着的 AI JSON 解不开（{exc}），重新问 AI")
+            return None
+        if not isinstance(parsed, dict) or not db_repo.clips_from_payload(parsed):
+            self.append_log(f"[自动剪辑] 任务 #{task_id} 存着的 AI JSON 里没有可用片段，重新问 AI")
+            return None
+        return json.dumps(parsed, ensure_ascii=False, indent=2)
 
     def _auto_text_file(self, video: Path) -> Path | None:
         """给 AI 看的合并文本。查 artifacts.merged_txt，路径由库里给。"""
