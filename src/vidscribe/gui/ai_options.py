@@ -1,12 +1,12 @@
-"""AI 面板（第二主界面）：找哪家 AI、走哪条路、用哪个模型、目录放哪儿、扩展怎么跑，
-还有「自动剪辑」这一串的开跑/停止和它自己的日志，都在这儿。
+"""AI 面板（第二主界面）+ AI 接口设置。
 
-改完点「保存设置」就写回 config.json（只写涉及的键，文件里其它内容不动），下次
-「发送_AI」立刻生效；只有端口要重启 GUI 才换得过去，因为 Bridge 服务在启动时就绑好了。
-AI_输入目录 / AI_输出目录 只归 AI 用：跟界面第一行的「导入文件」「导出目录…」互不相干，
-留空就按老规矩来（合并导出落 cache/，AI 自动剪的成品落导出目录）。
-提供方（Gemini / DeepSeek）各有自己的 key 和模型，切换时这两栏会跟着换，互不覆盖。
-这个窗口是非模态的：开着它照样能操作主界面，自动剪辑跑的过程也在这儿看。
+- `AiPanel`：自动剪辑那一摊——三种模式、AI 专属目录、任务统计、每个 mp4 卡在哪一步的
+  任务表、开跑/停止和日志。非模态，开着它照样能用主界面；也能单独跑（run.py ai）。
+- `AiApiDialog`：AI 接口本身的设置——找哪家 AI、走接口还是网页版扩展、key、模型、超时、
+  Bridge 端口、扩展上传方式。主界面上的「AI接口」按钮开这个。
+
+两个窗口各写各的键（都是 config.json 的 bridge 一节，只写自己那几个），互不覆盖。
+AI_输入目录 / AI_输出目录 只归 AI 用，跟界面第一行的「导入文件」「导出目录…」互不相干。
 """
 
 
@@ -19,23 +19,44 @@ from typing import Any
 from PyQt5.QtCore import Qt, QUrl
 from PyQt5.QtGui import QDesktopServices
 from PyQt5.QtWidgets import (
+    QAbstractItemView,
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSpinBox,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
-
 from ..bridge import providers
+
+# 任务表里每一步的记号：干完了 / 正在干 / 还没轮到 / 砸了
+DONE, RUNNING, WAITING, FAILED = "✓", "●", "—", "✕"
+
+VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi", ".flv", ".webm", ".m4v",
+                  ".ts", ".mpg", ".mpeg", ".wmv")
+
+JOBS = (
+    ("full", "剪辑成片", "MP4 + TXT\n↓\nJSON\n↓\n自动剪辑"),
+    ("collect", "收取脚本", "MP4 + TXT\n↓\nJSON\n↓\n保存 JSON"),
+    ("script", "脚本剪辑", "MP4 + JSON\n↓\n自动剪辑\n↓\n成品"),
+)
 
 
 class DropDirEdit(QLineEdit):
@@ -109,10 +130,37 @@ def _open_dir(widget, raw: str) -> None:
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
 
-class AiOptionsDialog(QDialog):
-    """AI 面板：bridge 那一节配置 + AI 专属目录 + 自动剪辑的开跑/停止和日志。
+def _dir_row(owner, edit: DropDirEdit, title: str) -> QWidget:
+    """一行：路径框 + 选择目录 + 打开。返回装好的容器控件。"""
+    browse = QPushButton("选择目录")
+    browse.clicked.connect(lambda: _browse_into(owner, edit, title))
+    opener = QPushButton("打开")
+    opener.clicked.connect(lambda: _open_dir(owner, edit.text()))
+    box = QWidget()
+    row = QHBoxLayout(box)
+    row.setContentsMargins(0, 0, 0, 0)
+    row.addWidget(edit, 1)
+    row.addWidget(browse)
+    row.addWidget(opener)
+    return box
 
-    非模态：开着它照样能用主界面。设置点「保存设置」才落盘，点「自动剪辑」会先自动存一次。
+
+def _browse_into(owner, edit: DropDirEdit, title: str) -> None:
+    start = edit.text().strip() or str(owner.cfg.root)
+    chosen = QFileDialog.getExistingDirectory(owner, title, start)
+    if chosen:
+        edit.setText(chosen)
+
+
+# ==================================================================== AI 面板
+class AiPanel(QDialog):
+    """自动剪辑的操作台：选模式、指目录、看每个 mp4 卡在哪一步、开跑。
+
+    表里的四个状态是各自独立查出来的，不靠猜：
+    - 分析：output/<视频名>/timeline.json 在不在
+    - TXT：AI_输入目录里有没有 <视频名>.txt
+    - JSON：AI_输出目录里有没有 <视频名>_脚本.json
+    - 成品：AI_输出目录里有没有 <视频名>_高光时刻.mp4
     """
 
     def __init__(self, cfg: Any, parent=None, log=None):
@@ -120,26 +168,318 @@ class AiOptionsDialog(QDialog):
         self.cfg = cfg
         self._log = log
         self._window = parent
+        self._job = str(cfg.bridge.get("ai_job") or "full")
+        self._active_stem = ""
+        self._active_step = ""
 
-        self.setWindowTitle("AI 面板")
+        self.setWindowTitle("AI 自动剪辑")
         self.setModal(False)
-        self.setMinimumWidth(640)
+        self.setMinimumSize(820, 640)
         self.setSizeGripEnabled(True)
         # QDialog 默认只给个关闭按钮，这儿当第二主界面用，最小化/最大化都得有
         self.setWindowFlags(self.windowFlags() | Qt.WindowMinimizeButtonHint
                             | Qt.WindowMaximizeButtonHint)
-        bridge = cfg.bridge
 
+        outer = QVBoxLayout(self)
+        outer.addWidget(self._build_modes())
+        outer.addWidget(self._build_dirs())
+        outer.addWidget(self._build_stats())
+        outer.addWidget(self._build_current())
+        outer.addWidget(self._build_table(), 1)
+        outer.addWidget(self._build_log())
+        outer.addLayout(self._build_buttons())
+        self.refresh_tasks()
 
+    # ------------------------------------------------------------ 各块界面
+    def _build_modes(self) -> QWidget:
+        box = QGroupBox("干哪一串")
+        row = QHBoxLayout(box)
+        self._job_group = QButtonGroup(self)
+        self._job_group.setExclusive(True)
+        for name, title, flow in JOBS:
+            card = QPushButton(f"{title}\n\n{flow}")
+            card.setCheckable(True)
+            card.setMinimumHeight(120)
+            card.setChecked(name == self._job)
+            card.setToolTip({"full": "缺 <视频名>.txt 就先按主界面配置分析，再发 AI，"
+                                     "回的 JSON 按主界面高光配置剪，成品落 AI_输出目录",
+                             "collect": "同「剪辑成片」，但拿到 JSON 只存成 <视频名>_脚本.json，不渲染",
+                             "script": "跳过 AI：直接用现成的 <视频名>_脚本.json 开剪"}[name])
+            card.clicked.connect(lambda _=False, key=name: self._pick_job(key))
+            self._job_group.addButton(card)
+            row.addWidget(card, 1)
+        return box
 
-        # --- 目录（只归 AI 用，跟界面的导入/导出目录各走各的）---
+    def _build_dirs(self) -> QWidget:
+        bridge = self.cfg.bridge
         self.edit_input = DropDirEdit(str(bridge.get("ai_input_dir") or ""))
         self.edit_output = DropDirEdit(str(bridge.get("ai_output_dir") or ""))
-        self.edit_input.setToolTip("发给 AI 的合并 txt 放这儿。留空＝放 cache/ 并在任务结束后删掉")
-        self.edit_output.setToolTip("AI 自动剪的高光成品放这儿。留空＝放界面上选的导出目录")
+        self.edit_input.setToolTip("要处理的视频、以及发给 AI 的 <视频名>.txt 都在这儿")
+        self.edit_output.setToolTip("脚本 JSON 和高光成品落在这儿。留空＝用界面上选的导出目录")
+        self.edit_input.editingFinished.connect(self.refresh_tasks)
+        self.edit_output.editingFinished.connect(self.refresh_tasks)
+        box = QWidget()
+        form = QFormLayout(box)
+        form.setContentsMargins(0, 0, 0, 0)
+        form.addRow("AI_输入目录", _dir_row(self, self.edit_input, "选择 AI_输入目录"))
+        form.addRow("AI_输出目录", _dir_row(self, self.edit_output, "选择 AI_输出目录"))
+        return box
+
+    def _build_stats(self) -> QWidget:
+        box = QGroupBox("AI 任务统计")
+        grid = QGridLayout(box)
+        self._stat_labels: dict[str, QLabel] = {}
+        for col, (key, title) in enumerate((("total", "总任务"), ("todo", "未剪辑"),
+                                           ("json", "已获取 JSON"), ("done", "成品"))):
+            head = QLabel(title)
+            head.setAlignment(Qt.AlignCenter)
+            value = QLabel("0")
+            value.setAlignment(Qt.AlignCenter)
+            font = value.font()
+            font.setPointSize(font.pointSize() + 6)
+            font.setBold(True)
+            value.setFont(font)
+            grid.addWidget(head, 0, col)
+            grid.addWidget(value, 1, col)
+            self._stat_labels[key] = value
+        return box
+
+    def _build_current(self) -> QWidget:
+        box = QWidget()
+        row = QVBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        self.lbl_current = QLabel("当前任务：闲着")
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 100)
+        self.bar.setValue(0)
+        self.bar.setFormat("%p%（0 / 0）")
+        row.addWidget(self.lbl_current)
+        row.addWidget(self.bar)
+        return box
+
+    def _build_table(self) -> QWidget:
+        self.table = QTableWidget(0, 6)
+        self.table.setHorizontalHeaderLabels(["文件", "分析", "TXT", "JSON", "剪辑", "状态"])
+        self.table.verticalHeader().setVisible(False)
+        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        for col in range(1, 6):
+            header.setSectionResizeMode(col, QHeaderView.ResizeToContents)
+        return self.table
+
+    def _build_log(self) -> QWidget:
+        self.view_log = QPlainTextEdit()
+        self.view_log.setReadOnly(True)
+        self.view_log.setMaximumBlockCount(500)
+        self.view_log.setFixedHeight(120)
+        self.view_log.setPlaceholderText("自动剪辑和 AI 对接的日志会出现在这儿")
+        return self.view_log
+
+    def _build_buttons(self) -> QHBoxLayout:
+        self.btn_auto = QPushButton("▶ 自动剪辑")
+        self.btn_auto.setToolTip("按选中的那一串，把 AI_输入目录里的视频挨个跑完；"
+                                 "AI_输出目录里已经有同名成品的会跳过")
+        self.btn_auto.clicked.connect(self.on_auto)
+        self.btn_stop = QPushButton("■ 停止")
+        self.btn_stop.setToolTip("中止排着的队，并取消正在跑的 AI 任务")
+        self.btn_stop.clicked.connect(self.on_stop)
+        self.btn_refresh = QPushButton("刷新")
+        self.btn_refresh.clicked.connect(self.refresh_tasks)
+        self.btn_api = QPushButton("AI接口…")
+        self.btn_api.setToolTip("找哪家 AI、走接口还是网页版扩展、key、模型、端口")
+        self.btn_api.clicked.connect(self.on_api_options)
+        self.btn_save = QPushButton("保存设置")
+        self.btn_save.clicked.connect(lambda: self.save(close=False))
+        self.btn_close = QPushButton("关闭")
+        self.btn_close.clicked.connect(self.close)
+        self.lbl_state = QLabel("闲着")
+        self.lbl_state.setProperty("role", "pill")
+        row = QHBoxLayout()
+        row.addWidget(self.btn_auto)
+        row.addWidget(self.btn_stop)
+        row.addWidget(self.lbl_state, 1)
+        row.addWidget(self.btn_refresh)
+        row.addWidget(self.btn_api)
+        row.addWidget(self.btn_save)
+        row.addWidget(self.btn_close)
+        return row
+
+    # ------------------------------------------------------------ 状态查询
+    def _in_dir(self) -> Path | None:
+        text = self.edit_input.text().strip()
+        return Path(text) if text and Path(text).is_dir() else None
+
+    def _out_dir(self) -> Path | None:
+        text = self.edit_output.text().strip()
+        if text and Path(text).is_dir():
+            return Path(text)
+        getter = getattr(self._window, "export_root", None)
+        if callable(getter):
+            root = Path(getter())
+            return root if root.is_dir() else None
+        return None
+
+    def _states(self, video: Path) -> dict[str, bool]:
+        """一个 mp4 的四个状态，各自独立查磁盘，不互相推断。"""
+        stem = video.stem
+        out = self._out_dir()
+        analysed = (self.cfg.path("output_dir") / stem / "timeline.json").is_file()
+        txt = any((video.parent / name).is_file() and (video.parent / name).stat().st_size > 0
+                  for name in (f"{stem}.txt", f"{stem}_merged.txt"))
+        script = False
+        clipped = False
+        if out is not None:
+            for name in (f"{stem}_脚本.json", f"{stem}.json"):
+                hit = out / name
+                if hit.is_file() and hit.stat().st_size > 0:
+                    script = True
+                    break
+            product = out / f"{stem}_高光时刻.mp4"
+            clipped = product.is_file() and product.stat().st_size > 0
+        if self._job == "script":  # 脚本剪辑：脚本在输入目录里
+            script = script or any((video.parent / n).is_file()
+                                   for n in (f"{stem}_脚本.json", f"{stem}.json"))
+        return {"analysed": analysed, "txt": txt, "json": script, "clipped": clipped}
+
+    def _row_marks(self, video: Path, states: dict[str, bool]) -> tuple[list[str], str]:
+        """把四个状态翻成表里的记号和一句状态。正在跑的那一步用 ●。"""
+        running = video.stem == self._active_stem
+        marks = [DONE if states["analysed"] else WAITING,
+                 DONE if states["txt"] else WAITING,
+                 DONE if states["json"] else WAITING,
+                 DONE if states["clipped"] else WAITING]
+        if states["clipped"]:
+            return marks, "完成"
+        if running:
+            step = self._active_step or "跑着"
+            index = {"分析": 0, "导出": 1, "发送": 2, "剪辑": 3}.get(step)
+            if index is not None:
+                marks[index] = RUNNING
+            return marks, {"分析": "分析中", "导出": "导出 TXT", "发送": "等 AI 回",
+                           "剪辑": "剪辑中"}.get(step, "跑着")
+        if states["json"]:
+            return marks, "等剪辑"
+        if states["txt"]:
+            return marks, "等 AI"
+        if states["analysed"]:
+            return marks, "等导出 TXT"
+        return marks, "未处理"
+
+    # ------------------------------------------------------------ 对外接口
+    def refresh_tasks(self) -> None:
+        """重扫目录，刷新统计和任务表。开跑前、每一步之后都会调。"""
+        folder = self._in_dir()
+        videos = []
+        if folder is not None:
+            videos = sorted(p for p in folder.iterdir()
+                            if p.is_file() and p.suffix.lower() in VIDEO_SUFFIXES)
+        stats = {"total": len(videos), "todo": 0, "json": 0, "done": 0}
+        self.table.setRowCount(len(videos))
+        for row, video in enumerate(videos):
+            states = self._states(video)
+            marks, status = self._row_marks(video, states)
+            stats["json"] += int(states["json"])
+            stats["done"] += int(states["clipped"])
+            stats["todo"] += int(not states["clipped"])
+            cells = [video.name, *marks, status]
+            for col, text in enumerate(cells):
+                item = QTableWidgetItem(text)
+                if col:
+                    item.setTextAlignment(Qt.AlignCenter)
+                self.table.setItem(row, col, item)
+        for key, label in self._stat_labels.items():
+            label.setText(str(stats[key]))
+
+    def set_active(self, stem: str = "", step: str = "") -> None:
+        """当前在处理哪个视频、走到哪一步（分析 / 导出 / 发送 / 剪辑）。"""
+        self._active_stem = stem
+        self._active_step = step
+        if stem:
+            self.lbl_current.setText(f"当前任务：{stem}　{step or ''}".rstrip())
+        else:
+            self.lbl_current.setText("当前任务：闲着")
+        self.refresh_tasks()
+
+    def set_queue_progress(self, done: int, total: int) -> None:
+        pct = int(round(done / total * 100)) if total else 0
+        self.bar.setValue(pct)
+        self.bar.setFormat(f"%p%（{done} / {total}）")
+
+    def append_log(self, line: str) -> None:
+        """主界面把 AI 相关的日志转播过来，跑的时候不用切回去看。"""
+        self.view_log.appendPlainText(line)
+
+    def set_running(self, running: bool, state: str = "") -> None:
+        """自动剪辑开跑 / 收工时由主界面调，用来锁按钮和改状态字。"""
+        self.btn_auto.setEnabled(not running)
+        self.lbl_state.setText(state or ("跑着" if running else "闲着"))
+
+    def set_standalone(self) -> None:
+        """单独运行（run.py ai）时当正经主窗口用：任务栏有它，最小化/最大化/拉伸都全。"""
+        self.setWindowFlags(Qt.Window | Qt.WindowMinMaxButtonsHint
+                            | Qt.WindowCloseButtonHint)
+        self.resize(960, 820)
+
+    # ------------------------------------------------------------ 交互
+    def _pick_job(self, key: str) -> None:
+        self._job = key
+        self.refresh_tasks()
+
+    def on_auto(self) -> None:
+        self.save(close=False)  # 先把眼前这套落盘，跑的就是你看到的
+        run = getattr(self._window, "on_auto_clip", None)
+        if callable(run):
+            run()
+
+    def on_stop(self) -> None:
+        stop = getattr(self._window, "on_bridge_stop", None)
+        if callable(stop):
+            stop()
+
+    def on_api_options(self) -> None:
+        opener = getattr(self._window, "on_ai_api", None)
+        if callable(opener):
+            opener()
+
+    # ------------------------------------------------------------ 保存
+    def save(self, close: bool = True) -> None:
+        """只写自己这三个键：干哪一串 + 两个 AI 专属目录。接口那些在「AI接口」里存。"""
+        patch = {"bridge": {"ai_job": self._job,
+                            "ai_input_dir": self.edit_input.text().strip(),
+                            "ai_output_dir": self.edit_output.text().strip()}}
+        try:
+            path = self.cfg.save_patch(patch)
+        except OSError as exc:
+            QMessageBox.warning(self, "AI 面板", f"写 config.json 失败：{exc}")
+            return
+        if self._log:
+            titles = {name: title for name, title, _ in JOBS}
+            self._log(f"[AI 面板] 已保存到 {path}：{titles.get(self._job, self._job)}；"
+                      f"AI_输入目录 {patch['bridge']['ai_input_dir'] or '（留空）'}；"
+                      f"AI_输出目录 {patch['bridge']['ai_output_dir'] or '（留空，用导出目录）'}")
+        self.refresh_tasks()
+        if close:
+            self.accept()
 
 
-        # --- 找哪家 AI ---
+# ================================================================ AI 接口设置
+class AiApiDialog(QDialog):
+    """AI 接口设置：找哪家 AI、走接口还是网页版扩展、key、模型、超时、端口、上传方式。
+
+    点「保存」才落盘，只写 bridge 里跟接口有关的那些键，不碰 AI 面板的目录和模式。
+    只有端口要重开 GUI 才换得过去，因为 Bridge 服务在启动时就绑好了。
+    """
+
+    def __init__(self, cfg: Any, parent=None, log=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self._log = log
+        self.setWindowTitle("AI 接口")
+        self.setMinimumWidth(560)
+        bridge = cfg.bridge
+
         self.cmb_provider = QComboBox()
         for name, spec in providers.PROVIDERS.items():
             self.cmb_provider.addItem(spec["label"], name)
@@ -150,12 +490,10 @@ class AiOptionsDialog(QDialog):
                               "api_model": str(providers.settings(bridge, name)["api_model"])}
                        for name in providers.PROVIDERS}
 
-        # --- AI 怎么跑 ---
         self.cmb_mode = QComboBox()
         self.cmb_mode.addItem("接口直连（不开浏览器，要 API key）", "api")
         self.cmb_mode.addItem("网页版扩展（用浏览器里的对话页）", "extension")
-        idx = self.cmb_mode.findData(str(bridge.get("mode") or "api"))
-        self.cmb_mode.setCurrentIndex(max(0, idx))
+        self.cmb_mode.setCurrentIndex(max(0, self.cmb_mode.findData(str(bridge.get("mode") or "api"))))
 
         self.edit_key = QLineEdit()
         self.edit_key.setEchoMode(QLineEdit.Password)
@@ -179,24 +517,10 @@ class AiOptionsDialog(QDialog):
         self.cmb_upload.addItem("只看我操作（扩展不动手）", "observe")
         self.cmb_upload.setToolTip("只看我操作：页面打开后扩展一个键都不点，只把你碰过的"
                                    "元素记进日志，用来查它该点哪里")
-        idx = self.cmb_upload.findData(str(bridge.get("upload_mode") or "auto"))
-        self.cmb_upload.setCurrentIndex(max(0, idx))
-
-        self.cmb_job = QComboBox()
-        self.cmb_job.addItem("剪辑成片（缺 txt 先分析，拿 JSON 直接出成片）", "full")
-        self.cmb_job.addItem("收取脚本（只把 AI 回的 JSON 存成脚本，不剪）", "collect")
-        self.cmb_job.addItem("脚本剪辑（读现成脚本 JSON 直接剪，不问 AI）", "script")
-        self.cmb_job.setToolTip("主界面「自动剪辑」按钮跑哪一串：\n"
-                                "剪辑成片＝扫 AI_输入目录里的视频，有同名 .txt 就不再分析、"
-                                "直接发给 AI，回的 JSON 按主界面高光配置剪，成品落 AI_输出目录；"
-                                "没有 .txt 就先按主界面配置分析、生成 .txt 再走同一串\n"
-                                "收取脚本＝同上但只存脚本 JSON，不渲染\n"
-                                "脚本剪辑＝跳过 AI，直接用 AI_输入目录里现成的脚本 JSON 开剪")
-        idx = self.cmb_job.findData(str(bridge.get("ai_job") or "full"))
-        self.cmb_job.setCurrentIndex(max(0, idx))
+        self.cmb_upload.setCurrentIndex(
+            max(0, self.cmb_upload.findData(str(bridge.get("upload_mode") or "auto"))))
 
         self.chk_side = QCheckBox("对话页放到不抢焦点的小窗口")
-
         self.chk_side.setChecked(bool(bridge.get("side_window", True)))
         self.chk_side.setToolTip("后台标签页会被浏览器冻结，什么都干不了；独立窗口照常渲染")
         self.chk_focus = QCheckBox("允许浏览器跳到前台")
@@ -208,38 +532,13 @@ class AiOptionsDialog(QDialog):
         self.hint.setProperty("role", "hint")
         self.hint.setWordWrap(True)
 
-        # --- 跑起来那一块：自动剪辑 / 停止 + 状态 + 这个面板自己的日志 ---
-        self.btn_auto = QPushButton("自动剪辑")
-        self.btn_auto.setToolTip("按上面「自动剪辑干什么」选的那一串，把 AI_输入目录里的视频"
-                                 "挨个跑完；AI_输出目录里已经有同名成品的会跳过")
-        self.btn_auto.clicked.connect(self.on_auto)
-        self.btn_stop = QPushButton("停止")
-        self.btn_stop.setToolTip("中止排着的队，并取消正在跑的 AI 任务")
-        self.btn_stop.clicked.connect(self.on_stop)
-        self.btn_save = QPushButton("保存设置")
-        self.btn_save.clicked.connect(lambda: self.save(close=False))
-        self.btn_close = QPushButton("关闭")
-        self.btn_close.clicked.connect(self.close)
-        self.lbl_state = QLabel("闲着")
-        self.lbl_state.setProperty("role", "pill")
-        self.view_log = QPlainTextEdit()
-        self.view_log.setReadOnly(True)
-        self.view_log.setMaximumBlockCount(500)
-        self.view_log.setMinimumHeight(180)
-        self.view_log.setPlaceholderText("自动剪辑和 AI 对接的日志会出现在这儿")
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Save).setText("保存")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons.accepted.connect(self.save)
+        buttons.rejected.connect(self.reject)
 
-        run_row = QHBoxLayout()
-        run_row.setContentsMargins(0, 0, 0, 0)
-        run_row.addWidget(self.btn_auto)
-        run_row.addWidget(self.btn_stop)
-        run_row.addWidget(self.lbl_state, 1)
-        run_row.addWidget(self.btn_save)
-        run_row.addWidget(self.btn_close)
-
-        form = QFormLayout()
-        form.addRow("AI_输入目录", self._dir_row(self.edit_input, "选择 AI_输入目录"))
-        form.addRow("AI_输出目录", self._dir_row(self.edit_output, "选择 AI_输出目录"))
-
+        form = QFormLayout(self)
         form.addRow("找哪家 AI", self.cmb_provider)
         form.addRow("走哪条路", self.cmb_mode)
         form.addRow("API key", self.edit_key)
@@ -247,76 +546,17 @@ class AiOptionsDialog(QDialog):
         form.addRow("超时", self.spin_timeout)
         form.addRow("Bridge 端口", self.spin_port)
         form.addRow("扩展上传方式", self.cmb_upload)
-        form.addRow("自动剪辑干什么", self.cmb_job)
-
         form.addRow(self.chk_side)
         form.addRow(self.chk_focus)
         form.addRow(self.chk_clip)
         form.addRow(self.hint)
-        outer = QVBoxLayout(self)
-        outer.addLayout(form)
-        outer.addLayout(run_row)
-        outer.addWidget(self.view_log, 1)
+        form.addRow(buttons)
         self.cmb_mode.currentIndexChanged.connect(self.sync_enabled)
         self.cmb_provider.currentIndexChanged.connect(self.on_provider_changed)
         self.load_provider(self._provider)
         self.sync_enabled()
 
-    # --------------------------------------------------------- 跑自动剪辑
-    def set_standalone(self) -> None:
-        """单独运行（run.py ai）时当正经主窗口用：任务栏有它，最小化/最大化/拉伸都全。"""
-        self.setWindowFlags(Qt.Window | Qt.WindowMinMaxButtonsHint
-                            | Qt.WindowCloseButtonHint)
-        self.resize(900, 720)
-
-    def append_log(self, line: str) -> None:
-
-        """主界面把 AI 相关的日志转播过来，跑的时候不用切回去看。"""
-        self.view_log.appendPlainText(line)
-
-    def set_running(self, running: bool, state: str = "") -> None:
-        """自动剪辑开跑 / 收工时由主界面调，用来锁按钮和改状态字。"""
-        self.btn_auto.setEnabled(not running)
-        self.lbl_state.setText(state or ("跑着" if running else "闲着"))
-
-
-    def on_auto(self) -> None:
-        self.save(close=False)  # 先把眼前这套设置落盘，跑的就是你看到的
-        run = getattr(self._window, "on_auto_clip", None)
-        if callable(run):
-            run()
-
-    def on_stop(self) -> None:
-        stop = getattr(self._window, "on_bridge_stop", None)
-        if callable(stop):
-            stop()
-
-
-    # ------------------------------------------------------------- 组件
-    def _dir_row(self, edit: DropDirEdit, title: str):
-        """一行：路径框 + 浏览 + 打开。返回装好的容器控件。"""
-        from PyQt5.QtWidgets import QWidget  # noqa: PLC0415
-
-        browse = QPushButton("浏览…")
-        browse.clicked.connect(lambda: self._browse(edit, title))
-        opener = QPushButton("打开")
-        opener.clicked.connect(lambda: _open_dir(self, edit.text()))
-        box = QWidget()
-        row = QHBoxLayout(box)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.addWidget(edit, 1)
-        row.addWidget(browse)
-        row.addWidget(opener)
-        return box
-
-    def _browse(self, edit: DropDirEdit, title: str) -> None:
-        start = edit.text().strip() or str(self.cfg.root)
-        chosen = QFileDialog.getExistingDirectory(self, title, start)
-        if chosen:
-            edit.setText(chosen)
-
     # --------------------------------------------------------- 提供方切换
-
     def on_provider_changed(self) -> None:
         """换提供方：先把当前这家的 key / 模型收进草稿，再摊开新那家的。"""
         self.stash_provider()
@@ -353,10 +593,8 @@ class AiOptionsDialog(QDialog):
             w.setEnabled(not api)
 
     # ------------------------------------------------------------- 保存
-    def save(self, close: bool = True) -> None:
-        """把当前这套写回 config.json。close=False 是面板里点「保存设置」，窗口留着。"""
+    def save(self) -> None:
         old_port = int(self.cfg.bridge.get("port") or 5998)
-
         self.stash_provider()
         bridge: dict[str, Any] = {
             "mode": self.cmb_mode.currentData(),
@@ -364,16 +602,10 @@ class AiOptionsDialog(QDialog):
             "api_timeout": int(self.spin_timeout.value()),
             "port": int(self.spin_port.value()),
             "upload_mode": self.cmb_upload.currentData(),
-            "ai_job": self.cmb_job.currentData(),
-
             "side_window": self.chk_side.isChecked(),
             "focus_browser": self.chk_focus.isChecked(),
             "auto_clip": self.chk_clip.isChecked(),
-            # AI 专属目录：只写进 bridge，不碰 paths.input_dir 也不碰导出目录
-            "ai_input_dir": self.edit_input.text().strip(),
-            "ai_output_dir": self.edit_output.text().strip(),
         }
-
         # 每家的 key / 模型写回各自那一节（Gemini 是 bridge 下的老键，DeepSeek 在 bridge.deepseek）
         for name, draft in self._draft.items():
             section = providers.section_for(name)
@@ -381,25 +613,18 @@ class AiOptionsDialog(QDialog):
                 bridge.setdefault(section, {}).update(draft)
             else:
                 bridge.update(draft)
-        patch: dict[str, Any] = {"bridge": bridge}
         try:
-            path = self.cfg.save_patch(patch)
+            path = self.cfg.save_patch({"bridge": bridge})
         except OSError as exc:
-            QMessageBox.warning(self, "AI 面板", f"写 config.json 失败：{exc}")
+            QMessageBox.warning(self, "AI 接口", f"写 config.json 失败：{exc}")
             return
-
         if self._log:
             mode = "接口直连" if bridge["mode"] == "api" else "网页版扩展"
             spec = providers.PROVIDERS[self._provider]
-            self._log(f"[AI 选项] 已保存到 {path}：{mode}，{spec['label']} "
+            self._log(f"[AI 接口] 已保存到 {path}：{mode}，{spec['label']} "
                       f"{self._draft[self._provider]['api_model']}，端口 {bridge['port']}")
-            self._log(f"[AI 选项] AI_输入目录 {bridge['ai_input_dir'] or '（留空，用 cache/）'}；"
-                      f"AI_输出目录 {bridge['ai_output_dir'] or '（留空，用导出目录）'}")
-
         if int(self.spin_port.value()) != old_port:
-            QMessageBox.information(self, "AI 面板",
+            QMessageBox.information(self, "AI 接口",
                                     "端口改了，要重开 GUI 才会换过去；"
                                     "扩展选项页里的地址也要跟着改。")
-        if close:
-            self.accept()
-
+        self.accept()

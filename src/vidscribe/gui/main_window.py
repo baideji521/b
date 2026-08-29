@@ -654,23 +654,32 @@ class MainWindow(QMainWindow):
         CacheDialog(self.cfg, self, log=self.append_log).exec_()
 
     def on_ai_options(self) -> None:
-        """开 AI 面板（第二主界面）：AI 怎么跑、目录放哪儿，自动剪辑也在那儿点。
+        """开 AI 面板（第二主界面）：模式、目录、任务表、自动剪辑都在那儿。
 
         非模态而且只开一个：再点一次是把它拎到前面，不会又叠一个出来。
         """
-        from .ai_options import AiOptionsDialog  # noqa: PLC0415
+        from .ai_options import AiPanel  # noqa: PLC0415
 
         if self.ai_panel is None:
-            self.ai_panel = AiOptionsDialog(self.cfg, self, log=self.append_log)
+            self.ai_panel = AiPanel(self.cfg, self, log=self.append_log)
             self.ai_panel.finished.connect(lambda *_: self.on_ai_panel_closed())
         self.ai_panel.set_running(self.auto_running())
         self.ai_panel.show()
         self.ai_panel.raise_()
         self.ai_panel.activateWindow()
 
+    def on_ai_api(self) -> None:
+        """AI 接口设置：找哪家 AI、走接口还是网页版扩展、key、模型、端口、上传方式。"""
+        from .ai_options import AiApiDialog  # noqa: PLC0415
+
+        dialog = AiApiDialog(self.cfg, self, log=self.append_log)
+        if dialog.exec_() == QDialog.Accepted:
+            self.refresh_bridge_label()
+
     def on_ai_panel_closed(self) -> None:
         self.ai_panel = None
         self.refresh_bridge_label()
+
 
 
     # ------------------------------------------------------------- 导出目录
@@ -882,10 +891,14 @@ class MainWindow(QMainWindow):
                                        "扩展选项页里的地址要填这里显示的端口")
         self.btn_bridge_pair.clicked.connect(self.on_bridge_pair)
         self.btn_ai_options = QPushButton("AI 面板")
-        self.btn_ai_options.setToolTip("第二主界面：走接口还是网页版扩展、API key、模型、Bridge 端口、"
-                                      "AI 专属目录，自动剪辑也在那儿点")
-
+        self.btn_ai_options.setToolTip("第二主界面：干哪一串、AI 专属目录、任务统计和任务表，"
+                                      "自动剪辑也在那儿点")
         self.btn_ai_options.clicked.connect(self.on_ai_options)
+        self.btn_ai_api = QPushButton("AI接口")
+        self.btn_ai_api.setToolTip("找哪家 AI、走接口直连还是网页版扩展、API key、模型、"
+                                   "超时、Bridge 端口、扩展上传方式")
+        self.btn_ai_api.clicked.connect(self.on_ai_api)
+
         # 「自动」勾上：分析一跑完就自己把文本发给 AI，拿到 JSON 再按 auto_clip 开剪，
         # 整条链路不用你点。状态存 gui_settings.json
         self.chk_auto_ai = QCheckBox("自动")
@@ -1062,7 +1075,9 @@ class MainWindow(QMainWindow):
 
         second_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
+        second_row.addWidget(self.btn_ai_api, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
+
         layout.addLayout(second_row)
         layout.addWidget(vertical, 1)
         self.setCentralWidget(central)
@@ -1946,7 +1961,10 @@ class MainWindow(QMainWindow):
         self._auto_total = len(videos)
         self._auto_job = job
         self._set_auto_state(False)
+        self._set_auto_step("", "")
+        self._set_auto_progress(0)
         already = sum(1 for v in videos if self._auto_done_file(v) is not None)
+
 
         self.append_log(f"[自动剪辑] {labels.get(job, job)}：{ai_in} 里排了 {len(videos)} 个视频"
                         + (f"，其中 {already} 个 AI_输出目录里已经有成品，会跳过" if already else ""))
@@ -1972,16 +1990,20 @@ class MainWindow(QMainWindow):
         self.load_video(video)
 
         if self._auto_job == "script":
+            self._set_auto_step(video.stem, "剪辑")
             self._auto_clip_from_script(video)
             return
         text_file = self._auto_text_file(video)
         if text_file is not None:
             self.append_log(f"[自动剪辑] 已有 {text_file.name}，不再分析，直接发 AI")
+            self._set_auto_step(video.stem, "发送")
             if not self.send_file_to_ai(text_file):
                 self._auto_advance()
             return
         self.append_log(f"[自动剪辑] 没有 {video.stem}.txt，先按主界面配置分析")
+        self._set_auto_step(video.stem, "分析")
         self.on_analyze(False)
+
 
     def _auto_clip_from_script(self, video: Path) -> None:
         """脚本剪辑：读 AI_输入目录里现成的脚本 JSON，直接开剪。"""
@@ -2052,10 +2074,12 @@ class MainWindow(QMainWindow):
             self._auto_finish("缺提示词，已停")
             return
         merged_path, count = self.write_ai_text()
+        self._set_auto_step(self._auto_video.stem, "发送")
         self.dispatch_ai(prompt_path, merged_path, count)
 
     def _auto_save_script(self) -> None:
-        """收取脚本：把 AI 回的 JSON 存进 AI_输出目录，不渲染。"""
+
+        """把 AI 回的 JSON 存进 AI_输出目录，当脚本留档（任务表的 JSON 列就看它）。"""
         out = self.ai_dir("ai_output_dir") or self.export_root()
         stem = self._auto_video.stem if self._auto_video is not None else "script"
         target = out / f"{stem}_脚本.json"
@@ -2066,11 +2090,24 @@ class MainWindow(QMainWindow):
             return
         self.append_log(f"[自动剪辑] 脚本已存：{target}")
 
+    # ---------------------------------------------------- 面板上的状态回显
+    def _set_auto_step(self, stem: str, step: str) -> None:
+        """告诉 AI 面板现在在处理谁、走到哪一步（分析 / 导出 / 发送 / 剪辑）。"""
+        if self.ai_panel is not None:
+            self.ai_panel.set_active(stem, step)
+
+    def _set_auto_progress(self, done: int) -> None:
+        if self.ai_panel is not None:
+            self.ai_panel.set_queue_progress(done, self._auto_total)
+
+
     def _auto_advance(self) -> None:
         """当前这个不管是成了、跳了还是砸了，都排队叫下一个。"""
         if self._auto_video is None:
             return
         self._auto_video = None
+        self._set_auto_step("", "")
+        self._set_auto_progress(self._auto_total - len(self._auto_queue))
         QTimer.singleShot(0, self._auto_step)  # 让当前回调先返回，别在信号里套信号
 
     def _auto_finish(self, why: str) -> None:
@@ -2078,7 +2115,9 @@ class MainWindow(QMainWindow):
         self._auto_video = None
         self._auto_total = 0
         self._set_auto_state(True, "闲着")
+        self._set_auto_step("", "")
         self.append_log(f"[自动剪辑] {why}")
+
 
     def _set_auto_state(self, idle: bool, state: str = "") -> None:
         """AI 面板上的「自动剪辑」按钮和状态字。面板没开着就什么都不用做。"""
@@ -2125,13 +2164,16 @@ class MainWindow(QMainWindow):
         idle = ((self.clip_worker is None or not self.clip_worker.isRunning())
                 and (self.worker is None or not self.worker.isRunning()))
         if self.auto_running():
+            self._auto_save_script()  # 不管哪一串都留档，任务表的 JSON 列就看这个
             if self._auto_job == "collect":  # 收取脚本：只存不剪
-                self._auto_save_script()
                 self._auto_advance()
                 return
             self.append_log("[自动剪辑] 拿到 JSON，按主界面高光配置开剪")
+            if self._auto_video is not None:
+                self._set_auto_step(self._auto_video.stem, "剪辑")
             self.run_highlight(self._last_highlight_json, ai=True)
             return
+
         if self.cfg.bridge.get("auto_clip", True) and idle:
 
             self.append_log("[AI 对接] 直接按这份 JSON 开始剪辑（bridge.auto_clip）")
@@ -2157,7 +2199,10 @@ class MainWindow(QMainWindow):
             if not self.auto_running():
                 QMessageBox.warning(self, "剪辑高光失败", message)
         if self.auto_running():
+            if self.ai_panel is not None:
+                self.ai_panel.refresh_tasks()
             self._auto_advance()
+
 
 
 
