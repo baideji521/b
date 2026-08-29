@@ -725,6 +725,55 @@ def recover_stale_ai_tasks(db: Database, timeout_minutes: float = 30.0) -> int:
         return int(cur.rowcount or 0)
 
 
+def release_ai_task(db: Database, task_id: int, reason: str) -> bool:
+    """把一条还在跑的任务放回队列（正常关程序时用）。退回去了返回 True。
+
+    只对 active 状态生效：completed/failed/cancelled 碰不着，不会被"弄活"。
+    这不是失败，所以 `retry_count` 一动不动，也不消耗 `max_attempts`。
+    心跳不刷——pending 不看心跳，刷了反而模糊了"上次跑到哪"这个事实。
+    """
+    marks = ", ".join("?" for _ in TASK_ACTIVE)
+    stamp = now()
+    with db.tx() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE ai_tasks
+               SET status = 'pending', error = ?, worker_id = NULL,
+                   updated_at = ?, finished_at = NULL
+             WHERE id = ? AND status IN ({marks})
+            """,
+            (str(reason)[:2000], stamp, task_id, *TASK_ACTIVE))
+        return bool(cur.rowcount)
+
+
+def recover_orphaned_ai_tasks(db: Database, before: str) -> int:
+    """本次进程启动之前就挂在 active 的任务，全部退回 pending。返回退回了几条。
+
+    调用方必须先拿到库目录里的运行时独占锁（`lock.RuntimeLock`）——锁在手上才能断定
+    "没有别的实例在跑"，那些还挂着 active 的任务只可能是上一次没退干净留下的。
+    判据是"最后一次有动静的时间早于 `before`（本次进程启动时刻）"，所以本进程自己
+    刚领的任务不会被误退。
+
+    不限 mode、不限 task_type：唯一索引 idx_tasks_open_unique 把所有 active 都算 open，
+    只放 full 会让 collect/script 的孤儿继续挡着重新入队。
+    跟崩溃退回一样，这不算失败：`retry_count` 不加，`max_attempts` 不消耗。
+    只改 ai_tasks 这几列，不碰 ai_results / clips / artifacts。
+    """
+    marks = ", ".join("?" for _ in TASK_ACTIVE)
+    stamp = now()
+    with db.tx() as conn:
+        cur = conn.execute(
+            f"""
+            UPDATE ai_tasks
+               SET status = 'pending', error = '上次没有正常退出，已退回等待',
+                   worker_id = NULL, updated_at = ?, finished_at = NULL
+             WHERE status IN ({marks})
+               AND COALESCE(heartbeat_at, started_at, created_at) < ?
+            """,
+            (stamp, *TASK_ACTIVE, str(before)))
+        return int(cur.rowcount or 0)
+
+
 # =================================================================== AI 结果
 def save_ai_result(db: Database, video_id: int, *, task_id: int | None = None,
                    raw_response: str | None = None, json_data: Any = None,

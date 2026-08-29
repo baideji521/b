@@ -57,6 +57,7 @@ from ..constants import VIDEO_SUFFIXES
 from ..db import open_db
 from ..db import repo as db_repo
 from ..db.importer import refresh_from_disk
+from ..db.lock import RuntimeLock, queue_lock_path
 from ..emotions import display_name as emotion_display
 from . import flow
 from .flow import FlowLayout
@@ -480,6 +481,11 @@ class MainWindow(QMainWindow):
         # 状态都从数据库读，句柄按需打开；打不开就退回「什么都没有」，界面照样能用
         self._db_handle = None
         self._db_failed = False
+        # 本次进程什么时候起来的（整个生命周期不变，_resume_auto_queue 调几次都不动）。
+        # 开机恢复只敢退回"最后一次有动静早于这个时刻"的任务，本进程自己刚领的碰不着
+        self._process_started_at = db_repo.now()
+        # 库目录里的运行时独占锁，拿到就一直握到进程结束（异常退出由操作系统放开）
+        self._queue_lock: RuntimeLock | None = None
         # 最近一次真正发出去的提示词指纹（hash/path/size），只做追溯记录，不参与上传
         self._last_prompt: dict[str, Any] | None = None
         # AI 面板（第二主界面）：非模态，只开一个
@@ -2232,6 +2238,8 @@ class MainWindow(QMainWindow):
         # 磁盘扫描 + reconcile：已经落地的 final_video / ai_script / merged_txt 先进库，
         # 后面 _auto_step 的跳过判断（全部查库）才看得见它们
         self._sync_disk()
+        # 上次没退干净留下的 active 任务：拿到库目录的独占锁才敢退回 pending
+        self._reclaim_orphan_tasks(db)
         timeout = float(self.cfg.runtime.get("ai_task_timeout_minutes", 30) or 30)
         try:
             recovered = db_repo.recover_stale_ai_tasks(db, timeout)
@@ -2260,6 +2268,69 @@ class MainWindow(QMainWindow):
         self._set_auto_progress(0)
         self.append_log(f"[自动剪辑] 接着上次跑：队列里还有 {counts['pending']} 条")
         self._auto_step()
+
+    def _queue_lock_handle(self, db) -> RuntimeLock | None:
+        """库目录里的 queue.lock。拿到就一直握到关程序；拿不到返回 None。
+
+        锁路径由**真实库文件路径**派生（两个配置指向同一个库时争的是同一把锁）。
+        拿不到锁不算错：可能另一个实例正在用这个库，也可能目录不可写 / 网络盘锁语义怪，
+        都按「现在不确定有没有别人在跑」处理，调用方走保守路线。
+        """
+        if self._queue_lock is not None:
+            return self._queue_lock
+        try:
+            lock = RuntimeLock(queue_lock_path(db))
+        except Exception as exc:  # noqa: BLE001 - 界面不能因为算不出锁路径就挂掉
+            self.append_log(f"[自动剪辑] 队列锁路径算不出来：{exc}")
+            return None
+        if not lock.acquire():
+            return None
+        self._queue_lock = lock
+        return lock
+
+    def _reclaim_orphan_tasks(self, db) -> int:
+        """上次没退干净留下的 active 任务，开程序时退回 pending。返回退回了几条。
+
+        只有拿到库目录的独占锁才动手：锁在手上就说明没有第二个实例在用这个库，
+        那些还挂着 processing/uploading/waiting 的任务只可能是上一次留下的。
+        拿不到锁就一条都不碰，照旧只按超时捞（`recover_stale_ai_tasks`），
+        绝不为了「修好停摆」去抢别人正在跑的活。
+
+        判据是「最后一次有动静早于本次进程启动时刻」，所以本进程自己刚领的任务
+        不会被误退（`_resume_auto_queue` 被调两次也一样）。不算失败：retry_count 不加。
+        """
+        lock = self._queue_lock_handle(db)
+        if lock is None:
+            self.append_log("[自动剪辑] 拿不到队列锁（可能还有别的实例在用这个库），"
+                            "这次只按超时捞回卡住的任务")
+            return 0
+        try:
+            freed = db_repo.recover_orphaned_ai_tasks(db, self._process_started_at)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[自动剪辑] 上次遗留的任务退不回来：{exc}")
+            return 0
+        if freed:
+            self.append_log(f"[自动剪辑] 上次没正常退出，{freed} 条任务已退回等待")
+        return freed
+
+    def _release_auto_task_on_exit(self) -> None:
+        """正常关程序：手上这条任务退回 pending，别留个 processing 孤儿挡着下次入队。
+
+        只动自己持有的那条（`_auto_task_id`），不扫别人的；已经 completed/failed/cancelled
+        的碰不着（repo 那层的 WHERE 只认 active）。这不算失败，retry_count 不加。
+        """
+        task_id = self._auto_task_id
+        db = self._db_handle  # 关窗阶段别为了这件事新开库
+        if task_id is None or db is None:
+            return
+        try:
+            released = db_repo.release_ai_task(db, task_id, "关程序时退回等待，下次启动接着跑")
+        except Exception as exc:  # noqa: BLE001 - 关窗流程不能被这一步打断
+            self.append_log(f"[自动剪辑] 关程序时退回任务 #{task_id} 失败：{exc}")
+            return
+        if released:
+            self._auto_task_id = None
+            self.append_log(f"[自动剪辑] 关程序：任务 #{task_id} 已退回等待，下次启动接着跑")
 
 
 
@@ -2937,6 +3008,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         self.save_settings()  # 退出时把界面参数存下来，下次启动自动加载
         self.stop_bridge()
+        # 手上这条自动剪辑任务退回队列，别留个 processing 孤儿挡着下次入队
+        self._release_auto_task_on_exit()
         if self.worker is not None and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait(3000)
@@ -2945,6 +3018,10 @@ class MainWindow(QMainWindow):
         if self.clip_worker is not None and self.clip_worker.isRunning():
             self.clip_worker.wait(5000)  # 渲染没有中断点，给它一点时间收尾
         self.player.close_video()
+        # 队列锁放开（异常退出时操作系统会替我们放，这里是正常退出的那条路）
+        if self._queue_lock is not None:
+            self._queue_lock.release()
+            self._queue_lock = None
         super().closeEvent(event)
 
     def on_open_outdir(self) -> None:
