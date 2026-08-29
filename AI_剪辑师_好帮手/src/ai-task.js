@@ -220,7 +220,7 @@ function pageProbeEditor(selectors) {
  * 把 txt 塞进页面，默认走「模仿手动拖进去」——页面里能手动拖，就用同一条路。
  * mode: drop（拖放，默认）/ paste（粘贴）/ input（塞 file 控件，兜底）。
  */
-function pageAttachFiles(payloads, mode, editorSelector) {
+function pageAttachFiles(payloads, mode, editorSelector, targetIndex) {
   const transfer = new DataTransfer();
   for (const item of payloads) {
     const binary = atob(item.b64);
@@ -238,8 +238,9 @@ function pageAttachFiles(payloads, mode, editorSelector) {
   if (mode === "drop" || !mode) {
     const root = document.documentElement;
     if (!document.body && !root) return { ok: false, error: "页面还没渲染出可拖放的区域" };
-    // 手动往页面任何一处拖都能进，所以直接砸整页：body / html / document，
-    // 再顺带砸一遍输入框那几层，谁监听谁收
+    // 一次只砸一个目标！有的站点（DeepSeek）输入框那几层和 body 各挂了一个 drop 监听，
+    // 一口气全砸等于把文件传 N 遍——页面上就会冒出一堆重复附件。
+    // 所以这里按 targetIndex 只派发一个，成没成由外面数卡片来判断，不行才换下一个。
     const targets = [];
     for (let node = editor; node && targets.length < 3; node = node.parentElement) {
       targets.push(node);
@@ -248,23 +249,29 @@ function pageAttachFiles(payloads, mode, editorSelector) {
     if (root) targets.push(root);
     targets.push(document);
     if (!targets.length) return { ok: false, error: "找不到拖放目标" };
+    const index = Number.isInteger(targetIndex) ? targetIndex : 0;
+    if (index >= targets.length) {
+      return { ok: false, error: "拖放目标试完了", targets: targets.length };
+    }
+    const target = targets[index];
 
     const box = document.body || root;
     const rect = box.getBoundingClientRect();
     const point = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
     let fired = 0;
-    for (const target of targets) {
-      for (const type of ["dragenter", "dragover", "drop"]) {
-        try {
-          target.dispatchEvent(new DragEvent(type, {
-            bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...point,
-          }));
-          fired += 1;
-        } catch {}
-      }
+    for (const type of ["dragenter", "dragover", "drop"]) {
+      try {
+        target.dispatchEvent(new DragEvent(type, {
+          bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...point,
+        }));
+        fired += 1;
+      } catch {}
     }
+    const where = target === document ? "document"
+      : `${target.tagName || ""}${target.className ? `.${String(target.className).slice(0, 20)}` : ""}`;
     return fired
-      ? { ok: true, via: "drop", targets: targets.length, count: transfer.files.length }
+      ? { ok: true, via: "drop", target: index, targets: targets.length, where,
+          count: transfer.files.length }
       : { ok: false, error: "拖放事件派发失败" };
   }
 
@@ -382,6 +389,20 @@ function pageCountAttachment(name) {
     if (matched > 0) {
       used = needle;
       break;
+    }
+  }
+  // DeepSeek 这类站点把全名放在 title / aria-label 里，页面上只显示截断后的短名，
+  // 光数正文会漏；漏判的代价是又拖一遍（页面上多出重复附件），所以顺带数一遍属性
+  if (!matched) {
+    let attrs = 0;
+    for (const el of document.querySelectorAll("[title], [aria-label], [alt]")) {
+      const label = `${el.getAttribute("title") || ""} ${el.getAttribute("aria-label") || ""} `
+        + `${el.getAttribute("alt") || ""}`;
+      if (label.includes(name) || label.includes(stem)) attrs += 1;
+    }
+    if (attrs) {
+      matched = attrs;
+      used = "属性";
     }
   }
   // 兜底信号：卡片左上角那个类型角标（TXT），数它有几个
@@ -531,18 +552,37 @@ function pageReadAnswer(groups) {
       break;
     }
   }
+  // 选择器全落空时的通用兜底（站点改版、类名带哈希都会这样）：挑「自己有一大段文字、
+  // 子元素里没有同样长文字」的叶子块，文档里最后那个就是最新的回答。
+  if (!nodes.length) {
+    const leafs = [];
+    for (const el of document.querySelectorAll("div, section, article, p, pre, li, td")) {
+      const own = (el.innerText || el.textContent || "").trim();
+      if (own.length < 40) continue;
+      const sameInChild = Array.from(el.children).some(
+        (c) => (c.innerText || c.textContent || "").trim().length >= own.length * 0.9
+      );
+      if (!sameInChild) leafs.push(el);
+    }
+    nodes = leafs;
+    used = leafs.length ? "通用兜底" : "";
+  }
   const last = nodes[nodes.length - 1] || null;
   // 后台标签页不做布局时 innerText 是空的，退回 textContent
   const text = last ? (last.innerText || last.textContent || "").trim() : "";
 
   // 还在生成时页面上有「停止」按钮
-  const streaming = Array.from(document.querySelectorAll("button")).some((b) => {
+  const streaming = Array.from(document.querySelectorAll("button, [role='button']")).some((b) => {
     const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""}`;
     return /stop|停止/i.test(label);
   });
   // 一个块都没有时，报一下整页文本长度：0 说明页面被冻结/还没渲染，不是选择器写错
   const bodyLen = (document.body?.textContent || "").length;
-  return { text, streaming, blocks: nodes.length, used, bodyLen };
+  // 命中的是哪个块：万一读错地方，日志里能直接看出来该改哪个选择器
+  const hint = last
+    ? `${last.tagName}.${String(last.className || "").slice(0, 40)}`
+    : "";
+  return { text, streaming, blocks: nodes.length, used, bodyLen, hint };
 }
 
 
@@ -800,18 +840,18 @@ async function handleAiTask(task) {
       };
 
 
-      // 你实测两个文件一起往页面任何一处拖就行，所以先一次拖两个；
-      // 不行再一个一个拖，最后才退到粘贴 / file 控件
-      const plans = [
-        { mode: "drop", batch: true },
-        { mode: "drop", batch: false },
-        { mode: "paste", batch: true },
-        { mode: "input", batch: true },
-      ];
+      // 拖放一次只砸一个目标（输入框那几层 -> body -> html -> document），砸完就数卡片；
+      // 一口气全砸会被多个监听各收一遍，页面上冒出一堆重复附件。
+      // 拖不进去才退到粘贴 / file 控件。
+      const plans = [];
+      for (let t = 0; t < 6; t += 1) plans.push({ mode: "drop", batch: true, target: t });
+      plans.push({ mode: "drop", batch: false, target: 0 });
+      plans.push({ mode: "paste", batch: true });
+      plans.push({ mode: "input", batch: true });
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
-        // 卡片可能晚一点才冒出来，升级到下一种方式之前先复查一遍，别白折腾
-        if (p > 0 && await waitCards(probe, 600)) {
+        // 卡片可能晚一点才冒出来，换下一种方式之前先复查一遍，别白塞第二遍
+        if (p > 0 && await waitCards(probe, 900)) {
           autoDone = true;
           break;
         }
@@ -825,17 +865,22 @@ async function handleAiTask(task) {
         try {
           if (plan.batch) {
             const attached = await runInTab(tabId, pageAttachFiles,
-                                           [payloads, plan.mode, editor.selector]);
+                                           [payloads, plan.mode, editor.selector, plan.target]);
             if (!attached?.ok) {
               log("塞入失败", plan.mode, attached?.error || "未知原因");
+              // 拖放目标试完了就别再往下试同类方案
+              if (attached?.error === "拖放目标试完了") {
+                while (p + 1 < plans.length && plans[p + 1].mode === "drop") p += 1;
+              }
               continue;
             }
+            if (plan.mode === "drop") log("拖了一次", `目标${attached.target}=${attached.where}`);
             autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
           } else {
             autoDone = true;
             for (const item of payloads) {
               const attached = await runInTab(tabId, pageAttachFiles,
-                                             [[item], plan.mode, editor.selector]);
+                                             [[item], plan.mode, editor.selector, plan.target]);
               if (!attached?.ok) {
                 log("塞入失败", item.name, plan.mode, attached?.error || "未知原因");
                 autoDone = false;
@@ -931,9 +976,10 @@ async function handleAiTask(task) {
     }
 
 
-    // 复用的窗口里可能已经有旧回答，先记下条数，别把旧的当成这次的结果
+    // 复用的窗口里可能已经有旧回答，先记下条数和最后那块的文字，别把旧的当成这次的结果
     const before = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
     const baselineBlocks = Number(before?.blocks || 0);
+    const baselineText = String(before?.text || "");
     const sent = await runInTab(tabId, pageSendMessage,
                                [editor.selector, message, site.sends]);
 
@@ -950,13 +996,19 @@ async function handleAiTask(task) {
     let text = "";
     let stableSince = 0;
     let resent = false;
+    let polls = 0;
     const sentAt = Date.now();
     const answerDeadline = Date.now() + ANSWER_TIMEOUT_MS;
     while (Date.now() < answerDeadline) {
       await sleep(POLL_ANSWER_MS);
+      polls += 1;
       const snapshot = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
-      // 新回答还没冒出来（条数没涨）就继续等，别读到窗口里原有的旧回答
-      if (Number(snapshot?.blocks || 0) <= baselineBlocks) {
+      const shot = String(snapshot?.text || "");
+      // 新回答算不算冒出来：回答块变多了，或者最后那块的文字变了（且不是我们刚发的那句）。
+      // 只看块数会漏——有的站点回答块数固定，内容原地更新。
+      const fresh = Number(snapshot?.blocks || 0) > baselineBlocks
+        || (shot && shot !== baselineText && !shot.includes(message.slice(0, 20)));
+      if (!fresh) {
         // 后台标签页里第一次发送有可能没吃进去，等一会儿没反应就再点一次发送
         if (!resent && Date.now() - sentAt > RESEND_AFTER_MS) {
           resent = true;
@@ -964,14 +1016,21 @@ async function handleAiTask(task) {
                                      [editor.selector, "", site.sends]).catch(() => null);
           log("没反应，再发一次", again?.sent || "失败", JSON.stringify({
             blocks: snapshot?.blocks, baseline: baselineBlocks,
-            bodyLen: snapshot?.bodyLen, used: snapshot?.used,
+            bodyLen: snapshot?.bodyLen, used: snapshot?.used, hint: snapshot?.hint,
+          }));
+        }
+        // 干等着最难查，每 15 秒把现场情况报一次：命中了哪个选择器、读到了哪个块
+        if (polls % 10 === 0) {
+          log("还没等到新回答", JSON.stringify({
+            blocks: snapshot?.blocks, baseline: baselineBlocks, len: shot.length,
+            bodyLen: snapshot?.bodyLen, used: snapshot?.used, hint: snapshot?.hint,
           }));
         }
         if (await cancelled("waiting_answer", "等新回答出现")) return;
         continue;
       }
 
-      const current = snapshot?.text || "";
+      const current = shot;
 
       if (current && current === text && !snapshot?.streaming) {
         if (!stableSince) stableSince = Date.now();
@@ -989,7 +1048,8 @@ async function handleAiTask(task) {
       const last = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
       const detail = JSON.stringify({
         blocks: last?.blocks, baseline: baselineBlocks,
-        bodyLen: last?.bodyLen, used: last?.used, streaming: last?.streaming,
+        bodyLen: last?.bodyLen, used: last?.used, hint: last?.hint,
+        streaming: last?.streaming,
       });
       log("读不到回答", detail);
       return finish({ status: "failed", error: `AI 没有产出可读的回答 ${detail}` });
