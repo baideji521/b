@@ -887,7 +887,12 @@ class MainWindow(QMainWindow):
         # 合并导出 + 提示词交给扩展，扩展在浏览器里问网页版 AI，回传的 JSON 直接进剪辑高光
         self.lbl_bridge = QLabel("未启动")
         self.lbl_bridge.setProperty("role", "pill")  # 药丸样式，见 theme.QSS
+        self.lbl_bridge.setAlignment(Qt.AlignCenter)
+        # 最长的状态文案是「:65535 配对窗口 120s」，按它留够宽度，别让字被切掉
+        self.lbl_bridge.setMinimumWidth(
+            self.lbl_bridge.fontMetrics().horizontalAdvance(":65535 配对窗口 120s") + 32)
         self.lbl_bridge.setToolTip("本机 Bridge 服务状态。扩展轮询它领任务")
+
         self.btn_bridge_pair = QPushButton("配对扩展")
         self.btn_bridge_pair.setToolTip("打开 120 秒配对窗口，扩展会自动把令牌领走；"
                                        "扩展选项页里的地址要填这里显示的端口")
@@ -896,7 +901,10 @@ class MainWindow(QMainWindow):
         self.lbl_token_tag = QLabel("Token:")
         self.edit_token = QLineEdit()
         self.edit_token.setReadOnly(True)
-        self.edit_token.setMinimumWidth(200)
+        # 令牌是 32 个字符的 urlsafe 串，按字宽算够整串显示，不用横向拖
+        self.edit_token.setMinimumWidth(
+            self.edit_token.fontMetrics().horizontalAdvance("M" * 34) + 16)
+
         self.edit_token.setPlaceholderText("Bridge 没启动")
         self.edit_token.setToolTip("这台机器 Bridge 的令牌。点「配对扩展」扩展会自动领；"
                                   "领不到就复制它，粘到扩展选项页里")
@@ -1071,33 +1079,30 @@ class MainWindow(QMainWindow):
 
         central = QWidget()
         layout = QVBoxLayout(central)
-        # 第一行：左边一排常用按钮（窄了会自动折行），高级选项钉在最右边
-        first_row = QHBoxLayout()
-        first_row.setContentsMargins(0, 0, 0, 0)
-        first_row.addWidget(flow.wrap(top), 1)
-        first_row.addWidget(self.lbl_token_tag, 0, Qt.AlignVCenter)
-        first_row.addWidget(self.edit_token, 0, Qt.AlignVCenter)
-        first_row.addWidget(self.btn_token_copy, 0, Qt.AlignTop)
-        first_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
-        first_row.addWidget(self.btn_advanced, 0, Qt.AlignTop)
-        layout.addLayout(first_row)
-        # 第二行同样的结构：左边动作，右边扩展状态 + AI 那几个按钮，两行右侧对齐
-        second_row = QHBoxLayout()
-        second_row.setContentsMargins(0, 0, 0, 0)
-        second_row.addWidget(flow.wrap(export_row), 1)
-        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 停止_AI | AI接口 | AI 面板
-        second_row.addWidget(self.chk_auto_ai, 0, Qt.AlignVCenter)
-        second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
-        second_row.addWidget(self.btn_bridge_send, 0, Qt.AlignTop)
-
-
-        second_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
-        second_row.addWidget(self.btn_ai_api, 0, Qt.AlignTop)
-        second_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
-
-
-        layout.addLayout(second_row)
+        # 两行合用一个网格：左边一列是会折行的按钮条，右边几列是扩展/AI 那些。
+        # 用网格而不是两个 QHBoxLayout，是为了让「Token 框」和「状态药丸」落在同一列
+        # ——同列自动等宽、左右对齐，两行右端也齐。
+        head = QGridLayout()
+        head.setContentsMargins(0, 0, 0, 0)
+        head.addWidget(flow.wrap(top), 0, 0)
+        head.addWidget(flow.wrap(export_row), 1, 0)
+        head.setColumnStretch(0, 1)
+        # 第一行右侧：Token: | 令牌 | 复制 Token | 配对扩展 |（空）| 高级选项
+        head.addWidget(self.lbl_token_tag, 0, 1, Qt.AlignVCenter)
+        head.addWidget(self.edit_token, 0, 2, Qt.AlignVCenter)
+        head.addWidget(self.btn_token_copy, 0, 3, Qt.AlignTop)
+        head.addWidget(self.btn_bridge_pair, 0, 4, Qt.AlignTop)
+        head.addWidget(self.btn_advanced, 0, 6, Qt.AlignTop)
+        # 第二行右侧：自动 | 状态药丸 | 发送_AI | 停止_AI | AI接口 | AI 面板
+        head.addWidget(self.chk_auto_ai, 1, 1, Qt.AlignVCenter)
+        head.addWidget(self.lbl_bridge, 1, 2, Qt.AlignVCenter)
+        head.addWidget(self.btn_bridge_send, 1, 3, Qt.AlignTop)
+        head.addWidget(self.btn_bridge_stop, 1, 4, Qt.AlignTop)
+        head.addWidget(self.btn_ai_api, 1, 5, Qt.AlignTop)
+        head.addWidget(self.btn_ai_options, 1, 6, Qt.AlignTop)
+        layout.addLayout(head)
         layout.addWidget(vertical, 1)
+
         self.setCentralWidget(central)
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("把视频拖进窗口，或点左上角“打开视频”")
