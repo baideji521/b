@@ -1,6 +1,12 @@
 """单个视频的完整处理流程（探测 -> 视觉 -> 语音 -> Timeline -> 导出 -> benchmark）。
 
 模型只加载一次，多视频复用；每个阶段独立落盘，支持断点续跑。
+
+阶段产物照旧写 `cache/videos/<视频标识>/*.json` 和 `output/<视频名>/*`，格式一个字没改。
+变的是"这套旧结果还能不能当缓存用"由数据库回答（见 DbRun）：
+视频指纹 + 视觉模型 + 视觉配置哈希 + ASR 模型 + ASR 配置哈希，五项全对才算命中。
+数据库里的 analysis_runs 只有在这次的事件、语音段、逐词全部写进库之后才会标 completed；
+中途抛异常一律标 failed 并记原因，不会留下"库里说成了、其实没跑完"的假记录。
 """
 
 from __future__ import annotations
@@ -11,8 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from . import benchmark as bench
+from .cache import slug_for
 from .checkpoint import Checkpoint
 from .config import Config
+from .db import open_db
+from .db import repo as db_repo
 from .emotions import label_for as emotion_label
 from .events import SpeechEvent, SpeechWord, VisualEvent, finalize
 from .language import LanguageRenderer, decide_output_language, labels_for
@@ -35,6 +44,121 @@ from .visual.qwen_vl import VisualOOM, VisualParams
 logger = get_logger(__name__)
 
 
+class DbRun:
+    """一次分析在数据库里的落脚点。
+
+    库里记的是状态，不是产物：JSON 照旧落盘，这里只登记"这个视频、这套配置、跑到哪一步"。
+    库开不起来（文件被占、磁盘满）不该让分析跑不了——那种情况下所有方法退化成空操作，
+    缓存判断也退回老规矩（文件在就复用），只在日志里说一声。
+    """
+
+    def __init__(self, cfg: Config, video_path: Path, force: bool = False):
+        self.cfg = cfg
+        self.video_path = video_path
+        self.force = force
+        self.db: Any = None
+        self.video_id: int | None = None
+        self.analysis_id: int | None = None
+        self.reused = False
+        self.sig: dict[str, Any] = {}
+        try:
+            self.db = open_db(cfg)
+            self.sig = db_repo.signature(cfg)
+            self.video_id = db_repo.upsert_video(self.db, video_path,
+                                                 cache_slug=slug_for(video_path))
+            hit = None if force else db_repo.find_cached_analysis(self.db, self.video_id, self.sig)
+            if hit is not None:
+                # 五项全对的老记录：接着写这一条，别每跑一次就堆一条一模一样的历史。
+                # 状态不动（还是 completed）：万一这次中途崩了，那条老结果本来也是好的
+                self.analysis_id = int(hit["id"])
+                self.reused = True
+            else:
+                self.analysis_id = db_repo.create_analysis(self.db, self.video_id, self.sig)
+        except Exception as exc:
+            logger.warning("数据库用不了，这次只按文件跑（缓存判断退回老规矩）：%s", exc)
+            self.db = None
+            self.video_id = None
+            self.analysis_id = None
+
+    @property
+    def active(self) -> bool:
+        return self.db is not None and self.analysis_id is not None
+
+    # --- 缓存判断 -------------------------------------------------------
+    def reuse_gate(self, stage: str) -> bool:
+        """Checkpoint 问"这个阶段的旧结果能用吗"，答案由数据库给。
+
+        语音只看 ASR 模型与配置哈希，视觉只看视觉那两项——改了 whisper 参数不该把
+        跑了几分钟的 Qwen 结果一起作废。导入的老记录哈希是 'imported'，永远不命中。
+        """
+        if self.force:
+            return False
+        if self.db is None or self.video_id is None:
+            return True
+        try:
+            return db_repo.stage_cache_ok(self.db, self.video_id, self.sig, stage)
+        except Exception as exc:
+            logger.warning("查缓存状态失败，按可复用处理：%s", exc)
+            return True
+
+    # --- 写状态 ---------------------------------------------------------
+    def note_probe(self, info: Any) -> None:
+        """探测完把时长分辨率补进视频表（第一次登记时还没探测过）。"""
+        if not self.active:
+            return
+        try:
+            db_repo.upsert_video(self.db, self.video_path, info=info.to_dict(),
+                                 cache_slug=slug_for(self.video_path))
+        except Exception as exc:
+            logger.warning("视频信息写库失败：%s", exc)
+
+    def save_speech(self, payload: dict[str, Any]) -> tuple[int, int]:
+        """语音段 + 逐词写库。段是空的就什么都不做，免得把上一次的好数据清掉
+        （skip_speech / 语音识别失败都会给一个空 payload）。"""
+        if not self.active:
+            return 0, 0
+        segments = [s for s in (payload.get("segments") or []) if isinstance(s, dict)]
+        if not segments:
+            return 0, 0
+        return db_repo.save_speech_segments(self.db, self.analysis_id, segments)
+
+    def save_visual(self, events: list[dict[str, Any]]) -> int:
+        if not self.active or not events:
+            return 0
+        return db_repo.save_visual_events(self.db, self.analysis_id, events)
+
+    def finish(self, *, visual_count: int, speech_count: int, out_dir: Path,
+               artifacts: list[tuple[str, Path]] | None = None) -> None:
+        """标 completed。**只在这里标**，而且必须是所有数据都写完之后。"""
+        if not self.active:
+            return
+        try:
+            for kind, path in (artifacts or []):
+                if path.is_file() and path.stat().st_size > 0:
+                    db_repo.register_artifact(self.db, self.video_id, kind, path)
+            db_repo.finish_analysis(self.db, self.analysis_id, scene_count=visual_count,
+                                    speech_count=speech_count, output_dir=out_dir)
+        except Exception as exc:  # 库写不进去不代表分析没跑成，但状态得是真的
+            logger.warning("分析状态写库失败（这条记录仍是 running）：%s", exc)
+
+    def fail(self, exc: BaseException) -> None:
+        """记失败。绝不把已经 completed 的老记录抹成失败，但这次失败也一定留痕。"""
+        if not self.active:
+            return
+        error = f"{type(exc).__name__}: {exc}"
+        try:
+            if self.reused:
+                # 接的是一条本来就成功的记录：那条不动，另开一条 failed 记这次的事
+                failed_id = db_repo.create_analysis(self.db, self.video_id, self.sig)
+                db_repo.fail_analysis(self.db, failed_id, error)
+                logger.warning("这次没跑完，已另记一条 failed（复用的那条成功记录保持不变）")
+                return
+            db_repo.fail_analysis(self.db, self.analysis_id, error)
+        except Exception as inner:
+            logger.warning("失败状态写库也失败了：%s", inner)
+
+
+
 class Pipeline:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -55,9 +179,26 @@ class Pipeline:
     def run_video(self, video_path: str | Path, force: bool = False,
                   skip_visual: bool = False, skip_speech: bool = False,
                   force_speech: bool = False, translate: bool = False) -> dict[str, Any]:
+        """入口签名跟以前一样。外面这层只管数据库里的状态：
+
+        开一条 analysis_run（或接上五项全对的那条），跑完标 completed，抛异常标 failed。
+        流程本身在 _run_video 里，一行没改。
+        """
         video_path = Path(video_path).resolve()
+        run = DbRun(self.cfg, video_path, force=force)
+        try:
+            return self._run_video(video_path, run, force=force, skip_visual=skip_visual,
+                                   skip_speech=skip_speech, force_speech=force_speech,
+                                   translate=translate)
+        except BaseException as exc:
+            run.fail(exc)
+            raise
+
+    def _run_video(self, video_path: Path, run: DbRun, force: bool = False,
+                   skip_visual: bool = False, skip_speech: bool = False,
+                   force_speech: bool = False, translate: bool = False) -> dict[str, Any]:
         timer = bench.Timer()
-        ckpt = Checkpoint(self.cfg.path("cache_dir"), video_path)
+        ckpt = Checkpoint(self.cfg.path("cache_dir"), video_path, reuse_gate=run.reuse_gate)
         if force:
             ckpt.reset()
         out_dir = self.cfg.path("output_dir") / video_path.stem
@@ -94,6 +235,7 @@ class Pipeline:
             info.duration, info.width, info.height, info.fps, info.total_frames, info.has_audio,
         )
         write_json(out_dir / "video_metadata.json", {"video": info.to_dict(), "scene_cuts": cuts})
+        run.note_probe(info)
 
         # 2) 语音识别（必须在视觉分析之前：最终输出语言由音频语言决定）
         if skip_speech:
@@ -336,6 +478,25 @@ class Pipeline:
             "srt_kind": srt_kind,
         }
         write_json(out_dir / "benchmark.json", benchmark)
+
+        # 数据库：所有 JSON 都写完了，这时候才把结果写进库并标 completed。
+        # 顺序很关键——先写数据（事件、语音段、逐词），最后一步才改状态，
+        # 中间任何一步炸了，这条记录就停在 running / failed，不会出现"库里说成了、盘上没跑完"。
+        from .audio import wav_path  # noqa: PLC0415
+
+        segments_saved, words_saved = run.save_speech(speech_payload)
+        events_saved = run.save_visual([e.to_dict() for e in visual_events])
+        run.finish(visual_count=len(visual_events), speech_count=len(speech_events),
+                   out_dir=out_dir,
+                   artifacts=[("source_video", video_path),
+                              ("words_srt", out_dir / "timeline.srt"),
+                              ("preview_audio",
+                               wav_path(self.cfg.path("cache_dir"), video_path))])
+        if run.active:
+            logger.info("数据库已记：分析 #%s（%s），视觉事件 %d / 语音段 %d / 逐词 %d",
+                        run.analysis_id, "接上已有记录" if run.reused else "新记录",
+                        events_saved, segments_saved, words_saved)
+
 
         logger.info(
             "完成 %s：视觉 %d 事件 / 语音 %d 段 / timeline %d 条，总耗时 %.1fs",

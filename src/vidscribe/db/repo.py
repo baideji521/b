@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from pathlib import Path
@@ -238,6 +239,40 @@ def find_cached_analysis(db: Database, video_id: int, sig: dict[str, Any]) -> sq
         """,
         (video_id, sig.get("vision_model"), sig.get("vision_config_hash"),
          sig.get("asr_model"), sig.get("asr_config_hash")))
+
+
+def find_stage_cache(db: Database, video_id: int, sig: dict[str, Any],
+                     stage: str) -> sqlite3.Row | None:
+    """按阶段查缓存：语音只比 ASR 那两项，视觉只比视觉那两项。
+
+    为什么分开：改了 whisper 的参数不该把跑了几分钟的 Qwen 结果一起作废，反之也一样。
+    整体「这次分析算命中」仍然要求五项全对（见 find_cached_analysis）。
+    导入的老记录哈希是 'imported'，跟任何真实哈希都不相等，所以永远不会被当成命中。
+    """
+    if stage == "speech":
+        return db.one(
+            """
+            SELECT * FROM analysis_runs
+             WHERE video_id = ? AND status = 'completed'
+               AND asr_model = ? AND asr_config_hash = ?
+             ORDER BY id DESC LIMIT 1
+            """, (video_id, sig.get("asr_model"), sig.get("asr_config_hash")))
+    if stage == "visual":
+        return db.one(
+            """
+            SELECT * FROM analysis_runs
+             WHERE video_id = ? AND status = 'completed'
+               AND vision_model = ? AND vision_config_hash = ?
+             ORDER BY id DESC LIMIT 1
+            """, (video_id, sig.get("vision_model"), sig.get("vision_config_hash")))
+    return None
+
+
+def stage_cache_ok(db: Database, video_id: int, sig: dict[str, Any], stage: str) -> bool:
+    """这个阶段的旧结果还能不能用。probe/timeline 跟模型无关，一律可以复用。"""
+    if stage not in ("speech", "visual"):
+        return True
+    return find_stage_cache(db, video_id, sig, stage) is not None
 
 
 def analysis_by_source(db: Database, video_id: int, source: str) -> sqlite3.Row | None:
@@ -647,6 +682,95 @@ def has_artifact(db: Database, video_id: int, kind: str) -> bool:
 
 
 # ===================================================================== 统计
+def videos_under(db: Database, folder: str | Path | None) -> list[sqlite3.Row]:
+    """某个目录（含子目录）里、还在盘上的视频。界面列任务表就用这个，不去翻目录。"""
+    if folder is None:
+        return []
+    prefix = str(Path(folder).resolve())
+    if not prefix.endswith(os.sep):
+        prefix += os.sep
+    # 文件名里可能真带 % 或 _，得转义，否则 LIKE 会把它们当通配符
+    escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    return db.all(
+        "SELECT * FROM videos WHERE exists_on_disk = 1 AND file_path LIKE ? ESCAPE '\\' "
+        "ORDER BY file_name",
+        (escaped + "%",))
+
+
+def states_for_videos(db: Database, video_ids: list[int],
+                      sig: dict[str, Any] | None = None) -> dict[int, dict[str, bool]]:
+    """一批视频的四个状态，四条聚合 SQL 出来，不按视频逐个查、更不扫磁盘。
+
+    界面刷新就靠这个：40 个视频也是四次查询，不会因为数据库化反而变慢。
+    四个状态各自独立：
+    - analysed  analysis_runs 里有 completed（给了 sig 还要模型/配置哈希对得上）
+    - txt       artifacts 里有还在盘上的 merged_txt
+    - json      ai_results 有记录，或 artifacts 里有 ai_script
+    - clipped   artifacts 里有 final_video，或 clips 里有 rendered
+    """
+    empty = {"analysed": False, "txt": False, "json": False, "clipped": False}
+    if not video_ids:
+        return {}
+    marks = ", ".join("?" for _ in video_ids)
+    params = list(video_ids)
+    out: dict[int, dict[str, bool]] = {vid: dict(empty) for vid in video_ids}
+
+    if sig is None:
+        rows = db.all(
+            f"SELECT DISTINCT video_id FROM analysis_runs "
+            f"WHERE status = 'completed' AND video_id IN ({marks})", params)
+    else:
+        rows = db.all(
+            f"""
+            SELECT DISTINCT video_id FROM analysis_runs
+             WHERE status = 'completed' AND video_id IN ({marks})
+               AND vision_model = ? AND vision_config_hash = ?
+               AND asr_model = ? AND asr_config_hash = ?
+            """,
+            [*params, sig.get("vision_model"), sig.get("vision_config_hash"),
+             sig.get("asr_model"), sig.get("asr_config_hash")])
+    for row in rows:
+        out[int(row["video_id"])]["analysed"] = True
+
+    for row in db.all(
+            f"""
+            SELECT video_id, type FROM artifacts
+             WHERE video_id IN ({marks}) AND exists_on_disk = 1 AND COALESCE(size, 0) > 0
+               AND type IN ('merged_txt', 'ai_script', 'final_video')
+            """, params):
+        kind = row["type"]
+        key = {"merged_txt": "txt", "ai_script": "json", "final_video": "clipped"}[kind]
+        out[int(row["video_id"])][key] = True
+
+    for row in db.all(
+            f"SELECT DISTINCT video_id FROM ai_results WHERE video_id IN ({marks})", params):
+        out[int(row["video_id"])]["json"] = True
+
+    for row in db.all(
+            f"SELECT DISTINCT video_id FROM clips "
+            f"WHERE status = 'rendered' AND video_id IN ({marks})", params):
+        out[int(row["video_id"])]["clipped"] = True
+    return out
+
+
+def statistics_for(db: Database, video_ids: list[int], *,
+                   done_key: str = "clipped",
+                   sig: dict[str, Any] | None = None) -> dict[str, int]:
+    """AI 面板四格统计：总任务 / 未剪辑（未完成）/ 已获取 JSON / 成品。
+
+    `done_key` 决定"算完成"的口径：剪辑成片和脚本剪辑看成品（clipped），
+    收取脚本只要拿到 JSON 就算完成（json）。
+    """
+    states = states_for_videos(db, video_ids, sig)
+    done = sum(1 for s in states.values() if s.get(done_key))
+    return {
+        "total": len(video_ids),
+        "todo": len(video_ids) - done,
+        "json": sum(1 for s in states.values() if s["json"]),
+        "done": done,
+    }
+
+
 def video_state(db: Database, video_id: int, sig: dict[str, Any] | None = None) -> dict[str, bool]:
     """一个视频的四个状态，各自独立判定，全部来自数据库。
 
