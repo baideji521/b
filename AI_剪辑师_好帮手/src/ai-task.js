@@ -173,6 +173,8 @@ const SITES = {
     ],
     sends: ["button.send-button"],
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
+    // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
+    dropAll: true,
     upload: "添加照片和文件|上传文件|添加文件|attach|upload|add files",
     // 云端硬盘那条会弹 Google Drive 选择器，纯挡路；发送/录音也别碰
     uploadSkip: "云端|硬盘|drive|发送|send|停止|stop|麦克风|mic|语音|录音|图片生成|制作",
@@ -188,6 +190,8 @@ const SITES = {
     answers: [".ds-markdown", "[class*='ds-markdown']", "[class*='_md_']", "[class*='markdown']"],
     sends: ["div[role='button'][aria-disabled]", "button[type='submit']"],
     spinners: "[role='progressbar'], [class*='loading'], [class*='uploading']",
+    // DeepSeek 输入框那几层和 body 各挂了一个 drop 监听，砸多了会被收好几遍
+    dropAll: false,
     upload: "上传附件|添加附件|上传文件|attach|upload",
     uploadSkip: "深度思考|联网搜索|发送|send|停止|stop|语音|录音|新对话|new chat",
   },
@@ -250,25 +254,30 @@ function pageAttachFiles(payloads, mode, editorSelector, targetIndex) {
     targets.push(document);
     if (!targets.length) return { ok: false, error: "找不到拖放目标" };
     const index = Number.isInteger(targetIndex) ? targetIndex : 0;
-    if (index >= targets.length) {
+    // index < 0 表示「整页都砸一遍」：只有一处收 drop 的站点（Gemini）这样最稳
+    const chosen = index < 0 ? targets : [targets[index]];
+    if (!chosen[0]) {
       return { ok: false, error: "拖放目标试完了", targets: targets.length };
     }
-    const target = targets[index];
 
     const box = document.body || root;
     const rect = box.getBoundingClientRect();
     const point = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
     let fired = 0;
-    for (const type of ["dragenter", "dragover", "drop"]) {
-      try {
-        target.dispatchEvent(new DragEvent(type, {
-          bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...point,
-        }));
-        fired += 1;
-      } catch {}
+    for (const target of chosen) {
+      for (const type of ["dragenter", "dragover", "drop"]) {
+        try {
+          target.dispatchEvent(new DragEvent(type, {
+            bubbles: true, cancelable: true, composed: true, dataTransfer: transfer, ...point,
+          }));
+          fired += 1;
+        } catch {}
+      }
     }
-    const where = target === document ? "document"
-      : `${target.tagName || ""}${target.className ? `.${String(target.className).slice(0, 20)}` : ""}`;
+    const one = chosen[0];
+    const where = index < 0 ? `整页${targets.length}处`
+      : (one === document ? "document"
+        : `${one.tagName || ""}${one.className ? `.${String(one.className).slice(0, 20)}` : ""}`);
     return fired
       ? { ok: true, via: "drop", target: index, targets: targets.length, where,
           count: transfer.files.length }
@@ -641,10 +650,13 @@ function pageReadAnswer(groups, editorSelector) {
 // ---------------------------------------------------------------------------
 
 async function runInTab(tabId, fn, args = []) {
+  // executeScript 的 args 必须可序列化：混进一个 undefined 会让整次调用报
+  // 「Value is unserializable」，还看不出是哪个参数的问题，所以统一换成 null
+  const safe = args.map((item) => (item === undefined ? null : item));
   const [result] = await chrome.scripting.executeScript({
     target: { tabId },
     func: fn,
-    args,
+    args: safe,
     world: "MAIN",
   });
   return result?.result ?? null;
@@ -890,14 +902,19 @@ async function handleAiTask(task) {
       };
 
 
-      // 拖放一次只砸一个目标（输入框那几层 -> body -> html -> document），砸完就数卡片；
-      // 一口气全砸会被多个监听各收一遍，页面上冒出一堆重复附件。
-      // 拖不进去才退到粘贴 / file 控件。
+      // 拖放怎么砸看站点：Gemini 只有一处收，砸整页最稳（target=-1）；
+      // DeepSeek 那几层各挂一个监听，只能一次砸一个，砸完数卡片，没进去才换下一个目标。
+      // 注意每个 plan 都必须带上 target 这个数字——executeScript 的 args 里出现
+      // undefined 会直接报「Value is unserializable」。
       const plans = [];
-      for (let t = 0; t < 6; t += 1) plans.push({ mode: "drop", batch: true, target: t });
-      plans.push({ mode: "drop", batch: false, target: 0 });
-      plans.push({ mode: "paste", batch: true });
-      plans.push({ mode: "input", batch: true });
+      if (site.dropAll) {
+        plans.push({ mode: "drop", batch: true, target: -1 });
+      } else {
+        for (let t = 0; t < 6; t += 1) plans.push({ mode: "drop", batch: true, target: t });
+      }
+      plans.push({ mode: "drop", batch: false, target: site.dropAll ? -1 : 0 });
+      plans.push({ mode: "paste", batch: true, target: 0 });
+      plans.push({ mode: "input", batch: true, target: 0 });
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
         // 卡片可能晚一点才冒出来，换下一种方式之前先复查一遍，别白塞第二遍
