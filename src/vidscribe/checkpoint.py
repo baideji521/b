@@ -4,13 +4,16 @@
 构造时可以传一个 `reuse_gate(stage) -> bool`，由数据库回答（模型/配置哈希对不上就别复用）。
 不传就是老规矩——文件在就复用。
 
-注意窗口级续跑（`visual_windows.json`）不走 gate：那是长视频跑一半的中间态，
+注意窗口级续跑（`visual_windows.json`）不走 stage gate：那是长视频跑一半的中间态，
 跟"整套结果能不能当缓存用"是两回事，必须一直可用，否则长视频每次都得从第一个窗口重来。
+窗口能不能复用只由一件事决定：这份缓存是不是同一套视觉配置产的（`visual_config_hash`）。
+配置没变就照常续跑，配置变了整份都不算命中——但旧文件一个字节都不动。
 """
 
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,11 @@ from .logging_setup import get_logger
 logger = get_logger(__name__)
 
 STAGES = ("probe", "visual", "speech", "timeline")
+
+# 窗口缓存文件格式版本。v2 起是 {"version","visual_config_hash","windows"} 三键信封；
+# v1（没有 version 的裸 dict）是历史格式，读得出来但一律不算命中：
+# 它没记自己是哪套配置产的，猜不得。
+WINDOW_CACHE_VERSION = 2
 
 
 class Checkpoint:
@@ -82,20 +90,60 @@ class Checkpoint:
     def window_cache_file(self) -> Path:
         return self.dir / "visual_windows.json"
 
-    def load_window_cache(self) -> dict[str, Any]:
+    def _read_window_file(self) -> dict[str, Any]:
         path = self.window_cache_file()
-        if path.is_file():
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    return json.load(fh)
-            except Exception:
-                return {}
-        return {}
+        if not path.is_file():
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                loaded = json.load(fh)
+        except Exception as exc:
+            logger.warning("窗口缓存读不了，这次从第一个窗口重来：%s", exc)
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
 
-    def save_window_cache(self, cache: dict[str, Any]) -> None:
-        with open(self.window_cache_file(), "w", encoding="utf-8") as fh:
-            json.dump(cache, fh, ensure_ascii=False, indent=2)
+    def load_window_cache(self, config_hash: str | None = None) -> dict[str, Any]:
+        """读窗口缓存，返回 {window_key: {...}}。
+
+        给了 `config_hash` 就只认同一套视觉配置产出的窗口：对不上（包括没记过配置的
+        v1 老文件）一律当没命中，重新问模型。**旧文件不删、不改**，只是这次不用它。
+        不给 `config_hash` 是老规矩（有什么用什么），留给不关心配置的调用方。
+        """
+        raw = self._read_window_file()
+        if not raw:
+            return {}
+        version = raw.get("version")
+        if version != WINDOW_CACHE_VERSION:
+            # 没有 version 的裸 dict = v1：它不记得自己是哪套配置跑出来的，不能猜
+            logger.info("窗口缓存是老格式（version=%s），保留原文件但这次不复用", version)
+            return {}
+        if config_hash is not None and raw.get("visual_config_hash") != config_hash:
+            logger.info("视觉配置变了（缓存 %s，本次 %s），窗口缓存整份不复用，旧文件保留",
+                        str(raw.get("visual_config_hash"))[:12] or "无", config_hash[:12])
+            return {}
+        windows = raw.get("windows")
+        return windows if isinstance(windows, dict) else {}
+
+    def save_window_cache(self, cache: dict[str, Any], config_hash: str | None = None) -> None:
+        """把窗口缓存整份写成 v2 信封。
+
+        先写 `.tmp` 再 `os.replace`：崩在写盘中途时，盘上要么是上一份完整缓存、
+        要么是这一份完整缓存，不会留下半截 JSON 把几十个窗口的推理白扔掉。
+        """
+        payload = {
+            "version": WINDOW_CACHE_VERSION,
+            "visual_config_hash": config_hash,
+            "windows": cache,
+        }
+        target = self.window_cache_file()
+        tmp = target.with_name(target.name + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
 
     def _flush(self) -> None:
         with open(self.state_file, "w", encoding="utf-8") as fh:
             json.dump(self.state, fh, ensure_ascii=False, indent=2)
+

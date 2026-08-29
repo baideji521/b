@@ -11,10 +11,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 import traceback
 from pathlib import Path
 from typing import Any
+
 
 from . import benchmark as bench
 from .cache import slug_for
@@ -42,6 +45,70 @@ from .visual.face import annotate as annotate_faces
 from .visual.qwen_vl import VisualOOM, VisualParams
 
 logger = get_logger(__name__)
+
+
+# 进 window hash 的视觉配置：每一项都在源码里真的改变了 Qwen 的窗口输入或窗口产物。
+#   model_id/backend/dtype/attn_implementation/quantization -> 换的是模型本身或数值行为
+#     （qwen_vl.py: _load 用 quantization/dtype/attn_implementation）
+#   fps/max_frames/min_frames/max_pixels_tokens/total_pixels_tokens/max_new_tokens
+#     -> VisualParams，直接决定采几帧、多大、生成多长（qwen_vl.py: generate/_build_inputs_*）
+#   frame_source -> 走官方解码还是 OpenCV 采样，帧号与时间戳口径不同
+#   emotion_enabled + face_emotion.enabled -> 一起决定 _prompt_emotion，改的是 user prompt 文本
+#   snap_tolerance_seconds -> calibrate_events 在窗口内改事件时间，结果就存在窗口缓存里
+#   scene_detect/scene_threshold/scene_sample_fps -> 产出 cuts，cuts 参与窗口内事件对齐
+_WINDOW_HASH_KEYS = (
+    "model_id",
+    "backend",
+    "dtype",
+    "attn_implementation",
+    "quantization",
+    "frame_source",
+    "fps",
+    "max_frames",
+    "min_frames",
+    "max_pixels_tokens",
+    "total_pixels_tokens",
+    "max_new_tokens",
+    "emotion_enabled",
+    "snap_tolerance_seconds",
+    "scene_detect",
+    "scene_threshold",
+    "scene_sample_fps",
+)
+
+# 明确不进 window hash 的（都有源码依据，别"看着像视觉参数"就加进来）：
+#   dedup_similarity/merge_similarity/min_event_seconds/max_event_seconds
+#     -> 只在窗口循环之后的 finalize() 用。放进来会让改一个阈值就把整片窗口白跑一遍。
+#   batch_size -> OOM 时会被自动砍半，进 hash 等于降级一次就作废后面所有续跑。
+#   window_seconds/window_overlap_seconds/long_video_threshold
+#     -> 改了窗口边界，key 里的 "idx:start-end" 自然对不上，不用重复计入。
+#   models(GUI 清单)/fallback_model_ids -> 真换了模型运行时 model_id 就变了，key 里已体现。
+#   face_emotion 的采样/检测参数 -> 独立阶段，覆盖情绪字段，不进 Qwen 输入。
+
+
+def visual_config_hash(vcfg: dict[str, Any], backend: str | None = None) -> str:
+    """这套视觉配置的窗口身份：canonical JSON 的 SHA256 全 64 位。
+
+    只跟 `_WINDOW_HASH_KEYS` 有关，无关配置（输出目录、日志、DB、Bridge、PRM、
+    Whisper、FFmpeg、GUI）改了不会让长视频重跑。`backend` 传运行时真正用的后端
+    （配置里可能写着 auto），对应后端的专属子字典才参与哈希。
+
+    注意：这跟 `analysis_runs.vision_config_hash`（整份 visual 的 sha1 前 16 位、
+    管的是"阶段级分析身份"）是两个口径，各管一件事，不要混。
+    """
+    payload: dict[str, Any] = {}
+    for key in _WINDOW_HASH_KEYS:
+        if key in vcfg:
+            payload[key] = vcfg[key]
+    effective = str(backend or vcfg.get("backend") or "")
+    payload["backend"] = effective
+    payload["face_emotion_enabled"] = bool((vcfg.get("face_emotion") or {}).get("enabled", False))
+    for name in ("minicpm", "minicpm46"):
+        if effective == name and isinstance(vcfg.get(name), dict):
+            payload[name] = vcfg[name]
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 
 class DbRun:
@@ -573,10 +640,13 @@ class Pipeline:
                     ", ".join(f"{s:.1f}-{e:.1f}s" for s, e in windows[:6]) + (" ..." if len(windows) > 6 else ""))
 
         bench.reset_peak_vram()
-        cache = ckpt.load_window_cache()
+        # 窗口缓存只认同一套视觉配置：配置变了整份不命中（旧文件保留），配置没变照常续跑
+        cfg_hash = visual_config_hash(vcfg, backend=self.analyzer.backend)
+        cache = ckpt.load_window_cache(cfg_hash)
         # 缓存键带上输出语言 + 模型 + 画面情绪开关：换语言、换模型、开关情绪重跑时都不能复用旧描述
         model_tag = self.analyzer.model_id.split("/")[-1]
         emotion_tag = "em1" if vcfg.get("emotion_enabled", True) else "em0"
+
 
         def key_of(idx: int, s: float, e: float) -> str:
             return f"{model_tag}|{output_language}|{emotion_tag}|{idx}:{s:.3f}-{e:.3f}"
@@ -683,7 +753,7 @@ class Pipeline:
                 }
                 done_windows += 1
                 report_window(f"窗口 {idx + 1}/{len(windows)} [{start:.1f}-{end:.1f}s] -> {len(events)} 事件")
-            ckpt.save_window_cache(cache)
+            ckpt.save_window_cache(cache, cfg_hash)
             # 若因 OOM 缩小了 batch，剩下的窗口放回队列下一轮处理
             leftover = todo[len(current_batch):]
             if leftover:
