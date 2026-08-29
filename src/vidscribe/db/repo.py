@@ -896,7 +896,7 @@ def states_for_videos(db: Database, video_ids: list[int],
     - analysed  analysis_runs 里有 completed（给了 sig 还要模型/配置哈希对得上）
     - txt       artifacts 里有还在盘上的 merged_txt
     - json      ai_results 有记录，或 artifacts 里有 ai_script
-    - clipped   artifacts 里有 final_video，或 clips 里有 rendered
+    - clipped   artifacts 里有还在盘上的 final_video（clips 的 rendered 只算历史）
     """
     empty = {"analysed": False, "txt": False, "json": False, "clipped": False}
     if not video_ids:
@@ -936,11 +936,10 @@ def states_for_videos(db: Database, video_ids: list[int],
             f"SELECT DISTINCT video_id FROM ai_results WHERE video_id IN ({marks})", params):
         out[int(row["video_id"])]["json"] = True
 
-    for row in db.all(
-            f"SELECT DISTINCT video_id FROM clips "
-            f"WHERE status = 'rendered' AND video_id IN ({marks})", params):
-        out[int(row["video_id"])]["clipped"] = True
+    # 「成品」只认还在盘上的 final_video 产物：clips.status='rendered' 是历史（当时确实剪出来了），
+    # 成品后来被删掉了就不该继续显示完成——这跟队列跳过的判断（artifacts）保持同一个口径
     return out
+
 
 
 def statistics_for(db: Database, video_ids: list[int], *,
@@ -967,7 +966,8 @@ def video_state(db: Database, video_id: int, sig: dict[str, Any] | None = None) 
     - analysed：有跑成功的分析（给了 sig 就还要模型/配置对得上）
     - txt：merged_txt 产物在
     - json：有 AI 结果，或者登记过 ai_script 文件
-    - clipped：有 final_video 产物，或者 clips 里有 rendered 的
+    - clipped：有还在盘上的 final_video 产物（clips 里的 rendered 只是历史，
+      成品被删了就不该继续算完成——跟队列跳过的判断同一个口径）
     """
     if sig is None:
         analysed = latest_analysis(db, video_id) is not None
@@ -976,9 +976,7 @@ def video_state(db: Database, video_id: int, sig: dict[str, Any] | None = None) 
     txt = has_artifact(db, video_id, "merged_txt")
     json_ok = (get_ai_result(db, video_id) is not None
                or has_artifact(db, video_id, "ai_script"))
-    clipped = (has_artifact(db, video_id, "final_video")
-               or db.one("SELECT 1 FROM clips WHERE video_id = ? AND status = 'rendered'",
-                         (video_id,)) is not None)
+    clipped = has_artifact(db, video_id, "final_video")
     return {"analysed": analysed, "txt": txt, "json": json_ok, "clipped": clipped}
 
 
