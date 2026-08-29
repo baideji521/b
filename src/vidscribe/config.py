@@ -196,6 +196,14 @@ DEFAULTS: dict[str, Any] = {
         # collect 收取脚本：只把 AI 回的 JSON 存成 <视频名>_脚本.json，不剪
         # script 脚本剪辑：直接读 AI_输入目录里现成的脚本 JSON 开剪，不问 AI
         "ai_job": "full",
+        # 自动剪辑这一轮挑哪些视频（AI 面板里选）：
+        # all      全部：库里已有高光方案的直接开剪，没有的问 AI
+        # existing 只挑已经有高光方案的——这一档一次 AI 都不调
+        # missing  只挑还没有方案的，全部走 AI
+        "highlight_source": "all",
+        # 发 AI 时用哪一份 PRM 档案（prm_profiles.id）。0 = 按 prompt_file 那条老路找
+        "prm_id": 0,
+
 
         # 高光筛选提示词：相对项目根目录。这份和合并导出都是当附件上传给网页版 AI
         "prompt_file": "prm/prm_en.txt",

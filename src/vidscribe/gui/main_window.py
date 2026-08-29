@@ -342,7 +342,8 @@ class HighlightWorker(QThread):
 
     def __init__(self, cfg, payload_text: str, fallback: Path | None,
                  export_dir: Path | None, offsets: tuple[float, float, float] = (0.0, 0.0, 0.0),
-                 sfx: tuple[str, float] = ("", -6.0), video_only: bool = False):
+                 sfx: tuple[str, float] = ("", -6.0), video_only: bool = False,
+                 name_suffix: str = ""):
         super().__init__()
         self.cfg = cfg
         self.payload_text = payload_text
@@ -352,7 +353,11 @@ class HighlightWorker(QThread):
         self.sfx = sfx
         # AI 自动剪辑走这条：只落 <视频名>_高光时刻.mp4，不写同名 .json
         self.video_only = video_only
+        # 文件名后缀：同一个视频用不同方案 / 不同 PRM 剪出来的成品要能并存，不许互相覆盖
+        self.name_suffix = name_suffix
         self.output: Path | None = None
+        # 实际剪出来的区间 (起剪, 冻帧点)：加减秒数都已经算进去了，用来回写 clips
+        self.cut_ranges: list[tuple[float, float]] = []
 
 
     def _sfx_plan(self, video: Path, freeze_time: float):
@@ -449,6 +454,8 @@ class HighlightWorker(QThread):
             directory = (self.export_dir if self.export_dir and self.export_dir.is_dir()
                          else self.cfg.path("output_dir") / video.stem)
             target = default_target(directory, video)
+            if self.name_suffix:      # 同一视频多方案 / 多 PRM：各自一个文件名，谁都不覆盖谁
+                target = target.with_name(f"{target.stem}{self.name_suffix}{target.suffix}")
 
             # 先让剪辑引擎把 AI 的粗区间修到语义边界上，再交给既有渲染
             plans = self._plan_result(video, payload).plans
@@ -474,6 +481,8 @@ class HighlightWorker(QThread):
                 if not is_complete_video(out_path):   # 和登记闸门同一个判断（Batch 4）
                     raise RuntimeError(f"成片封装不完整，不当成成品：{out_path}")
                 self.log.emit("[剪辑引擎] 成片验证通过")
+                # 记下真正剪的区间（引擎修正 + 加减秒数之后的值），交给主界面回写 clips
+                self.cut_ranges.append((job.clip_start, job.freeze_time))
                 if not self.video_only:
                     write_json(out_path.with_suffix(".json"),
                                {"spec": job.raw,
@@ -555,6 +564,10 @@ class MainWindow(QMainWindow):
         self._queue_lock: RuntimeLock | None = None
         # 最近一次真正发出去的提示词指纹（hash/path/size），只做追溯记录，不参与上传
         self._last_prompt: dict[str, Any] | None = None
+        # 这一次用的 PRM 档案 id（成品要靠它反查"用哪一版 PRM 剪的"）
+        self._last_prm_id: int | None = None
+        # 这一次开剪用的高光方案 id（成品要靠它反查"按哪份 JSON 剪的"）
+        self._last_asset_id: int | None = None
         # AI 面板（第二主界面）：非模态，只开一个
         self.ai_panel = None
 
@@ -1657,7 +1670,7 @@ class MainWindow(QMainWindow):
             return
         self.run_highlight(text)
 
-    def run_highlight(self, text: str, ai: bool = False) -> None:
+    def run_highlight(self, text: str, ai: bool = False, name_suffix: str = "") -> None:
         """按 JSON 直接起渲染。手动走对话框和 AI 自动回填都汇到这里。
 
         用的是界面上「剪辑高光」那套配置（加减秒数、音效类别/增益）。
@@ -1676,7 +1689,7 @@ class MainWindow(QMainWindow):
             directory = ai_out
         self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, directory,
                                            self._highlight_offsets, self._highlight_sfx,
-                                           video_only=ai)
+                                           video_only=ai, name_suffix=name_suffix)
         if ai:
             where = ai_out if ai_out is not None else self.export_root()
             label = "AI_输出目录" if ai_out is not None else "导出目录"
@@ -1908,6 +1921,7 @@ class MainWindow(QMainWindow):
         记录失败绝不能拦住发送——AI 剪辑照跑，只是这条少一份审计信息。
         """
         self._last_prompt = None
+        self._last_prm_id = None
         try:
             info = db_repo.prompt_fingerprint(prompt_path)
         except OSError as exc:
@@ -1915,7 +1929,15 @@ class MainWindow(QMainWindow):
             return
         self._last_prompt = info
         db = self._db()
-        if db is None or self._auto_task_id is None:
+        if db is None:
+            return
+        try:      # 这份提示词在 PRM 档案里登记一下，成品以后才能反查"用的哪一版 PRM"
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            self._last_prm_id = db_assets.ensure_prm(db, prompt_path)
+        except Exception as exc:  # noqa: BLE001 - 登记不上也不拦发送
+            self.append_log(f"[PRM] 提示词登记不进档案（不影响发送）：{exc}")
+        if self._auto_task_id is None:
             return
         try:
             db_repo.note_task_prompt(db, self._auto_task_id, prompt_path)
@@ -2040,12 +2062,38 @@ class MainWindow(QMainWindow):
         self.append_log(f"[AI 接口] 收到 {len(text)} 字")
         self.on_bridge_result({"json": providers.extract_json(text), "text": text})
 
+    def selected_prm(self):
+        """当前选中的 PRM 档案行：先看 `bridge.prm_id`，再退回库里的默认那一份。
+
+        取不到就返回 None，由 `resolve_prompt_file` 走老的路径候选，不至于发不出去。
+        """
+        db = self._db()
+        if db is None:
+            return None
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            chosen = self.cfg.bridge.get("prm_id")
+            if chosen:
+                row = db_assets.get_prm(db, int(chosen))
+                if row is not None and not row["deleted_at"]:
+                    return row
+            return db_assets.default_prm(db)
+        except Exception as exc:  # noqa: BLE001 - 没登记过 PRM 也要能发
+            self.append_log(f"[PRM] 取不到 PRM 档案（{exc}），改用配置里的提示词路径")
+            return None
+
     def resolve_prompt_file(self) -> Path | None:
-        """找高光筛选提示词。按 config 里的路径、AI_输入目录、prm/、项目根、包内副本依次找。
+        """找高光筛选提示词。先看选中的 PRM 档案，再按 config 路径、AI_输入目录、prm/…往下找。
 
         这份文件被挪过好几次位置，找不到就返回 None，由调用方提示，别让任务默默少一个附件。
         """
         candidates = []
+        from ..db import assets as db_assets  # noqa: PLC0415
+
+        picked = db_assets.prm_file(self.selected_prm(), self.cfg.root)
+        if picked is not None:
+            candidates.append(picked)
         configured = str(self.cfg.bridge.get("prompt_file") or "").strip()
         if configured:
             path = Path(configured)
@@ -2136,7 +2184,7 @@ class MainWindow(QMainWindow):
         self._set_auto_step("", "")
         self._set_auto_progress(0)
         self._sync_disk()  # 手动丢进目录的 TXT/JSON/成品先进库，后面每一步只查库
-        created, reused, already = self._enqueue_auto_tasks(videos, job)
+        created, reused, already = self._enqueue_auto_tasks(videos, job)[:3]
         counts = db_repo.queue_counts(db, mode=job)
         if not counts["open"]:
             self._set_auto_state(True, "闲着")
@@ -2155,16 +2203,19 @@ class MainWindow(QMainWindow):
         """谁在跑这条任务。以后多开一个进程也能看出是谁占的。"""
         return f"gui-{os.getpid()}"
 
-    def _enqueue_auto_tasks(self, videos: list[Path], job: str) -> tuple[int, int, int]:
-        """把这一批视频排进数据库队列，返回（新建、复用、已有成品跳过）。
+    def _enqueue_auto_tasks(self, videos: list[Path], job: str) -> tuple[int, int, int, int]:
+        """把这一批视频排进数据库队列，返回（新建、复用、已有成品跳过、来源不符跳过）。
 
         幂等：同一个视频 + 同一种模式已经有没跑完的任务就复用那条，
         所以连点五次「自动剪辑」也不会多出四条重复任务。
+        「高光来源」再筛一道：只想剪已有 JSON 的，就不给没方案的视频排队；
+        只想跑没 JSON 的，就把已经有方案的放过去。
         """
         db = self._db()
         if db is None:
-            return 0, 0, 0
-        created = reused = already = 0
+            return 0, 0, 0, 0
+        source = self.highlight_source()
+        created = reused = already = off_source = 0
         for video in videos:
             if self._auto_done_file(video) is not None:
                 already += 1
@@ -2172,6 +2223,9 @@ class MainWindow(QMainWindow):
             vid = self._db_video_id(video, create=True)
             if vid is None:
                 self.append_log(f"[自动剪辑] {video.name} 登记不进数据库，跳过")
+                continue
+            if not self._source_allows(vid, source):
+                off_source += 1
                 continue
             try:
                 _task_id, is_new = db_repo.enqueue_ai_task(
@@ -2187,7 +2241,31 @@ class MainWindow(QMainWindow):
                 created += 1
             else:
                 reused += 1
-        return created, reused, already
+        if off_source:
+            label = "已有 JSON" if source == "existing" else "没有 JSON"
+            self.append_log(f"[自动剪辑] 按「{label}」筛掉 {off_source} 个视频，没给它们排队")
+        return created, reused, already, off_source
+
+    def highlight_source(self) -> str:
+        """这一轮自动剪辑要挑哪些视频：existing（已有 JSON）/ missing（没有 JSON）/ all。"""
+        value = str(self.cfg.bridge.get("highlight_source") or "all").strip().lower()
+        return value if value in ("existing", "missing", "all") else "all"
+
+    def _source_allows(self, vid: int, source: str) -> bool:
+        """这个视频合不合「高光来源」的口味。查不出来就放过（宁可多跑，不要漏跑）。"""
+        if source == "all":
+            return True
+        db = self._db()
+        if db is None:
+            return True
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            has = vid in db_assets.videos_with_assets(db, [vid])
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[高光方案] 查不出有没有现成方案（当成没筛）：{exc}")
+            return True
+        return has if source == "existing" else not has
 
     def _auto_step(self) -> None:
         """从数据库队列里领下一条任务。后面几步靠各自的完成回调推进，这儿只负责起头。"""
@@ -2220,6 +2298,9 @@ class MainWindow(QMainWindow):
                 self._auto_video = None
                 continue
             break
+        # 新的一条任务：上一条的方案 / PRM 记账清掉，免得张冠李戴
+        self._last_asset_id = None
+        self._last_prm_id = None
         self.load_video(video)
 
         if self._auto_job == "script":
@@ -2238,6 +2319,15 @@ class MainWindow(QMainWindow):
                 self._set_auto_step(video.stem, "剪辑")
                 self._mark_auto_rendering()   # 素材齐了，这条从这一刻起是"在剪"
                 self.run_highlight(resumed, ai=True)
+                return
+            # 库里已经有现成的高光方案：按方案直接开剪，一次 AI 都不调
+            existing = self._asset_json_for_render(video)
+            if existing is not None:
+                self._last_highlight_json = existing
+                self._auto_save_script()
+                self._set_auto_step(video.stem, "剪辑")
+                self._mark_auto_rendering()
+                self.run_highlight(existing, ai=True)
                 return
         text_file = self._auto_text_file(video)
         if text_file is not None:
@@ -2478,20 +2568,24 @@ class MainWindow(QMainWindow):
             self.append_log(f"[数据库] 登记视频失败：{exc}")
             return None
 
-    def _register_artifact(self, video: Path | None, kind: str, path: Path) -> None:
-        """刚生成的文件立刻进库，免得下一步还得靠扫目录才看得见。"""
+    def _register_artifact(self, video: Path | None, kind: str, path: Path) -> int | None:
+        """刚生成的文件立刻进库，免得下一步还得靠扫目录才看得见。
+
+        返回 artifacts.id：成品那条路要拿它挂高光方案 / PRM 的来源。
+        """
         if video is None:
-            return
+            return None
         db = self._db()
         if db is None:
-            return
+            return None
         vid = self._db_video_id(video, create=True)
         if vid is None:
-            return
+            return None
         try:
-            db_repo.register_artifact(db, vid, kind, path)
+            return db_repo.register_artifact(db, vid, kind, path)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 登记 {kind} 失败：{exc}")
+            return None
 
     def _sync_disk(self) -> None:
         """开跑前跟磁盘对一次账：手动丢进目录的视频/TXT/JSON/成品都登记进库。
@@ -2519,25 +2613,73 @@ class MainWindow(QMainWindow):
         return self._auto_done_file(self._auto_video)
 
     def _register_final_video(self, output: str) -> None:
-        """成品刚出炉：登记 final_video，并把这个视频的 clip 标成已渲染。"""
+        """成品刚出炉：登记 final_video，并把这个视频的 clip 标成已渲染。
+
+        顺手把**实际剪的区间**回写：剪辑引擎会把 AI 的粗边界挪到语义位置，
+        库里留 AI 原值会和成片对不上。段数对不上就只标状态，绝不瞎配对。
+        再把成品挂回「哪份高光方案 + 哪版 PRM」，以后拿成品能反查全链路。
+        """
         video = self._auto_video or self.video_path
         if video is None or not output:
             return
         target = Path(output)
         if not target.is_file():
             return
-        self._register_artifact(video, "final_video", target)
+        artifact_id = self._register_artifact(video, "final_video", target)
+        self._link_final_video(artifact_id)
         db = self._db()
         vid = self._db_video_id(video)
         if db is None or vid is None:
             return
+        ranges = list(getattr(self.clip_worker, "cut_ranges", None) or ())
         try:
-            for clip in db_repo.get_clips(db, vid):
-                if clip["status"] != "rendered":
-                    db_repo.update_clip(db, int(clip["id"]), status="rendered",
-                                        output_path=target)
+            pending = [c for c in db_repo.get_clips(db, vid) if c["status"] != "rendered"]
+            if ranges and len(ranges) != len(pending):
+                self.append_log(f"[数据库] 片段 {len(pending)} 条与实际剪出 {len(ranges)} 段"
+                                "对不上，只标状态不改时间")
+                ranges = []
+            for index, clip in enumerate(pending):
+                times = {}
+                if ranges:
+                    start, end = ranges[index]
+                    times = {"start": start, "end": end, "duration": round(end - start, 3)}
+                db_repo.update_clip(db, int(clip["id"]), status="rendered",
+                                    output_path=target, **times)
+            if ranges:
+                start, end = ranges[0]
+                self.append_log(f"[数据库] 实际剪辑区间已回写：{start:.2f} → {end:.2f}"
+                                + (f"（共 {len(ranges)} 段）" if len(ranges) > 1 else ""))
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 标记片段已渲染失败：{exc}")
+
+    def _link_final_video(self, artifact_id: int | None) -> None:
+        """把成品挂回这次用的高光方案和 PRM。
+
+        挂不上不算失败：成品文件已经在盘上了，血缘只是查询用的附加信息。
+        方案 / PRM 以后被软删也不影响这里——存的是 id，历史照旧查得到。
+        """
+        if artifact_id is None:
+            return
+        asset_id = getattr(self, "_last_asset_id", None)
+        prm_id = getattr(self, "_last_prm_id", None)
+        if asset_id is None and prm_id is None:
+            return
+        db = self._db()
+        if db is None:
+            return
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            db_assets.link_artifact(db, artifact_id, asset_id=asset_id, prm_id=prm_id)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[高光方案] 成品的来源挂不上（不影响成品）：{exc}")
+            return
+        parts = []
+        if asset_id is not None:
+            parts.append(f"方案 #{asset_id}")
+        if prm_id is not None:
+            parts.append(f"PRM #{prm_id}")
+        self.append_log("[高光方案] 成品来源已记账：" + " + ".join(parts))
 
     def _save_ai_result(self, parsed: dict, raw_text: str = "") -> None:
         """AI 回的 JSON 进库，挂在当前这条任务下面（ai_results.task_id 指回 ai_tasks.id）。
@@ -2569,8 +2711,115 @@ class MainWindow(QMainWindow):
                 prompt_size=prompt.get("prompt_size"))
             for spec in clips:
                 db_repo.create_clip(db, vid, spec, ai_result_id=result_id)
+            self._register_highlight_asset(db, vid, parsed, result_id, bool(clips))
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] AI 结果存不进去：{exc}")
+
+    def _register_highlight_asset(self, db, vid: int, parsed: dict,
+                                  result_id: int, usable: bool) -> None:
+        """把这份 AI JSON 登记成一个「高光方案」资产。
+
+        每次都是新的一行，旧方案一个字都不动（同一个视频可以有任意多份方案）。
+        抠不出片段的回复不登记成方案——那种 JSON 剪不出东西，留在 ai_results 里追溯就够了。
+        """
+        self._last_asset_id = None
+        if not usable:
+            return
+        try:
+            from ..bridge import providers  # noqa: PLC0415
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            spec = providers.settings(self.cfg.bridge)
+            analysis = db_repo.latest_analysis(db, vid)
+            asset_id = db_assets.create_asset(
+                db, vid, parsed,
+                provider=str(spec.get("provider") or "") or None,
+                model=str(spec.get("api_model") or "") or None,
+                source_type="ai",
+                analysis_id=int(analysis["id"]) if analysis is not None else None,
+                source_task_id=self._auto_task_id,
+                ai_result_id=result_id,
+                prm_id=self._last_prm_id)
+            self._last_asset_id = asset_id
+            row = db_assets.get_asset(db, asset_id)
+            self.append_log(f"[高光方案] 已登记 {row['name']}（{row['provider'] or '未知 AI'}"
+                            f" / {row['model'] or '未知模型'}，{row['clip_count']} 个高光）")
+        except Exception as exc:  # noqa: BLE001 - 登记失败不该影响剪辑
+            self.append_log(f"[高光方案] 登记不进去（不影响本次剪辑）：{exc}")
+
+    def render_asset(self, asset_id: int, prm_id: int | None = None) -> bool:
+        """只用库里这份高光方案剪一条成片：**不调用 AI**。数据管理界面点「按此方案剪」走这里。
+
+        成品文件名带上方案名和 PRM 名，所以「一份 JSON 配不同 PRM」剪出来的几个成品能并存。
+        """
+        db = self._db()
+        if db is None:
+            QMessageBox.warning(self, "高光方案", "数据库打不开，方案都在库里，先解决数据库")
+            return False
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            asset = db_assets.get_asset(db, int(asset_id))
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "高光方案", f"方案取不出来：{exc}")
+            return False
+        if asset is None or asset["deleted_at"]:
+            QMessageBox.information(self, "高光方案", "这个方案不存在或已删除")
+            return False
+        payload = db_assets.loads(asset["current_json"])
+        if payload is None or not db_repo.clips_from_payload(payload):
+            QMessageBox.information(self, "高光方案", "这份 JSON 里抠不出可用片段，剪不了")
+            return False
+        video_row = db.one("SELECT * FROM videos WHERE id = ?", (int(asset["video_id"]),))
+        video = Path(str(video_row["file_path"])) if video_row is not None else None
+        if video is None or not video.is_file():
+            QMessageBox.information(self, "高光方案", f"源视频不在盘上：{video}")
+            return False
+        prm = db_assets.get_prm(db, int(prm_id)) if prm_id else self.selected_prm()
+        self.load_video(video)
+        self._auto_video = None          # 这是手动剪，不占自动队列的位置
+        self._last_asset_id = int(asset["id"])
+        self._last_prm_id = int(prm["id"]) if prm is not None else None
+        suffix = f"_{asset['name']}" + (f"_{prm['name']}" if prm is not None else "")
+        self.append_log(f"[高光方案] 按 {asset['name']} 开剪（不调 AI）"
+                        + (f"，记 PRM {prm['name']}" if prm is not None else ""))
+        self.run_highlight(json.dumps(payload, ensure_ascii=False, indent=2),
+                           ai=True, name_suffix=suffix)
+        return True
+
+    def _asset_json_for_render(self, video: Path) -> str | None:
+        """库里有没有能直接开剪的高光方案。有就返回 JSON 文本（不会去问 AI）。
+
+        选「没有 JSON」时一律返回 None——那一轮就是要重新问 AI 的。
+        方案取当前方案（`is_current`），软删的不算、抠不出片段的不算。
+        顺手把 `_last_asset_id` / `_last_prm_id` 记上：成品出炉时靠它们记账，
+        所以同一份 JSON 换一版 PRM 再剪，两个成品的来源分得清。
+        """
+        if self.highlight_source() == "missing":
+            return None
+        db = self._db()
+        vid = self._db_video_id(video)
+        if db is None or vid is None:
+            return None
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            row = db_assets.current_asset(db, vid)
+            if row is None or int(row["clip_count"] or 0) <= 0:
+                return None
+            payload = db_assets.loads(str(row["current_json"]))
+            if not isinstance(payload, dict) or not db_repo.clips_from_payload(payload):
+                self.append_log(f"[高光方案] {row['name']} 里抠不出可用片段，还是走 AI")
+                return None
+            self._last_asset_id = int(row["id"])
+            prm = self.selected_prm()
+            self._last_prm_id = int(prm["id"]) if prm is not None else None
+            self.append_log(f"[自动剪辑] 库里已有 {row['name']}（{row['clip_count']} 个高光），"
+                            "直接按它开剪，不调 AI")
+            return json.dumps(payload, ensure_ascii=False, indent=2)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[高光方案] 现成方案取不出来（改走 AI）：{exc}")
+            return None
 
     def _resume_existing_ai_json(self) -> str | None:
         """这条任务是不是已经问过 AI 了。是就返回可以直接开剪的 JSON 文本，否则 None。

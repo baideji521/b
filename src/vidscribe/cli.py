@@ -710,6 +710,395 @@ def _export_dir(cfg: Config, video: Path) -> Path:
 # ------------------------------------------------------------------ GUI
 
 
+def _fmt_seconds(value: Any) -> str:
+    """秒 -> 0:12 这种短写法；没有值就给个占位。"""
+    try:
+        total = float(value)
+    except (TypeError, ValueError):
+        return "-"
+    if total <= 0:
+        return "-"
+    return f"{int(total) // 60}:{int(total) % 60:02d}"
+
+
+def _pick_video(db: Any, target: str) -> Any:
+    """`--video` 既收数字 id，也收文件名片段（够用就行，多条时取最早那个）。"""
+    text = str(target).strip()
+    if text.isdigit():
+        return db.one("SELECT * FROM videos WHERE id = ?", (int(text),))
+    row = db.one("SELECT * FROM videos WHERE file_name = ?", (text,))
+    if row is not None:
+        return row
+    return db.one("SELECT * FROM videos WHERE file_name LIKE ? ORDER BY id LIMIT 1",
+                  (f"%{text}%",))
+
+
+def _print_asset_rows(rows: list[Any]) -> None:
+    for row in rows:
+        flags = []
+        if int(row["is_current"] or 0):
+            flags.append("当前")
+        if row["deleted_at"]:
+            flags.append("已删除")
+        best = "-" if row["best_score"] is None else f"{float(row['best_score']):.2f}"
+        print(f"  #{row['id']:<5} {str(row['name']):<14} {str(row['source_type']):<9}"
+              f" {str(row['provider'] or '-'):<10} {str(row['model'] or '-'):<26}"
+              f" 片段 {int(row['clip_count'] or 0):<3} 最高分 {best:<6}"
+              f" {row['created_at']} {' '.join(flags)}")
+
+
+def _print_lineage(info: dict[str, Any]) -> None:
+    asset = info.get("asset")
+    prm = info.get("prm")
+    print(f"  成品 #{info['artifact_id']}  {Path(str(info['path'])).name}"
+          + ("" if info["exists_on_disk"] else "（文件已不在盘上）"))
+    print(f"    视频      : {(info.get('video') or {}).get('file_name', '-')}")
+    print(f"    分析批次  : {info.get('analysis_id') or '-'}")
+    print(f"    高光方案  : "
+          + ("-" if asset is None else
+             f"#{asset['id']} {asset['name']}（{asset['source_type']}，"
+             f"{asset['clip_count']} 个片段）"
+             + ("（已删除）" if info["asset_deleted"] else "")))
+    print(f"    AI / 模型 : {info.get('provider') or '-'} / {info.get('model') or '-'}")
+    print(f"    AI 任务   : {info.get('task_id') or '-'}")
+    print(f"    PRM       : "
+          + ("-" if prm is None else
+             f"#{prm['id']} {prm['name']}（{prm['filename']}）"
+             + ("（已删除）" if info["prm_deleted"] else "")))
+
+
+def _read_json_arg(cfg: Config, path_text: str) -> Any:
+    """读一个 JSON 文件（相对路径按项目根拼）。读不成就抛 ValueError。"""
+    source = Path(path_text)
+    if not source.is_absolute():
+        source = cfg.root / source
+    if not source.is_file():
+        raise ValueError(f"找不到 JSON 文件：{source}")
+    try:
+        return json.loads(source.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 解析失败：{exc}") from exc
+
+
+def _assets_overview(cfg: Config, db: Any, assets: Any, limit: int) -> None:
+    """视频表：时长 / 分析 / 高光方案 / 成品，全部来自 SQL。"""
+    rows = db.all("SELECT id, file_name, duration FROM videos ORDER BY id DESC LIMIT ?",
+                  (int(limit),))
+    if not rows:
+        print("库里还没有视频")
+        return
+    ids = [int(r["id"]) for r in rows]
+    plans = assets.asset_counts(db, ids)
+    products = assets.product_counts(db, ids)
+    analysed = {int(r["video_id"]) for r in db.all(
+        "SELECT DISTINCT video_id FROM analysis_runs WHERE status = ?", ("completed",))}
+    print(f"{'ID':<5} {'时长':<7} {'分析':<5} {'方案':<5} {'成品':<5} 文件")
+    for row in rows:
+        vid = int(row["id"])
+        print(f"{vid:<5} {_fmt_seconds(row['duration']):<7}"
+              f" {'有' if vid in analysed else '无':<4} {plans.get(vid, 0):<5}"
+              f" {products.get(vid, 0):<5} {row['file_name']}")
+    print(f"（共列出 {len(rows)} 个视频，用 --video <id|文件名> 看详情）")
+
+
+def _assets_detail(cfg: Config, db: Any, assets: Any, row: Any) -> None:
+    """一个视频的全景：分析、方案清单、成品清单（每条带溯源）。"""
+    view = assets.video_overview(db, int(row["id"]))
+    analysis = view["analysis"]
+    print(f"视频 #{row['id']}  {row['file_name']}")
+    print(f"  路径      : {row['file_path']}")
+    print(f"  时长      : {_fmt_seconds(row['duration'])}")
+    print(f"  最近分析  : "
+          + ("无" if analysis is None else
+             f"#{analysis['id']} {analysis['status']} {analysis['started_at']}"
+             f"（逐词 {view['word_count']} 个）"))
+    every = assets.list_assets(db, int(row["id"]), include_deleted=True)
+    print(f"  高光方案（{len(every)} 份，含已删除）：" if every else "  高光方案：无")
+    _print_asset_rows(every)
+    print(f"  成品（{len(view['products'])} 个）：" if view["products"] else "  成品：无")
+    for info in view["products"]:
+        _print_lineage(info)
+
+
+def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) -> int:
+    """只用库里的高光方案剪成片：**一次 AI 都不调**。"""
+    from vidscribe.db import repo  # noqa: PLC0415
+    from vidscribe.highlight import default_target, parse_spec, render_highlight  # noqa: PLC0415
+    from vidscribe.highlight import clip_engine  # noqa: PLC0415
+    from vidscribe.video_io import is_complete_video  # noqa: PLC0415
+
+    asset = assets.get_asset(db, int(args.render))
+    if asset is None:
+        logger.error("没有 #%s 这个高光方案", args.render)
+        return 2
+    if asset["deleted_at"]:
+        logger.error("方案 #%s 已删除，先 --restore 再剪", args.render)
+        return 2
+    payload = assets.loads(asset["current_json"])
+    if payload is None:
+        logger.error("方案 #%s 的 JSON 解不开", args.render)
+        return 2
+    video_row = db.one("SELECT * FROM videos WHERE id = ?", (int(asset["video_id"]),))
+    if video_row is None:
+        logger.error("方案 #%s 挂的视频在库里找不到", args.render)
+        return 2
+    video = Path(str(video_row["file_path"]))
+    if not video.is_file():
+        logger.error("源视频已不在盘上：%s", video)
+        return 2
+
+    prm_row = None
+    if args.prm is not None:
+        prm_row = assets.get_prm(db, int(args.prm))
+        if prm_row is None:
+            logger.error("没有 #%s 这个 PRM", args.prm)
+            return 2
+    else:
+        prm_row = assets.default_prm(db)
+
+    target = Path(args.out) if args.out else None
+    if target is not None and not target.is_absolute():
+        target = cfg.root / target
+    if target is None:
+        stem = f"{video.stem}_{asset['name']}"
+        if prm_row is not None:
+            stem += f"_{prm_row['name']}"
+        target = default_target(_export_dir(cfg, video), video)
+        target = target.with_name(f"{stem}{target.suffix}")
+
+    result = _clip_plans(cfg, video, payload, args.max_seconds)
+    for line in clip_engine.describe_result(result):
+        print(line, flush=True)
+    if not result.plans:
+        logger.error("剪辑引擎没给出任何可剪片段，不启动渲染")
+        return 2
+    if args.dry_run:
+        logger.info("dry-run：只算不剪，已跳过渲染")
+        return 0
+
+    made: list[Path] = []
+    for index, plan in enumerate(result.plans, start=1):
+        try:
+            job = parse_spec(clip_engine.payload_for(plan))
+        except ValueError as exc:
+            logger.error("第 %d 段不能渲染：%s", index, exc)
+            return 2
+        out_path = _numbered_target(target, index)
+        print(f"[剪辑引擎] 开始渲染第 {index}/{len(result.plans)} 段 -> {out_path.name}", flush=True)
+        try:
+            render_highlight(video, job, out_path, on_log=lambda line: print(line, flush=True))
+        except Exception as exc:
+            logger.error("剪辑失败：%s", exc)
+            logger.debug(traceback.format_exc())
+            return 1
+        if not is_complete_video(out_path):
+            logger.error("成片封装不完整，不当成成品：%s", out_path)
+            return 1
+        print("[剪辑引擎] 成片验证通过", flush=True)
+        artifact_id = repo.register_artifact(db, int(video_row["id"]), "final_video", out_path)
+        assets.link_artifact(db, artifact_id, asset_id=int(asset["id"]),
+                             prm_id=int(prm_row["id"]) if prm_row is not None else None)
+        made.append(out_path)
+        logger.info("成品已生成并记账：%s（方案 #%s%s）", out_path, asset["id"],
+                    f"，PRM #{prm_row['id']}" if prm_row is not None else "")
+    print(f"[高光方案] 本次共产出 {len(made)} 个成品，全部挂在方案 #{asset['id']} 名下")
+    return 0
+
+
+def cmd_assets(cfg: Config, args: argparse.Namespace) -> int:
+    """高光方案管理：查、导入、复制、编辑、软删、设当前、只用 JSON 剪、成品溯源。
+
+    不给任何开关就打印视频总表。所有写操作都只动库，不删任何文件。
+    """
+    from vidscribe.db import assets as db_assets  # noqa: PLC0415
+    from vidscribe.db import open_db  # noqa: PLC0415
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+    db = open_db(cfg)
+    code = 0
+    try:
+        if args.import_json:
+            if not args.video:
+                logger.error("--import-json 要配 --video <id|文件名>，得知道挂在哪个视频下")
+                return 2
+            row = _pick_video(db, args.video)
+            if row is None:
+                logger.error("库里找不到视频：%s", args.video)
+                return 2
+            try:
+                payload = _read_json_arg(cfg, args.import_json)
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return 2
+            count, best = db_assets.summarize(payload)
+            if not count:
+                logger.error("这份 JSON 里抠不出可用片段，不登记（免得队列以为有方案）")
+                return 2
+            asset_id = db_assets.create_asset(
+                db, int(row["id"]), payload, source_type="imported",
+                name=args.name, note=args.note or f"从 {args.import_json} 导入",
+                make_current=not args.no_current)
+            logger.info("已登记方案 #%d（%d 个片段，最高分 %s）", asset_id, count,
+                        "-" if best is None else f"{best:.2f}")
+        if args.copy is not None:
+            new_id = db_assets.copy_asset(db, int(args.copy), name=args.name)
+            if new_id is None:
+                logger.error("没有 #%s 这个方案，复制不了", args.copy)
+                code = 2
+            else:
+                logger.info("方案 #%s 已复制成 #%d（原件一个字没动）", args.copy, new_id)
+        if args.edit is not None:
+            if not args.json:
+                logger.error("--edit 要配 --json <改好的 JSON 文件>")
+                return 2
+            try:
+                payload = _read_json_arg(cfg, args.json)
+            except ValueError as exc:
+                logger.error("%s", exc)
+                return 2
+            new_id = db_assets.edit_asset(db, int(args.edit), payload,
+                                          in_place=args.in_place, name=args.name)
+            if new_id is None:
+                logger.error("没有 #%s 这个方案（或已删除），改不了", args.edit)
+                code = 2
+            elif args.in_place:
+                logger.info("方案 #%s 已就地更新（raw_json 仍是 AI 原话）", args.edit)
+            else:
+                logger.info("已在方案 #%s 上另开新方案 #%d（原方案不动）", args.edit, new_id)
+        if args.delete is not None:
+            if db_assets.delete_asset(db, int(args.delete)):
+                kept = len(db_assets.products_for_asset(db, int(args.delete)))
+                logger.info("方案 #%s 已软删（%d 个已有成品一个都没动）", args.delete, kept)
+            else:
+                logger.error("没有 #%s 这个方案，或它已经是删除状态", args.delete)
+                code = 2
+        if args.restore is not None:
+            if db_assets.restore_asset(db, int(args.restore)):
+                logger.info("方案 #%s 已恢复", args.restore)
+            else:
+                logger.error("没有 #%s 这个方案，或它本来就没删", args.restore)
+                code = 2
+        if args.set_current is not None:
+            if db_assets.set_current_asset(db, int(args.set_current)):
+                logger.info("方案 #%s 已设为当前方案（自动剪辑就用它）", args.set_current)
+            else:
+                logger.error("没有 #%s 这个方案，或它已删除", args.set_current)
+                code = 2
+        if args.by_ai:
+            rows = db_assets.assets_by_ai(db, provider=args.by_ai, model=args.model)
+            print(f"AI = {args.by_ai}"
+                  + (f" / {args.model}" if args.model else "") + f"：{len(rows)} 份方案")
+            _print_asset_rows(rows)
+        if args.by_prm is not None:
+            rows = db_assets.assets_by_prm(db, int(args.by_prm))
+            print(f"PRM #{args.by_prm}：{len(rows)} 份方案")
+            _print_asset_rows(rows)
+            products = db_assets.products_for_prm(db, int(args.by_prm))
+            print(f"这一版 PRM 剪出过 {len(products)} 个成品")
+        if args.trace is not None:
+            info = db_assets.artifact_lineage(db, int(args.trace))
+            if info is None:
+                logger.error("没有 #%s 这个成品记录", args.trace)
+                code = 2
+            else:
+                _print_lineage(info)
+        if args.render is not None:
+            return _assets_render(cfg, args, db, db_assets) or code
+        if args.video and not args.import_json:
+            row = _pick_video(db, args.video)
+            if row is None:
+                logger.error("库里找不到视频：%s", args.video)
+                return 2
+            _assets_detail(cfg, db, db_assets, row)
+            return code
+        if not any((args.import_json, args.copy is not None, args.edit is not None,
+                    args.delete is not None, args.restore is not None,
+                    args.set_current is not None, args.by_ai, args.by_prm is not None,
+                    args.trace is not None)):
+            _assets_overview(cfg, db, db_assets, args.limit)
+    finally:
+        db.close()
+    return code
+
+
+def cmd_prm(cfg: Config, args: argparse.Namespace) -> int:
+    """PRM 档案：列出 / 新增 / 改 / 软删 / 恢复 / 设默认。
+
+    只登记名字、文件名、语言、版本这些元信息，**提示词内容始终只在文件里**。
+    """
+    from vidscribe.db import assets as db_assets  # noqa: PLC0415
+    from vidscribe.db import open_db  # noqa: PLC0415
+
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+    db = open_db(cfg)
+    code = 0
+    try:
+        if args.add:
+            if not args.file:
+                logger.error("--add 要配 --file <提示词文件路径>")
+                return 2
+            path = Path(args.file)
+            if not (path if path.is_absolute() else cfg.root / path).is_file():
+                logger.warning("提示词文件现在不在盘上：%s（还是照登记，路径以后可以改）", path)
+            prm_id = db_assets.create_prm(db, args.add, args.file,
+                                          description=args.description,
+                                          language=args.language, version=args.version,
+                                          make_default=args.default)
+            logger.info("已登记 PRM #%d %s（%s）%s", prm_id, args.add, args.file,
+                        "，并设为默认" if args.default else "")
+        if args.edit is not None:
+            if db_assets.update_prm(db, int(args.edit), name=args.name, filename=args.file,
+                                    description=args.description, language=args.language,
+                                    version=args.version):
+                logger.info("PRM #%s 已更新", args.edit)
+            else:
+                logger.error("PRM #%s 没改动（要么不存在，要么一个字段都没给）", args.edit)
+                code = 2
+        if args.delete is not None:
+            if db_assets.delete_prm(db, int(args.delete)):
+                kept = len(db_assets.products_for_prm(db, int(args.delete)))
+                logger.info("PRM #%s 已软删（%d 个历史成品照旧查得到用的是它）",
+                            args.delete, kept)
+            else:
+                logger.error("没有 #%s 这个 PRM，或它已经是删除状态", args.delete)
+                code = 2
+        if args.set_default is not None:
+            if db_assets.set_default_prm(db, int(args.set_default)):
+                logger.info("PRM #%s 已设为默认（不再硬编码 prm_en.txt）", args.set_default)
+            else:
+                logger.error("没有 #%s 这个 PRM，或它已删除", args.set_default)
+                code = 2
+        if args.list or not any((args.add, args.edit is not None, args.delete is not None,
+                                 args.set_default is not None)):
+            rows = db_assets.list_prms(db, include_deleted=args.all)
+            if not rows:
+                print("PRM 档案还是空的（发一次 AI 会自动把用到的提示词登记进来）")
+            else:
+                print(f"{'ID':<5} {'名字':<16} {'语言':<6} {'版本':<8} {'默认':<5} 文件")
+                for row in rows:
+                    marks = "是" if int(row["is_default"] or 0) else ""
+                    if row["deleted_at"]:
+                        marks = "已删除"
+                    exists = "" if db_assets.prm_file(row, cfg.root).is_file() else "（文件不在）"
+                    print(f"{int(row['id']):<5} {str(row['name']):<16}"
+                          f" {str(row['language'] or '-'):<6} {str(row['version'] or '-'):<8}"
+                          f" {marks:<5} {row['filename']}{exists}")
+                used = db_assets.products_for_prm
+                print("（成品数：" + "，".join(
+                    f"#{int(r['id'])} {len(used(db, int(r['id'])))}" for r in rows) + "）")
+    finally:
+        db.close()
+    return code
+
+
 def cmd_gui(cfg: Config, args: argparse.Namespace) -> int:
     _apply_mirror(cfg)
     try:
@@ -978,6 +1367,59 @@ def build_parser() -> argparse.ArgumentParser:
 
 
     p_hl.set_defaults(func=cmd_highlight)
+
+    p_as = sub.add_parser("assets", help="高光方案：查/导入/复制/编辑/软删/设当前/只用 JSON 剪/成品溯源")
+    p_as.add_argument("--video", default=None, help="视频 id 或文件名片段：看这个视频的详情")
+    p_as.add_argument("--limit", type=int, default=30, help="总表列多少个视频，默认 30")
+    p_as.add_argument("--import-json", dest="import_json", default=None, metavar="JSON",
+                      help="把一份现成 JSON 登记成新方案（要配 --video），旧方案一个字不动")
+    p_as.add_argument("--copy", default=None, metavar="方案ID", help="复制一份方案（原件不动）")
+    p_as.add_argument("--edit", default=None, metavar="方案ID",
+                      help="用 --json 的内容改方案；默认另开一条新方案")
+    p_as.add_argument("--in-place", dest="in_place", action="store_true",
+                      help="配合 --edit：就地改 current_json（raw_json 仍是 AI 原话）")
+    p_as.add_argument("--json", default=None, help="配合 --edit：改好的 JSON 文件")
+    p_as.add_argument("--delete", default=None, metavar="方案ID", help="软删方案（成品一个都不动）")
+    p_as.add_argument("--restore", default=None, metavar="方案ID", help="把软删的方案捞回来")
+    p_as.add_argument("--set-current", dest="set_current", default=None, metavar="方案ID",
+                      help="设为当前方案（自动剪辑「已有 JSON」就用它）")
+    p_as.add_argument("--name", default=None, help="配合 --import-json / --copy / --edit：方案名")
+    p_as.add_argument("--note", default=None, help="配合 --import-json：备注")
+    p_as.add_argument("--no-current", dest="no_current", action="store_true",
+                      help="配合 --import-json：登记但不设为当前方案")
+    p_as.add_argument("--by-ai", dest="by_ai", default=None, metavar="provider",
+                      help="按 AI 来源查方案，可再加 --model")
+    p_as.add_argument("--model", default=None, help="配合 --by-ai：再按模型名过滤")
+    p_as.add_argument("--by-prm", dest="by_prm", default=None, metavar="PRM_ID",
+                      help="按 PRM 查方案与成品")
+    p_as.add_argument("--trace", default=None, metavar="成品ID",
+                      help="成品反查：视频 / 分析 / 方案 / AI / 模型 / PRM")
+    p_as.add_argument("--render", default=None, metavar="方案ID",
+                      help="只用这份 JSON 剪成片，**不调用 AI**；可配 --prm 记这次用的是哪版 PRM")
+    p_as.add_argument("--prm", default=None, metavar="PRM_ID", help="配合 --render：成品记这版 PRM")
+    p_as.add_argument("--out", default=None, help="配合 --render：输出 MP4 路径")
+    p_as.add_argument("--max-seconds", dest="max_seconds", type=float, default=None,
+                      help="配合 --render：普通片段时长上限，默认 15")
+    p_as.add_argument("--dry-run", dest="dry_run", action="store_true",
+                      help="配合 --render：只算区间不渲染")
+    p_as.set_defaults(func=cmd_assets)
+
+    p_prm = sub.add_parser("prm", help="PRM 档案：列出 / 新增 / 改 / 软删 / 设默认（内容仍在文件里）")
+    p_prm.add_argument("--list", action="store_true", help="列出所有 PRM（默认行为）")
+    p_prm.add_argument("--all", action="store_true", help="连软删掉的一起列")
+    p_prm.add_argument("--add", default=None, metavar="名字", help="新增一份 PRM，要配 --file")
+    p_prm.add_argument("--file", default=None, help="提示词文件路径（相对路径按项目根算）")
+    p_prm.add_argument("--edit", default=None, metavar="PRM_ID", help="改某一份的元信息")
+    p_prm.add_argument("--name", default=None, help="配合 --edit：改名字")
+    p_prm.add_argument("--language", default=None, help="语言标记，比如 en / zh")
+    p_prm.add_argument("--version", default=None, help="版本标记，比如 V1 / V2")
+    p_prm.add_argument("--description", default=None, help="说明")
+    p_prm.add_argument("--default", action="store_true", help="配合 --add：登记完就设为默认")
+    p_prm.add_argument("--set-default", dest="set_default", default=None, metavar="PRM_ID",
+                       help="把某一份设为默认（GUI 发 AI 时优先用它）")
+    p_prm.add_argument("--delete", default=None, metavar="PRM_ID",
+                       help="软删（历史成品照旧查得到用的是它）")
+    p_prm.set_defaults(func=cmd_prm)
 
     p_gui = sub.add_parser("gui", help="启动 PyQt5 图形界面（左视频 / 右时间轴 / 底部语音）")
     p_gui.add_argument("video", nargs="?", default=None, help="启动时直接打开的视频")

@@ -190,6 +190,8 @@ class AiPanel(QDialog):
         outer = QVBoxLayout(self)
         outer.addLayout(self._build_header())
         outer.addWidget(self._build_modes())
+        outer.addWidget(self._build_sources())
+
 
         outer.addWidget(self._build_dirs())
         outer.addWidget(self._build_stats())
@@ -248,6 +250,68 @@ class AiPanel(QDialog):
             self._job_group.addButton(card)
             row.addWidget(card, 1)
         return box
+
+    def _build_sources(self) -> QWidget:
+        """高光来源 + PRM：这一轮拿哪些视频、发 AI 时用哪一版提示词。
+
+        「已有 JSON」那一档不会调 AI，直接拿库里的方案开剪；「没有 JSON」相反，
+        只跑还没有方案的视频。PRM 下拉的内容来自 prm_profiles 表（提示词本体仍在文件里）。
+        """
+        box = QGroupBox("高光来源 / 提示词")
+        row = QHBoxLayout(box)
+        self.cmb_source = QComboBox()
+        for label, key in (("全部（有 JSON 的直接剪，没有的问 AI）", "all"),
+                           ("只挑已有 JSON 的（不调 AI）", "existing"),
+                           ("只挑没有 JSON 的（问 AI）", "missing")):
+            self.cmb_source.addItem(label, key)
+        current = str(self.cfg.bridge.get("highlight_source") or "all")
+        self.cmb_source.setCurrentIndex(max(0, self.cmb_source.findData(current)))
+        self.cmb_source.setToolTip("「已有 JSON」这一档一次 AI 都不调，纯用库里的高光方案开剪")
+
+        self.cmb_prm = QComboBox()
+        self.cmb_prm.setMinimumWidth(220)
+        self.cmb_prm.setToolTip("发给 AI 的提示词用哪一版。内容仍然只在文件里，库里只记档案")
+        self._reload_prms()
+
+        self.btn_assets = QPushButton("高光方案…")
+        self.btn_assets.setToolTip("看每个视频有哪些高光 JSON 方案、剪出过哪些成品；也能只用 JSON 剪")
+        self.btn_assets.clicked.connect(self.on_assets)
+
+        row.addWidget(QLabel("高光来源"))
+        row.addWidget(self.cmb_source, 1)
+        row.addWidget(QLabel("PRM"))
+        row.addWidget(self.cmb_prm, 1)
+        row.addWidget(self.btn_assets)
+        return box
+
+    def _reload_prms(self) -> None:
+        """把 PRM 档案填进下拉。库里还没有档案就只放一个「按配置」占位。"""
+        keep = self.cmb_prm.currentData()
+        self.cmb_prm.blockSignals(True)
+        self.cmb_prm.clear()
+        self.cmb_prm.addItem("按配置（默认 PRM）", 0)
+        db = self._db()
+        if db is not None:
+            try:
+                from ..db import assets as db_assets  # noqa: PLC0415
+
+                for row in db_assets.list_prms(db):
+                    mark = "（默认）" if int(row["is_default"] or 0) else ""
+                    self.cmb_prm.addItem(f"{row['name']}{mark}", int(row["id"]))
+            except Exception as exc:  # noqa: BLE001
+                self.append_log(f"[PRM] 档案列不出来：{exc}")
+        want = keep if keep else int(self.cfg.bridge.get("prm_id") or 0)
+        self.cmb_prm.setCurrentIndex(max(0, self.cmb_prm.findData(want)))
+        self.cmb_prm.blockSignals(False)
+
+    def on_assets(self) -> None:
+        """打开高光方案管理（数据管理界面）。"""
+        from .assets_dialog import AssetDialog  # noqa: PLC0415 - 只在点开时才建窗口
+
+        dialog = AssetDialog(self.cfg, self._window or self, log=self._log)
+        dialog.exec_()
+        self._reload_prms()
+        self.refresh_tasks()
 
     def _build_dirs(self) -> QWidget:
         bridge = self.cfg.bridge
@@ -490,8 +554,16 @@ class AiPanel(QDialog):
         self.bar.setFormat(f"%p%（{done} / {total}）")
 
     def append_log(self, line: str) -> None:
-        """主界面把 AI 相关的日志转播过来，跑的时候不用切回去看。"""
-        self.view_log.appendPlainText(line)
+        """主界面把 AI 相关的日志转播过来，跑的时候不用切回去看。
+
+        日志框可能还没建好（建界面时就有查库的活儿），那种情况转给主界面的日志。
+        """
+        view = getattr(self, "view_log", None)
+        if view is None:
+            if self._log:
+                self._log(line)
+            return
+        view.appendPlainText(line)
 
     def set_running(self, running: bool, state: str = "") -> None:
         """自动剪辑开跑 / 收工时由主界面调，用来锁按钮和改状态字。"""
@@ -527,10 +599,13 @@ class AiPanel(QDialog):
 
     # ------------------------------------------------------------ 保存
     def save(self, close: bool = True) -> None:
-        """只写自己这三个键：干哪一串 + 两个 AI 专属目录。接口那些在「AI接口」里存。"""
+        """只写自己这几个键：干哪一串 + 两个 AI 专属目录 + 高光来源 + PRM。接口那些在「AI接口」里存。"""
+        prm_id = int(self.cmb_prm.currentData() or 0)
         patch = {"bridge": {"ai_job": self._job,
                             "ai_input_dir": self.edit_input.text().strip(),
-                            "ai_output_dir": self.edit_output.text().strip()}}
+                            "ai_output_dir": self.edit_output.text().strip(),
+                            "highlight_source": str(self.cmb_source.currentData() or "all"),
+                            "prm_id": prm_id}}
         try:
             path = self.cfg.save_patch(patch)
         except OSError as exc:
@@ -538,9 +613,12 @@ class AiPanel(QDialog):
             return
         if self._log:
             titles = {name: title for name, title, _ in JOBS}
+            sources = {"all": "全部", "existing": "只挑已有 JSON", "missing": "只挑没有 JSON"}
             self._log(f"[AI 面板] 已保存到 {path}：{titles.get(self._job, self._job)}；"
                       f"AI_输入目录 {patch['bridge']['ai_input_dir'] or '（留空）'}；"
-                      f"AI_输出目录 {patch['bridge']['ai_output_dir'] or '（留空，用导出目录）'}")
+                      f"AI_输出目录 {patch['bridge']['ai_output_dir'] or '（留空，用导出目录）'}；"
+                      f"高光来源 {sources.get(patch['bridge']['highlight_source'], '全部')}；"
+                      f"PRM {self.cmb_prm.currentText() if prm_id else '按配置'}")
         self.refresh_tasks()
         if close:
             self.accept()
