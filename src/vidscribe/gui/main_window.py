@@ -1934,7 +1934,10 @@ class MainWindow(QMainWindow):
         self._auto_total = len(videos)
         self._auto_job = job
         self.btn_auto_clip.setEnabled(False)
-        self.append_log(f"[自动剪辑] {labels.get(job, job)}：{ai_in} 里排了 {len(videos)} 个视频")
+        already = sum(1 for v in videos if self._auto_done_file(v) is not None)
+        self.append_log(f"[自动剪辑] {labels.get(job, job)}：{ai_in} 里排了 {len(videos)} 个视频"
+                        + (f"，其中 {already} 个 AI_输出目录里已经有成品，会跳过" if already else ""))
+
         self._auto_step()
 
     def _auto_step(self) -> None:
@@ -1946,7 +1949,13 @@ class MainWindow(QMainWindow):
         self._auto_video = video
         index = self._auto_total - len(self._auto_queue)
         self.append_log(f"[自动剪辑] ({index}/{self._auto_total}) {video.name}")
+        done = self._auto_done_file(video)
+        if done is not None:
+            self.append_log(f"[自动剪辑] AI_输出目录里已经有 {done.name}，这个跳过")
+            self._auto_advance()
+            return
         self.load_video(video)
+
         if self._auto_job == "script":
             self._auto_clip_from_script(video)
             return
@@ -1990,6 +1999,29 @@ class MainWindow(QMainWindow):
             if candidate.is_file():
                 return candidate
         return None
+
+    def _auto_done_file(self, video: Path) -> Path | None:
+        """AI_输出目录里已经有这个视频的成品就返回它，用来跳过剪过的。
+
+        剪辑成片 / 脚本剪辑看 <视频名>_高光时刻.mp4（成品名字被手改过也认：同名开头
+        的视频文件都算），收取脚本看 <视频名>_脚本.json。0 字节不算，那是上次剪废的。
+        """
+        out = self.ai_dir("ai_output_dir") or self.export_root()
+        if not out.is_dir():
+            return None
+        if self._auto_job == "collect":
+            hit = out / f"{video.stem}_脚本.json"
+            return hit if hit.is_file() and hit.stat().st_size > 0 else None
+        hit = out / f"{video.stem}_高光时刻.mp4"
+        if hit.is_file() and hit.stat().st_size > 0:
+            return hit
+        for item in sorted(out.iterdir()):
+            if (item.is_file() and item.stem.startswith(video.stem)
+                    and item.suffix.lower() in self.VIDEO_SUFFIXES
+                    and item.stat().st_size > 0):
+                return item
+        return None
+
 
     def _auto_after_analyze(self) -> None:
         """分析跑完了（自动剪辑那一串里）：生成 <视频名>.txt，接着发给 AI。"""
