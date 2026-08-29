@@ -185,7 +185,12 @@ const SITES = {
       "model-response",
       ".markdown",
     ],
+    // 实测（观察模式录到的）：Gemini 的发送键是
+    // BUTTON.mdc-icon-button.mat-mdc-icon-button[aria-label=发送]，里面套 gem-icon > mat-icon，
+    // 没有 send-button 这个类名了，所以按 aria-label 和 icon-button 类名一起兜
     sends: ["button.send-button", "button[aria-label*='发送']", "button[aria-label*='Send']",
+            "button.mat-mdc-icon-button[aria-label*='发送']",
+            "button.mat-mdc-icon-button[aria-label*='Send']",
             "button[mattooltip*='发送']"],
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
     // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
@@ -1059,7 +1064,9 @@ async function handleAiTask(task) {
       payloads = await downloadTaskFiles(task);
       log("取到文件", payloads.map((p) => `${p.name} ${p.size}B`).join(", "));
     } else {
-      log("半自动模式：等你手动选文件", fileList.map((f) => f.name).join(", "));
+      log(uploadMode === "observe" ? "观察模式：文件只列给你看，扩展不碰"
+                                   : "半自动模式：等你手动选文件",
+          fileList.map((f) => f.name).join(", "));
     }
 
 
@@ -1089,7 +1096,7 @@ async function handleAiTask(task) {
         await dumpActions("waiting_manual");
         rounds += 1;
         // 每隔十几秒报一次进度，顺带感知 GUI 上的「停止 AI」
-        if (rounds % 8 === 1
+        if (rounds % 20 === 1
             && await cancelled("waiting_manual",
                                "观察模式：你操作，我只记录（点「停止 AI」结束）")) return;
         await sleep(1500);
