@@ -666,7 +666,9 @@ class MainWindow(QMainWindow):
             self.ai_panel = AiPanel(self.cfg, self, log=self.append_log)
             self.ai_panel.finished.connect(lambda *_: self.on_ai_panel_closed())
         self.ai_panel.set_running(self.auto_running())
+        self.refresh_bridge_label()  # 让面板右上角的连接状态立刻跟上
         self.ai_panel.show()
+
         self.ai_panel.raise_()
         self.ai_panel.activateWindow()
 
@@ -1710,6 +1712,9 @@ class MainWindow(QMainWindow):
 
     def set_bridge_pill(self, text: str, mood: str) -> None:
         """药丸文字 + 配色。改了 state 属性必须 unpolish/polish，否则颜色不变。"""
+        if self.ai_panel is not None:  # AI 面板右上角那个跟着一起变
+            self.ai_panel.set_connection(text, mood)
+
         self.lbl_bridge.setText(text)
         if self.lbl_bridge.property("state") != mood:
             self.lbl_bridge.setProperty("state", mood)
@@ -2998,7 +3003,17 @@ def launch(cfg: Config, video: str | Path | None = None, panel_only: bool = Fals
     panel.show()
     panel.raise_()
     panel.activateWindow()
+    if window.bridge is None:
+        # 端口被别人占着（多半是 GUI 已经开着）：这时候扩展连不上，说清楚别让人干等
+        port = int(cfg.bridge.get("port") or 5998)
+        panel.append_log(f"[AI 对接] Bridge 没起来（{port} 端口被占），扩展连不上")
+        QMessageBox.warning(panel, "AI 面板",
+                            f"Bridge 起不来：{port} 端口被占用了。\n\n"
+                            "多半是主界面（GUI）已经开着——同一个端口只能一个进程用。\n"
+                            "要么关掉主界面再开这个面板，要么直接用主界面里的「AI 面板」按钮。\n\n"
+                            "接口直连（不用扩展）那条路不受影响，照样能跑。")
     if auto:
+
         QTimer.singleShot(0, window.on_auto_clip)
     return app.exec_()
 

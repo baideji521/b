@@ -181,7 +181,9 @@ class AiPanel(QDialog):
                             | Qt.WindowMaximizeButtonHint)
 
         outer = QVBoxLayout(self)
+        outer.addLayout(self._build_header())
         outer.addWidget(self._build_modes())
+
         outer.addWidget(self._build_dirs())
         outer.addWidget(self._build_stats())
         outer.addWidget(self._build_current())
@@ -191,7 +193,36 @@ class AiPanel(QDialog):
         self.refresh_tasks()
 
     # ------------------------------------------------------------ 各块界面
+    def _build_header(self) -> QHBoxLayout:
+        """标题行：左边写清这是哪儿，右上角是跟主界面同步的连接状态药丸。"""
+        title = QLabel("AI 自动剪辑")
+        font = title.font()
+        font.setBold(True)
+        title.setFont(font)
+        self.lbl_conn = QLabel("未启动")
+        self.lbl_conn.setProperty("role", "pill")
+        self.lbl_conn.setProperty("state", "off")
+        self.lbl_conn.setAlignment(Qt.AlignCenter)
+        self.lbl_conn.setMinimumWidth(
+            self.lbl_conn.fontMetrics().horizontalAdvance(":65535 配对窗口 120s") + 32)
+        self.lbl_conn.setToolTip("Bridge / AI 的连接状态，跟主界面那个药丸是同一个来源")
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(title, 0, Qt.AlignVCenter)
+        row.addStretch(1)
+        row.addWidget(self.lbl_conn, 0, Qt.AlignVCenter)
+        return row
+
+    def set_connection(self, text: str, mood: str) -> None:
+        """主界面刷状态时顺手推过来。改了 state 属性要 unpolish/polish 才换色。"""
+        self.lbl_conn.setText(text)
+        if self.lbl_conn.property("state") != mood:
+            self.lbl_conn.setProperty("state", mood)
+            self.lbl_conn.style().unpolish(self.lbl_conn)
+            self.lbl_conn.style().polish(self.lbl_conn)
+
     def _build_modes(self) -> QWidget:
+
         box = QGroupBox("干哪一串")
         row = QHBoxLayout(box)
         self._job_group = QButtonGroup(self)
