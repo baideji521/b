@@ -542,7 +542,7 @@ async function pageSendMessage(selector, text, sendSelectors) {
 
 
 /** 读最后一条回答的纯文本，并判断是否还在写。选择器按站点档案给的顺序试。 */
-function pageReadAnswer(groups) {
+function pageReadAnswer(groups, editorSelector) {
   let nodes = [];
   let used = "";
   for (const selector of groups) {
@@ -583,6 +583,12 @@ function pageReadAnswer(groups) {
   const hint = last
     ? `${last.tagName}.${String(last.className || "").slice(0, 40)}`
     : "";
+  // 输入框里还有没有字：还留着说明那句话压根没发出去，空了就是已经发走了。
+  // 「要不要补发一次」只看这个，别拿「没等到回答」当理由——那样会重复发。
+  const box = editorSelector ? document.querySelector(editorSelector) : null;
+  const editorLen = box
+    ? (box.tagName === "TEXTAREA" ? box.value : box.textContent || "").trim().length
+    : -1;
 
   // 最后一道保险，也是最不挑站点的一道：我们要的就是一个 JSON 对象，
   // 那就直接在整页文字里找最长的、能解析的 {...}。选择器猜错、类名改版都不影响。
@@ -626,7 +632,7 @@ function pageReadAnswer(groups) {
     }
   }
   return { text, streaming, blocks: nodes.length, used, bodyLen, hint,
-           json, jsonLen: json.length };
+           json, jsonLen: json.length, editorLen };
 }
 
 
@@ -1022,7 +1028,8 @@ async function handleAiTask(task) {
 
     // 复用的窗口里可能已经有旧回答，先记下条数、最后那块的文字、整页扫到的 JSON，
     // 别把上一轮的结果当成这次的
-    const before = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
+    const before = await runInTab(tabId, pageReadAnswer,
+                                 [site.answers, editor.selector]).catch(() => null);
     const baselineBlocks = Number(before?.blocks || 0);
     const baselineText = String(before?.text || "");
     const baselineJson = String(before?.json || "");
@@ -1048,14 +1055,16 @@ async function handleAiTask(task) {
     while (Date.now() < answerDeadline) {
       await sleep(POLL_ANSWER_MS);
       polls += 1;
-      const snapshot = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
+      const snapshot = await runInTab(tabId, pageReadAnswer,
+                                     [site.answers, editor.selector]).catch(() => null);
       const shot = String(snapshot?.text || "");
       const shotJson = String(snapshot?.json || "");
       // 现场情况：卡住时全靠这几个数判断是选择器没命中还是页面根本没渲染。
       // 顺带塞进进度消息里，AI_剪辑师 的日志能直接看到，不用去翻扩展控制台。
       const diag = `blocks=${snapshot?.blocks ?? "?"}/${baselineBlocks} `
         + `选择器=${snapshot?.used || "无"} 块=${snapshot?.hint || "无"} `
-        + `文字=${shot.length} JSON=${shotJson.length} 整页=${snapshot?.bodyLen ?? "?"}`;
+        + `文字=${shot.length} JSON=${shotJson.length} 整页=${snapshot?.bodyLen ?? "?"} `
+        + `输入框=${snapshot?.editorLen ?? "?"}`;
       // 新回答算不算冒出来，三个信号任一成立：回答块变多了；最后那块文字变了（且不是
       // 我们刚发的那句）；整页扫出来的 JSON 跟发之前不一样。第三个最不挑站点，
       // 选择器猜错、类名改版都还能救回来。
@@ -1063,12 +1072,14 @@ async function handleAiTask(task) {
         || (shot && shot !== baselineText && !shot.includes(message.slice(0, 20)))
         || (shotJson && shotJson !== baselineJson);
       if (!fresh) {
-        // 后台标签页里第一次发送有可能没吃进去，等一会儿没反应就再点一次发送
-        if (!resent && Date.now() - sentAt > RESEND_AFTER_MS) {
+        // 补发只在「输入框里那句话还留着」时做——那才说明真没发出去。
+        // 拿「没等到回答」当理由会误判成没发送，页面上就会多出一条重复提问。
+        if (!resent && Date.now() - sentAt > RESEND_AFTER_MS
+            && Number(snapshot?.editorLen || 0) > 0) {
           resent = true;
           const again = await runInTab(tabId, pageSendMessage,
                                      [editor.selector, "", site.sends]).catch(() => null);
-          log("没反应，再发一次", again?.sent || "失败", diag);
+          log("那句话还在输入框里，补发一次", again?.sent || "失败", diag);
         }
         if (polls % 10 === 0) log("还没等到新回答", diag);
         if (await cancelled("waiting_answer", `等新回答出现｜${diag}`)) return;
@@ -1091,7 +1102,8 @@ async function handleAiTask(task) {
     if (!text) {
       // 把最后一眼的现场情况带上：blocks=0 而 bodyLen>0 说明选择器没命中，
       // bodyLen=0 说明这个标签页压根没渲染（被冻结了）
-      const last = await runInTab(tabId, pageReadAnswer, [site.answers]).catch(() => null);
+      const last = await runInTab(tabId, pageReadAnswer,
+                                 [site.answers, editor.selector]).catch(() => null);
       if (last?.json && last.json !== baselineJson) text = String(last.json);
       const detail = JSON.stringify({
         blocks: last?.blocks, baseline: baselineBlocks,
