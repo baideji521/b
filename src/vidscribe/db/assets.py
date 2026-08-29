@@ -371,6 +371,36 @@ def delete_prm(db: Database, prm_id: int) -> bool:
     return True
 
 
+def restore_prm(db: Database, prm_id: int) -> bool:
+    """把软删的 PRM 捞回来（不自动恢复默认标记）。"""
+    row = get_prm(db, prm_id)
+    if row is None or not row["deleted_at"]:
+        return False
+    with db.tx() as conn:
+        conn.execute("UPDATE prm_profiles SET deleted_at = NULL, updated_at = ? WHERE id = ?",
+                     (now(), prm_id))
+    return True
+
+
+def copy_prm(db: Database, prm_id: int, *, name: str | None = None,
+             filename: str | Path | None = None) -> int | None:
+    """复制一份 PRM 档案（默认指同一个文件）。原档案一个字不动。
+
+    只复制"档案"这一层：提示词内容还在文件里，想换内容就给 `filename` 换个文件。
+    """
+    row = get_prm(db, prm_id)
+    if row is None:
+        return None
+    base = str(row["name"])
+    title = name or f"{base} 副本"
+    if db.one("SELECT id FROM prm_profiles WHERE name = ? AND deleted_at IS NULL",
+              (title,)) is not None:
+        title = f"{title} {now()[11:19]}"      # 撞名了就加个时间尾巴，避免唯一索引报错
+    return create_prm(db, title, filename or row["filename"],
+                      description=row["description"], language=row["language"],
+                      version=row["version"])
+
+
 def set_default_prm(db: Database, prm_id: int) -> bool:
     row = get_prm(db, prm_id)
     if row is None or row["deleted_at"]:
@@ -435,6 +465,161 @@ def link_artifact(db: Database, artifact_id: int, *, asset_id: int | None = None
         return bool(cur.rowcount)
 
 
+def clip_spec_for(plan: Any, start: float, end: float) -> dict[str, Any]:
+    """把一条 ClipPlan + **实际剪出来的**区间，变成 clips 表要的一行。
+
+    文案字段（score / type / reason / evaluation）走既有的 `repo.clips_from_payload`
+    解析 AI 原始 clip，一个字不改写；时间用实际值（引擎修正 + 加减秒之后的）。
+    AI 原始区间不写进 clips——它一直在 `highlight_assets.raw_json` 里，那份永不改。
+    """
+    from . import repo  # noqa: PLC0415 - 同包，放函数里避免循环导入
+
+    raw = dict(getattr(plan, "raw", None) or {})
+    parsed = repo.clips_from_payload({"clip": raw}) if raw else []
+    spec: dict[str, Any] = dict(parsed[0]) if parsed else {}
+    spec.update({"start": round(float(start), 3), "end": round(float(end), 3),
+                 "duration": round(float(end) - float(start), 3)})
+    for key, value in (("score", getattr(plan, "score", None)),
+                       ("type", getattr(plan, "type", "") or ""),
+                       ("reason", getattr(plan, "reason", "") or "")):
+        spec.setdefault(key, value)
+    return spec
+
+
+def record_clips(db: Database, video_id: int, output_path: str | Path,
+                 specs: list[dict[str, Any]] | None = None, *,
+                 ai_result_id: int | None = None) -> list[int]:
+    """把**实际剪出来的**片段写进 clips，一段一行，直接就是 rendered。
+
+    只有渲染成功（`os.replace` 落地 + `video_io.is_complete_video()` 通过）之后
+    才允许调用——这里不做"算不算成品"的判断，那是渲染那一层的闸门。
+    """
+    from . import repo  # noqa: PLC0415
+
+    target = Path(output_path)
+    return [repo.create_clip(db, video_id, spec, ai_result_id=ai_result_id,
+                             status="rendered", output_path=target)
+            for spec in (specs or ())]
+
+
+def record_product(db: Database, video_id: int, output_path: str | Path, *,
+                   specs: list[dict[str, Any]] | None = None,
+                   asset_id: int | None = None, prm_id: int | None = None,
+                   ai_result_id: int | None = None,
+                   kind: str = "final_video") -> dict[str, Any]:
+    """成品记账：写 clips → 登记 artifact → 挂方案 / PRM。
+
+    调用方的义务：只有在渲染成功并通过完整性检查之后才允许调这里。
+    CLI（`assets --render`）走这一个函数；GUI 的成品登记走
+    `_register_artifact` + `_link_final_video` + `record_clips`，
+    写 clips 的规则两边共用同一段代码（`record_clips`）。
+    """
+    from . import repo  # noqa: PLC0415
+
+    target = Path(output_path)
+    clip_ids = record_clips(db, video_id, target, specs, ai_result_id=ai_result_id)
+    artifact_id = repo.register_artifact(db, video_id, kind, target)
+    if asset_id is not None or prm_id is not None:
+        link_artifact(db, artifact_id, asset_id=asset_id, prm_id=prm_id)
+    return {"artifact_id": artifact_id, "clip_ids": clip_ids}
+
+
+def clips_for_product(db: Database, video_id: int, path: str | Path) -> list[sqlite3.Row]:
+    """这个成品文件对应的 clips 行（实际剪辑区间的来源）。"""
+    from . import repo  # noqa: PLC0415
+
+    want = str(path)
+    return [row for row in repo.get_clips(db, video_id)
+            if str(row["output_path"] or "") == want]
+
+
+def asset_layers(db: Database, asset_id: int, *, artifact_id: int | None = None,
+                 row: sqlite3.Row | None = None) -> dict[str, list[dict[str, Any]]]:
+    """三层区间**一次算完**：AI 原始 / Clip Engine 修正（含原因）/ 实际渲染。
+
+    这是 `asset_spans()` + `lineage_spans()` 的合并版：同一次刷新里视频时长、
+    分析批次、逐词时间戳只查一遍（以前两个函数各查一遍，界面一次刷新要 20 多条 SQL）。
+    规则来源仍然只有 `highlight/clip_engine.plan_clips` 一个，算法一个字没改。
+
+    `row` 可以把已经查出来的 highlight_assets 行传进来（界面刷新时手上就有），省一次查询。
+    `artifact_id` 给了就带上这个成品的实际渲染区间（来自 `clips`）。
+    """
+    from . import repo  # noqa: PLC0415
+
+    out: dict[str, list[dict[str, Any]]] = {"ai": [], "engine": [], "actual": []}
+    if row is None or int(row["id"]) != int(asset_id):
+        row = get_asset(db, asset_id)
+    if row is None:
+        return out
+    payload = loads(row["current_json"])
+    if not payload:
+        return out
+    out["ai"] = [{"start": clip.get("start"), "end": clip.get("end"),
+                  "score": clip.get("score"), "type": clip.get("type") or "",
+                  "evaluation": clip.get("evaluation") or ""}
+                 for clip in repo.clips_from_payload(payload)]
+    video_id = int(row["video_id"])
+    try:
+        from ..highlight import clip_engine  # noqa: PLC0415 - 重依赖，用到才导
+
+        duration = db.value("SELECT duration FROM videos WHERE id = ?", (video_id,), None)
+        segments = clip_engine.segments_for_video(db, video_id)
+        for plan in clip_engine.plan_clips(payload, segments,
+                                           video_duration=float(duration) if duration
+                                           else None).plans:
+            out["engine"].append({"start": plan.start, "end": plan.end,
+                                  "duration": plan.duration, "notes": list(plan.notes),
+                                  "capped": bool(plan.capped),
+                                  "ai_start": plan.ai_start, "ai_end": plan.ai_end})
+    except Exception as exc:  # noqa: BLE001 - 算不出来不影响看 AI 原始那一层
+        logger.warning("复算 Clip Engine 区间失败：%s", exc)
+    if artifact_id is not None:
+        art = db.one("SELECT video_id, path FROM artifacts WHERE id = ?", (int(artifact_id),))
+        if art is not None:
+            out["actual"] = [{"start": clip["start_time"], "end": clip["end_time"],
+                              "duration": clip["duration"]}
+                             for clip in clips_for_product(db, int(art["video_id"]),
+                                                           str(art["path"]))]
+    return out
+
+
+def asset_spans(db: Database, asset_id: int) -> dict[str, list[dict[str, Any]]]:
+    """一份高光 JSON 的两层区间：AI 原始 + Clip Engine 修正（含原因）。
+
+    Engine 那一层是现算的，规则来源只有 `highlight/clip_engine.plan_clips` 一个
+    （纯函数，同输入同输出），所以"现算"就是真剪的时候会用的边界。
+    界面拿它做「剪之前先看看会剪成什么样」，不另写一套算法。
+    """
+    layers = asset_layers(db, asset_id)
+    return {"ai": layers["ai"], "engine": layers["engine"]}
+
+
+def lineage_spans(db: Database, artifact_id: int) -> dict[str, list[dict[str, Any]]]:
+    """一个成品的三层区间：AI 原始 / Clip Engine 修正（含原因）/ 实际渲染。
+
+      * AI 原始 + Engine：来自 `asset_layers()`（同一个规则源）；
+      * 实际渲染：来自 `clips`（渲染成功、完整性检查通过之后写进去的）。
+
+    GUI 的血缘面板和 CLI 的 `assets --trace` 都拿这一个函数的结果显示，不各写一套。
+    """
+    out: dict[str, list[dict[str, Any]]] = {"ai": [], "engine": [], "actual": []}
+    art = db.one("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
+    if art is None:
+        return out
+    video_id = int(art["video_id"])
+    out["actual"] = [{"start": row["start_time"], "end": row["end_time"],
+                      "duration": row["duration"]}
+                     for row in clips_for_product(db, video_id, str(art["path"]))]
+    asset_id = art["highlight_asset_id"]
+    if asset_id is None:
+        return out
+    spans = asset_layers(db, int(asset_id))
+    out["ai"] = spans["ai"]
+    out["engine"] = spans["engine"]
+    return out
+
+
+
 def products_for_asset(db: Database, asset_id: int) -> list[sqlite3.Row]:
     """这个方案剪出过哪些成品（一个 JSON 配不同 PRM 就会有多条）。"""
     return db.all("SELECT * FROM artifacts WHERE highlight_asset_id = ? ORDER BY id",
@@ -461,12 +646,104 @@ def product_counts(db: Database, video_ids: list[int], kind: str = "final_video"
     return out
 
 
+def list_products(db: Database, video_id: int,
+                  kind: str = "final_video") -> list[sqlite3.Row]:
+    """这个视频的成品清单（新的排前面）。**界面不再自己写 SELECT。**"""
+    return db.all("SELECT * FROM artifacts WHERE video_id = ? AND type = ? ORDER BY id DESC",
+                  (video_id, kind))
+
+
+def product_path(db: Database, artifact_id: int) -> Path | None:
+    """成品 id → 文件路径（「打开成品」这类动作用它，界面不查库）。"""
+    row = db.one("SELECT path FROM artifacts WHERE id = ?", (artifact_id,))
+    return None if row is None else Path(str(row["path"]))
+
+
+def product_counts_for_assets(db: Database, video_id: int,
+                              kind: str = "final_video") -> dict[int, int]:
+    """一次查完：这个视频里每份高光 JSON 各剪出了几个成品（`asset_id → 个数`）。
+
+    JSON 表那一列以前是逐行 `products_for_asset()`，20 份 JSON 就是 20+ 次查询；
+    这里一条 GROUP BY 解决。
+    """
+    rows = db.all(
+        "SELECT highlight_asset_id AS asset_id, COUNT(*) AS n FROM artifacts "
+        "WHERE video_id = ? AND type = ? AND highlight_asset_id IS NOT NULL "
+        "GROUP BY highlight_asset_id", (video_id, kind))
+    return {int(row["asset_id"]): int(row["n"]) for row in rows}
+
+
+def products_overview(db: Database, video_id: int,
+                      kind: str = "final_video") -> list[dict[str, Any]]:
+    """当前视频的成品全景：**两条 SQL** 就带出成品表要显示的一切。
+
+    每条包含 artifact / 来源高光 JSON / PRM / 生成时间 / 文件状态 /
+    实际渲染区间（`spans`，来自 clips，按 output_path 归组）。
+    以前成品表是逐行 `artifact_lineage()` + `clips_for_product()`，60 行要 300 多次查询。
+    """
+    rows = db.all(
+        """
+        SELECT f.id, f.path, f.created_at, f.exists_on_disk,
+               f.highlight_asset_id, f.prm_id,
+               h.name AS asset_name, h.deleted_at AS asset_deleted,
+               p.name AS prm_name,   p.deleted_at AS prm_deleted
+          FROM artifacts f
+          LEFT JOIN highlight_assets h ON h.id = f.highlight_asset_id
+          LEFT JOIN prm_profiles     p ON p.id = f.prm_id
+         WHERE f.video_id = ? AND f.type = ?
+         ORDER BY f.id DESC
+        """, (video_id, kind))
+    spans: dict[str, list[dict[str, Any]]] = {}
+    for clip in db.all("SELECT output_path, start_time, end_time, duration FROM clips "
+                       "WHERE video_id = ? AND output_path IS NOT NULL "
+                       "ORDER BY start_time", (video_id,)):
+        spans.setdefault(str(clip["output_path"]), []).append(
+            {"start": clip["start_time"], "end": clip["end_time"],
+             "duration": clip["duration"]})
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        out.append({
+            "artifact_id": int(row["id"]),
+            "path": str(row["path"]),
+            "created_at": row["created_at"],
+            "exists_on_disk": bool(row["exists_on_disk"]),
+            "asset_id": None if row["highlight_asset_id"] is None
+            else int(row["highlight_asset_id"]),
+            "asset_name": row["asset_name"],
+            "asset_deleted": bool(row["asset_deleted"]),
+            "prm_id": None if row["prm_id"] is None else int(row["prm_id"]),
+            "prm_name": row["prm_name"],
+            "prm_deleted": bool(row["prm_deleted"]),
+            "spans": spans.get(str(row["path"]), []),
+        })
+    return out
+
+
 def artifact_lineage(db: Database, artifact_id: int) -> dict[str, Any] | None:
     """成品反查：视频 / analysis / 方案 / AI / 模型 / PRM / 任务 / 时间。
 
     方案或 PRM 被软删了也照样查得到，只是多一个 `asset_deleted` / `prm_deleted` 标记。
+    **一条 JOIN 查完**（以前 artifacts / videos / highlight_assets / prm_profiles 各查一次）。
     """
-    art = db.one("SELECT * FROM artifacts WHERE id = ?", (artifact_id,))
+    art = db.one(
+        """
+        SELECT f.id, f.path, f.type, f.size, f.exists_on_disk, f.created_at,
+               f.highlight_asset_id, f.prm_id,
+               v.id AS v_id, v.file_name AS v_name, v.file_path AS v_path,
+               v.duration AS v_duration,
+               h.id AS h_id, h.name AS h_name, h.source_type AS h_source,
+               h.clip_count AS h_clips, h.best_score AS h_score,
+               h.created_at AS h_created, h.deleted_at AS h_deleted,
+               h.analysis_id AS h_analysis, h.provider AS h_provider,
+               h.model AS h_model, h.source_task_id AS h_task,
+               p.id AS p_id, p.name AS p_name, p.filename AS p_file,
+               p.version AS p_version, p.language AS p_lang, p.deleted_at AS p_deleted
+          FROM artifacts f
+          LEFT JOIN videos          v ON v.id = f.video_id
+          LEFT JOIN highlight_assets h ON h.id = f.highlight_asset_id
+          LEFT JOIN prm_profiles     p ON p.id = f.prm_id
+         WHERE f.id = ?
+        """, (artifact_id,))
     if art is None:
         return None
     out: dict[str, Any] = {
@@ -481,33 +758,27 @@ def artifact_lineage(db: Database, artifact_id: int) -> dict[str, Any] | None:
         "provider": None, "model": None,
         "task_id": None, "prm": None, "prm_deleted": False,
     }
-    video = db.one("SELECT * FROM videos WHERE id = ?", (int(art["video_id"]),))
-    if video is not None:
-        out["video"] = {"id": int(video["id"]), "file_name": video["file_name"],
-                        "file_path": video["file_path"], "duration": video["duration"]}
-    asset_id = art["highlight_asset_id"]
-    if asset_id is not None:
-        asset = get_asset(db, int(asset_id))
-        if asset is not None:
-            out["asset"] = {"id": int(asset["id"]), "name": asset["name"],
-                            "source_type": asset["source_type"],
-                            "clip_count": int(asset["clip_count"] or 0),
-                            "best_score": asset["best_score"],
-                            "created_at": asset["created_at"]}
-            out["asset_deleted"] = bool(asset["deleted_at"])
-            out["analysis_id"] = asset["analysis_id"]
-            out["provider"] = asset["provider"]
-            out["model"] = asset["model"]
-            out["task_id"] = asset["source_task_id"]
-    prm_id = art["prm_id"]
-    if prm_id is not None:
-        prm = get_prm(db, int(prm_id))
-        if prm is not None:
-            out["prm"] = {"id": int(prm["id"]), "name": prm["name"],
-                          "filename": prm["filename"], "version": prm["version"],
-                          "language": prm["language"]}
-            out["prm_deleted"] = bool(prm["deleted_at"])
+    if art["v_id"] is not None:
+        out["video"] = {"id": int(art["v_id"]), "file_name": art["v_name"],
+                        "file_path": art["v_path"], "duration": art["v_duration"]}
+    if art["h_id"] is not None:
+        out["asset"] = {"id": int(art["h_id"]), "name": art["h_name"],
+                        "source_type": art["h_source"],
+                        "clip_count": int(art["h_clips"] or 0),
+                        "best_score": art["h_score"],
+                        "created_at": art["h_created"]}
+        out["asset_deleted"] = bool(art["h_deleted"])
+        out["analysis_id"] = art["h_analysis"]
+        out["provider"] = art["h_provider"]
+        out["model"] = art["h_model"]
+        out["task_id"] = art["h_task"]
+    if art["p_id"] is not None:
+        out["prm"] = {"id": int(art["p_id"]), "name": art["p_name"],
+                      "filename": art["p_file"], "version": art["p_version"],
+                      "language": art["p_lang"]}
+        out["prm_deleted"] = bool(art["p_deleted"])
     return out
+
 
 
 def video_overview(db: Database, video_id: int) -> dict[str, Any]:
@@ -531,3 +802,140 @@ def video_overview(db: Database, video_id: int) -> dict[str, Any]:
         "assets": assets,
         "products": [p for p in products if p],
     }
+
+
+# ====================================================== 资产中心的列表（只读）
+CENTER_STATUS = ("all", "analysed", "not_analysed", "has_json", "no_json",
+                 "has_product", "no_product")
+CENTER_ORDER = ("recent", "processed", "name", "duration", "json", "highlight", "product")
+# 「有没有 JSON」「有没有成品」是两个独立维度，各自 any / has / none
+CENTER_HAS = ("any", "has", "none")
+# AI 筛选里的「未知」：有高光 JSON，但库里没记下 provider（多半是手工导入的）
+NO_PROVIDER = "__none__"
+
+
+def center_rows(db: Database, *, search: str | None = None, provider: str | None = None,
+                status: str = "all", json: str = "any", product: str = "any",
+                order: str = "recent", limit: int = 500) -> list[dict[str, Any]]:
+    """资产中心主列表：一个视频一行，JSON 数 / 高光数 / 成品数 / 最近用的 AI 全在里面。
+
+    全部靠 SQL 聚合，**GUI 不需要扫磁盘也不需要逐个视频查库**——几千个视频也是一次查询。
+    `search` 同时匹配文件名、路径和视频 ID；`provider` 按 AI 过滤（`NO_PROVIDER`
+    = 只看没记下 AI 的）。
+
+    筛选维度三个，可以随便组合（这才能一步问出「有 JSON 但没成品」）：
+
+      * `status`：`all` / `analysed` / `not_analysed`
+      * `json`：`any` / `has` / `none`
+      * `product`：`any` / `has` / `none`
+
+    老调用写的是 `status="has_json"` 这类合并档，仍然照旧支持：显式给了
+    `json=` / `product=` 时以它们为准，没给才把老 `status` 翻译过来。
+    筛选和排序只有这一处，GUI 不再自己过一遍。
+    """
+
+    want_json = str(json or "any")
+    want_product = str(product or "any")
+    keep_status = str(status or "all")
+    legacy = {"has_json": ("has", "any"), "no_json": ("none", "any"),
+              "has_product": ("any", "has"), "no_product": ("any", "none")}
+    if keep_status in legacy:                      # 老的合并档：翻译成两个维度
+        was_json, was_product = legacy[keep_status]
+        if want_json == "any":
+            want_json = was_json
+        if want_product == "any":
+            want_product = was_product
+        keep_status = "all"
+
+    where, params = [], []
+    if search:
+        text = str(search).strip()
+        clause_or = ["v.file_name LIKE ?", "v.file_path LIKE ?"]
+        params.extend([f"%{text}%", f"%{text}%"])
+        if text.isdigit():
+            clause_or.append("v.id = ?")
+            params.append(int(text))
+        where.append("(" + " OR ".join(clause_or) + ")")
+    if provider and provider != NO_PROVIDER:
+        where.append("EXISTS (SELECT 1 FROM highlight_assets p WHERE p.video_id = v.id "
+                     "AND p.deleted_at IS NULL AND p.provider = ?)")
+        params.append(provider)
+
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    rows = db.all(
+        f"""
+        SELECT v.id, v.file_name, v.file_path, v.duration,
+               (SELECT COUNT(*) FROM analysis_runs a
+                 WHERE a.video_id = v.id AND a.status = 'completed')            AS analysed,
+               (SELECT COUNT(*) FROM highlight_assets h
+                 WHERE h.video_id = v.id AND h.deleted_at IS NULL)              AS json_count,
+               (SELECT COALESCE(SUM(h.clip_count), 0) FROM highlight_assets h
+                 WHERE h.video_id = v.id AND h.deleted_at IS NULL)              AS highlight_count,
+               (SELECT MAX(h.updated_at) FROM highlight_assets h
+                 WHERE h.video_id = v.id AND h.deleted_at IS NULL)              AS asset_updated,
+               (SELECT COUNT(*) FROM artifacts f
+                 WHERE f.video_id = v.id AND f.type = 'final_video')            AS product_count,
+               (SELECT MAX(f.created_at) FROM artifacts f
+                 WHERE f.video_id = v.id AND f.type = 'final_video')            AS product_updated
+
+          FROM videos v{clause}
+        """, tuple(params))
+
+    latest: dict[int, tuple[str, str]] = {}
+    for row in db.all("SELECT video_id, provider, model FROM highlight_assets "
+                      "WHERE deleted_at IS NULL ORDER BY id", ()):
+        if row["provider"] or row["model"]:
+            latest[int(row["video_id"])] = (str(row["provider"] or ""), str(row["model"] or ""))
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        vid = int(row["id"])
+        item = {
+            "id": vid,
+            "file_name": str(row["file_name"]),
+            "file_path": str(row["file_path"]),
+            "duration": row["duration"],
+            "analysed": bool(int(row["analysed"] or 0)),
+            "json_count": int(row["json_count"] or 0),
+            "highlight_count": int(row["highlight_count"] or 0),
+            "product_count": int(row["product_count"] or 0),
+            "updated_at": row["asset_updated"] or "",
+            "product_updated": row["product_updated"] or "",
+            "provider": latest.get(vid, ("", ""))[0],
+            "model": latest.get(vid, ("", ""))[1],
+        }
+        if provider == NO_PROVIDER and (item["provider"] or not item["json_count"]):
+            continue                      # 「未知」= 有 JSON 但没记下 AI
+        if keep_status == "analysed" and not item["analysed"]:
+            continue
+        if keep_status == "not_analysed" and item["analysed"]:
+            continue
+        if want_json == "has" and not item["json_count"]:
+            continue
+        if want_json == "none" and item["json_count"]:
+            continue
+        if want_product == "has" and not item["product_count"]:
+            continue
+        if want_product == "none" and item["product_count"]:
+            continue
+        out.append(item)
+
+    keys = {
+        "recent": lambda r: (r["updated_at"] or "", r["id"]),
+        "processed": lambda r: (r["product_updated"] or "", r["id"]),
+        "name": lambda r: r["file_name"].lower(),
+        "duration": lambda r: (float(r["duration"] or 0.0), r["id"]),
+        "json": lambda r: (r["json_count"], r["id"]),
+        "highlight": lambda r: (r["highlight_count"], r["id"]),
+        "product": lambda r: (r["product_count"], r["id"]),
+    }
+
+    out.sort(key=keys.get(order, keys["recent"]), reverse=order != "name")
+    return out[:max(1, int(limit))]
+
+
+def known_providers(db: Database) -> list[str]:
+    """库里出现过的 AI 来源，给筛选下拉用。"""
+    return [str(r["provider"]) for r in
+            db.all("SELECT DISTINCT provider FROM highlight_assets "
+                   "WHERE provider IS NOT NULL AND provider <> '' ORDER BY provider", ())]

@@ -475,6 +475,10 @@ def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
         runs = repo.recover_stale_analyses(
             db, float(cfg.runtime.get("analysis_timeout_minutes", 180)))
         logger.info("恢复：%d 个卡住的 AI 任务退回等待，%d 条没跑完的分析标成失败", tasks, runs)
+    if args.fill_duration:
+        stats = repo.fill_missing_durations(db)
+        logger.info("补时长：查了 %d 个（duration 为空且文件还在盘上），补上 %d 个，探不到 %d 个",
+                    stats["checked"], stats["filled"], stats["failed"])
     if args.check:
         code = _db_report_check(admin.health_check(db)) or code
     if args.backup is not None:
@@ -667,6 +671,7 @@ def _clip_plans(cfg: Config, video: Path, payload: Any,
     from vidscribe.video_io import probe_video  # noqa: PLC0415
 
     segments: tuple[Any, ...] = ()
+    duration: float | None = None
     try:
         from vidscribe.db import open_db, repo  # noqa: PLC0415
 
@@ -675,6 +680,8 @@ def _clip_plans(cfg: Config, video: Path, payload: Any,
             row = repo.find_video(db, video)
             if row is not None:
                 segments = clip_engine.segments_for_video(db, int(row["id"]))
+                # 库里没时长就现探一次写回（和 GUI 同一个入口，不另写一套）
+                duration = repo.ensure_duration(db, int(row["id"]), video)
         finally:
             db.close()
     except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
@@ -683,11 +690,11 @@ def _clip_plans(cfg: Config, video: Path, payload: Any,
         logger.warning("库里没有这个视频的逐词时间戳，AI 区间将原样使用（只受 15 秒上限约束）")
     else:
         logger.info("逐词时间戳：%d 句", len(segments))
-    duration: float | None = None
-    try:
-        duration = float(probe_video(video).duration) or None
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("探不到视频时长（%s），不按时长收尾", exc)
+    if duration is None:
+        try:
+            duration = float(probe_video(video).duration) or None
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("探不到视频时长（%s），不按时长收尾", exc)
     return clip_engine.plan_clips(payload, segments, video_duration=duration,
                                   max_seconds=max_seconds or clip_engine.MAX_SECONDS,
                                   source_video=str(video))
@@ -747,7 +754,7 @@ def _print_asset_rows(rows: list[Any]) -> None:
               f" {row['created_at']} {' '.join(flags)}")
 
 
-def _print_lineage(info: dict[str, Any]) -> None:
+def _print_lineage(info: dict[str, Any], spans: dict[str, Any] | None = None) -> None:
     asset = info.get("asset")
     prm = info.get("prm")
     print(f"  成品 #{info['artifact_id']}  {Path(str(info['path'])).name}"
@@ -765,6 +772,23 @@ def _print_lineage(info: dict[str, Any]) -> None:
           + ("-" if prm is None else
              f"#{prm['id']} {prm['name']}（{prm['filename']}）"
              + ("（已删除）" if info["prm_deleted"] else "")))
+    if not spans:
+        return
+    for index, clip in enumerate(spans.get("ai") or (), start=1):
+        score = clip.get("score")
+        print(f"    AI 原始 {index} : {clip['start']} → {clip['end']}"
+              f"（评分 {'-' if score is None else score}）")
+    for index, plan in enumerate(spans.get("engine") or (), start=1):
+        print(f"    Engine {index}  : {plan['start']} → {plan['end']}（{plan['duration']}s）")
+        for note in plan["notes"]:
+            print(f"      原因    : {note}")
+        if not plan["notes"]:
+            print("      原因    : 未调整（AI 区间本身就落在语义边界上）")
+    actual = spans.get("actual") or ()
+    for index, clip in enumerate(actual, start=1):
+        print(f"    实际渲染{index} : {clip['start']} → {clip['end']}（{clip['duration']}s）")
+    if not actual:
+        print("    实际渲染  : 库里没有对应的 clips 记录（Batch 11 之前剪的老成品）")
 
 
 def _read_json_arg(cfg: Config, path_text: str) -> Any:
@@ -895,12 +919,17 @@ def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) 
             logger.error("成片封装不完整，不当成成品：%s", out_path)
             return 1
         print("[剪辑引擎] 成片验证通过", flush=True)
-        artifact_id = repo.register_artifact(db, int(video_row["id"]), "final_video", out_path)
-        assets.link_artifact(db, artifact_id, asset_id=int(asset["id"]),
-                             prm_id=int(prm_row["id"]) if prm_row is not None else None)
+        # 成品记账走数据层的同一个入口：写实际剪辑区间 → 登记成品 → 挂方案 / PRM
+        info = assets.record_product(
+            db, int(video_row["id"]), out_path,
+            specs=[assets.clip_spec_for(plan, job.clip_start, job.freeze_time)],
+            asset_id=int(asset["id"]),
+            prm_id=int(prm_row["id"]) if prm_row is not None else None)
         made.append(out_path)
-        logger.info("成品已生成并记账：%s（方案 #%s%s）", out_path, asset["id"],
-                    f"，PRM #{prm_row['id']}" if prm_row is not None else "")
+        logger.info("成品已生成并记账：%s（方案 #%s%s，实际区间 %.2f → %.2f）", out_path,
+                    asset["id"], f"，PRM #{prm_row['id']}" if prm_row is not None else "",
+                    job.clip_start, job.freeze_time)
+        logger.debug("artifact #%s / clips %s", info["artifact_id"], info["clip_ids"])
     print(f"[高光方案] 本次共产出 {len(made)} 个成品，全部挂在方案 #{asset['id']} 名下")
     return 0
 
@@ -1005,7 +1034,7 @@ def cmd_assets(cfg: Config, args: argparse.Namespace) -> int:
                 logger.error("没有 #%s 这个成品记录", args.trace)
                 code = 2
             else:
-                _print_lineage(info)
+                _print_lineage(info, db_assets.lineage_spans(db, int(args.trace)))
         if args.render is not None:
             return _assets_render(cfg, args, db, db_assets) or code
         if args.video and not args.import_json:
@@ -1328,6 +1357,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="对账：库里记的视频/文件还在不在盘上，只改状态不删记录")
     p_db.add_argument("--recover", action="store_true",
                       help="恢复：卡住的 AI 任务退回等待，没跑完的分析标失败")
+    p_db.add_argument("--fill-duration", action="store_true",
+                      help="给老数据补时长：只处理 duration 为空且文件还在盘上的视频，"
+                           "复用剪辑那条路的探测逻辑，探不到就保持空")
     p_db.add_argument("--check", action="store_true",
                       help="体检：integrity_check、foreign_key_check、版本、表与索引、能不能写。"
                            "有问题时退出码非 0")

@@ -252,32 +252,37 @@ class AiPanel(QDialog):
         return box
 
     def _build_sources(self) -> QWidget:
-        """高光来源 + PRM：这一轮拿哪些视频、发 AI 时用哪一版提示词。
+        """处理范围 + PRM：这一轮拿哪些视频、发 AI 时用哪一版提示词。
 
-        「已有 JSON」那一档不会调 AI，直接拿库里的方案开剪；「没有 JSON」相反，
-        只跑还没有方案的视频。PRM 下拉的内容来自 prm_profiles 表（提示词本体仍在文件里）。
+        这里只留跑批真正需要的三个选择，**JSON 的管理全部搬到「AI 剪辑资产中心」**：
+        - 处理范围「只有已有 JSON 的视频」这一档一次 AI 都不调，直接拿库里的当前方案开剪；
+        - 「只有没有 JSON 的视频」相反，只跑还没有高光资产的视频（判断用的是
+          `assets.videos_with_assets`，和资产中心看到的一模一样，不是看 ai_results 有没有行）；
+        - 高光 JSON 用哪一份 = 每个视频的**当前方案**，想换就去资产中心点「设为当前」。
         """
-        box = QGroupBox("高光来源 / 提示词")
+        box = QGroupBox("处理范围 / 提示词")
         row = QHBoxLayout(box)
         self.cmb_source = QComboBox()
-        for label, key in (("全部（有 JSON 的直接剪，没有的问 AI）", "all"),
-                           ("只挑已有 JSON 的（不调 AI）", "existing"),
-                           ("只挑没有 JSON 的（问 AI）", "missing")):
+        for label, key in (("全部视频（有 JSON 的直接剪，没有的问 AI）", "all"),
+                           ("只有已有 JSON 的视频（不调 AI）", "existing"),
+                           ("只有没有 JSON 的视频（问 AI）", "missing")):
             self.cmb_source.addItem(label, key)
         current = str(self.cfg.bridge.get("highlight_source") or "all")
         self.cmb_source.setCurrentIndex(max(0, self.cmb_source.findData(current)))
-        self.cmb_source.setToolTip("「已有 JSON」这一档一次 AI 都不调，纯用库里的高光方案开剪")
+        self.cmb_source.setToolTip("「已有 JSON」这一档一次 AI 都不调，纯用库里的当前方案开剪")
 
         self.cmb_prm = QComboBox()
-        self.cmb_prm.setMinimumWidth(220)
-        self.cmb_prm.setToolTip("发给 AI 的提示词用哪一版。内容仍然只在文件里，库里只记档案")
+        self.cmb_prm.setMinimumWidth(200)
+        self.cmb_prm.setToolTip("发给 AI 的提示词用哪一版；内容仍旧只在文件里，库里只记档案。"
+                                "成品会记住用的是这一版")
         self._reload_prms()
 
-        self.btn_assets = QPushButton("高光方案…")
-        self.btn_assets.setToolTip("看每个视频有哪些高光 JSON 方案、剪出过哪些成品；也能只用 JSON 剪")
+        self.btn_assets = QPushButton("视频资产中心")
+        self.btn_assets.setToolTip("视频 → 高光 JSON → PRM → 成品：搜索、看区间、看 AI 来源、"
+                                   "编辑复制、按 JSON 直接出成品、成品反向追溯")
         self.btn_assets.clicked.connect(self.on_assets)
 
-        row.addWidget(QLabel("高光来源"))
+        row.addWidget(QLabel("处理范围"))
         row.addWidget(self.cmb_source, 1)
         row.addWidget(QLabel("PRM"))
         row.addWidget(self.cmb_prm, 1)
@@ -305,13 +310,35 @@ class AiPanel(QDialog):
         self.cmb_prm.blockSignals(False)
 
     def on_assets(self) -> None:
-        """打开高光方案管理（数据管理界面）。"""
-        from .assets_dialog import AssetDialog  # noqa: PLC0415 - 只在点开时才建窗口
+        """打开视频资产中心（视频 → 高光 JSON → PRM → 成品）。
 
-        dialog = AssetDialog(self.cfg, self._window or self, log=self._log)
-        dialog.exec_()
+        资产中心是**非模态**的独立窗口，而且全程只有一份：主窗口那个
+        `MainWindow.on_asset_center()` 才是真正开窗的地方，这里只是把它叫起来，
+        免得面板和主窗口各开一个、互相看不到对方的改动。
+        """
+        window = self._window
+        opener = getattr(window, "on_asset_center", None)
+        if callable(opener):
+            opener()
+            return
+        # 没有主窗口（单独跑面板做测试）时，自己维持一份非模态窗口
+        from .assets_dialog import AssetCenter  # noqa: PLC0415 - 只在点开时才建窗口
+
+        center = getattr(self, "_asset_center", None)
+        if center is None:
+            center = AssetCenter(self.cfg, window or self, log=self._log)
+            center.changed.connect(self.on_assets_changed)
+            self._asset_center = center
+        center.reload()
+        center.show()
+        center.raise_()
+        center.activateWindow()
+
+    def on_assets_changed(self) -> None:
+        """资产中心里动过东西（PRM / JSON / 成品）就顺手把面板上的数字跟上。"""
         self._reload_prms()
         self.refresh_tasks()
+
 
     def _build_dirs(self) -> QWidget:
         bridge = self.cfg.bridge

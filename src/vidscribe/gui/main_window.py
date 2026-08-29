@@ -55,6 +55,7 @@ from PyQt5.QtWidgets import (
 from ..config import Config
 from ..constants import VIDEO_SUFFIXES
 from ..db import open_db
+from ..db import assets as db_assets
 from ..db import repo as db_repo
 from ..db.importer import refresh_from_disk
 from ..db.lock import RuntimeLock, queue_lock_path
@@ -358,6 +359,8 @@ class HighlightWorker(QThread):
         self.output: Path | None = None
         # 实际剪出来的区间 (起剪, 冻帧点)：加减秒数都已经算进去了，用来回写 clips
         self.cut_ranges: list[tuple[float, float]] = []
+        # 每段实际剪辑的完整记账行（clips 表要的形状），JSON 直接剪那条路靠它建 clips
+        self.cut_specs: list[dict[str, Any]] = []
 
 
     def _sfx_plan(self, video: Path, freeze_time: float):
@@ -395,6 +398,7 @@ class HighlightWorker(QThread):
             payload = json.loads(self.payload_text)
 
         segments: tuple = ()
+        duration = None
         try:
             from ..db import open_db, repo  # noqa: PLC0415
 
@@ -403,6 +407,9 @@ class HighlightWorker(QThread):
                 row = repo.find_video(db, video)
                 if row is not None:
                     segments = clip_engine.segments_for_video(db, int(row["id"]))
+                    # 库里没时长就在这儿探一次并写回：探测点只有这一处，
+                    # 资产中心显示时长只查库，不扫盘
+                    duration = repo.ensure_duration(db, int(row["id"]), video)
             finally:
                 db.close()
         except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
@@ -412,13 +419,13 @@ class HighlightWorker(QThread):
         else:
             self.log.emit("[剪辑引擎] 库里没有逐词时间戳，AI 区间原样使用（只受 15 秒上限约束）")
 
-        duration = None
-        try:
-            from ..video_io import probe_video  # noqa: PLC0415
+        if duration is None:
+            try:
+                from ..video_io import probe_video  # noqa: PLC0415
 
-            duration = float(probe_video(video).duration) or None
-        except Exception as exc:  # noqa: BLE001 - 探不到就不按时长收尾
-            self.log.emit(f"[剪辑引擎] 探不到视频时长（{exc}），不按时长收尾")
+                duration = float(probe_video(video).duration) or None
+            except Exception as exc:  # noqa: BLE001 - 探不到就不按时长收尾
+                self.log.emit(f"[剪辑引擎] 探不到视频时长（{exc}），不按时长收尾")
 
         result = clip_engine.plan_clips(payload, segments,
                                        video_duration=duration, source_video=str(video))
@@ -461,19 +468,19 @@ class HighlightWorker(QThread):
             plans = self._plan_result(video, payload).plans
             if not plans:
                 raise ValueError("剪辑引擎没给出任何可剪片段，这条不开剪")
-            jobs: list[tuple[Any, Path]] = []
+            jobs: list[tuple[Any, Path, Any]] = []
             for index, plan in enumerate(plans, start=1):
                 one = parse_spec(clip_engine.payload_for(plan))
                 one = one.shifted(start_delta, end_delta, text_delta)
                 out_path = (target if index == 1
                             else target.with_name(f"{target.stem}_{index}{target.suffix}"))
-                jobs.append((one, out_path))
+                jobs.append((one, out_path, plan))
                 self.log.emit(f"[OFFSET] 第 {index} 段 起始{start_delta:+.2f} / "
                               f"结束{end_delta:+.2f} / 文本{text_delta:+.2f} 秒 → "
                               f"起剪={one.clip_start:.2f} 冻帧={one.freeze_time:.2f} "
                               f"片尾={one.clip_end:.2f}")
 
-            for index, (job, out_path) in enumerate(jobs, start=1):
+            for index, (job, out_path, plan) in enumerate(jobs, start=1):
                 self.log.emit(f"[剪辑引擎] 开始渲染第 {index}/{len(jobs)} 段 -> {out_path.name}")
                 result = render_highlight(video, job, out_path, on_log=self.log.emit,
                                           on_progress=self.progress.emit,
@@ -483,6 +490,8 @@ class HighlightWorker(QThread):
                 self.log.emit("[剪辑引擎] 成片验证通过")
                 # 记下真正剪的区间（引擎修正 + 加减秒数之后的值），交给主界面回写 clips
                 self.cut_ranges.append((job.clip_start, job.freeze_time))
+                self.cut_specs.append(db_assets.clip_spec_for(plan, job.clip_start,
+                                                              job.freeze_time))
                 if not self.video_only:
                     write_json(out_path.with_suffix(".json"),
                                {"spec": job.raw,
@@ -570,6 +579,9 @@ class MainWindow(QMainWindow):
         self._last_asset_id: int | None = None
         # AI 面板（第二主界面）：非模态，只开一个
         self.ai_panel = None
+        # 视频资产中心：同样非模态、全程只有一份
+        self.asset_center = None
+
 
 
         # 剪辑高光的三个加减秒数（起始 / 结束 / 文本），从设置里带回来
@@ -781,7 +793,29 @@ class MainWindow(QMainWindow):
         self.ai_panel.raise_()
         self.ai_panel.activateWindow()
 
+    def on_asset_center(self) -> None:
+        """开视频资产中心（视频 → 高光 JSON → PRM → 成品）。
+
+        和 AI 面板一样是非模态单例：主窗口按钮和 AI 面板里的按钮点到的都是这一份，
+        所以在里面改完 PRM，AI 面板的 PRM 下拉会跟着刷新，不需要关窗才生效。
+        """
+        from .assets_dialog import AssetCenter  # noqa: PLC0415
+
+        if self.asset_center is None:
+            self.asset_center = AssetCenter(self.cfg, self, log=self.append_log)
+            self.asset_center.changed.connect(self.on_assets_changed)
+        self.asset_center.reload()
+        self.asset_center.show()
+        self.asset_center.raise_()
+        self.asset_center.activateWindow()
+
+    def on_assets_changed(self) -> None:
+        """资产中心里动过 JSON / PRM / 成品，就把 AI 面板上的下拉和任务表跟上。"""
+        if self.ai_panel is not None:
+            self.ai_panel.on_assets_changed()
+
     def on_ai_api(self) -> None:
+
         """AI 接口设置：找哪家 AI、走接口还是网页版扩展、key、模型、端口、上传方式。"""
         from .ai_options import AiApiDialog  # noqa: PLC0415
 
@@ -1027,6 +1061,11 @@ class MainWindow(QMainWindow):
         self.btn_ai_options.setToolTip("第二主界面：干哪一串、AI 专属目录、任务统计和任务表，"
                                       "自动剪辑也在那儿点")
         self.btn_ai_options.clicked.connect(self.on_ai_options)
+        self.btn_assets = QPushButton("视频资产中心")
+        self.btn_assets.setToolTip("视频资产中心：视频库 / 高光 JSON / 成品 / 血缘 / PRM 管理，"
+                                   "也能直接按某一份 JSON 出成品")
+        self.btn_assets.clicked.connect(self.on_asset_center)
+
         self.btn_ai_api = QPushButton("AI接口")
         self.btn_ai_api.setToolTip("找哪家 AI、走接口直连还是网页版扩展、API key、模型、"
                                    "超时、Bridge 端口、扩展上传方式")
@@ -1201,6 +1240,8 @@ class MainWindow(QMainWindow):
         first_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
         first_row.addWidget(self.btn_ai_api, 0, Qt.AlignTop)
         first_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
+        first_row.addWidget(self.btn_assets, 0, Qt.AlignTop)
+
         layout.addLayout(first_row)
         second_row = QHBoxLayout()
         second_row.setContentsMargins(0, 0, 0, 0)
@@ -2617,6 +2658,8 @@ class MainWindow(QMainWindow):
 
         顺手把**实际剪的区间**回写：剪辑引擎会把 AI 的粗边界挪到语义位置，
         库里留 AI 原值会和成片对不上。段数对不上就只标状态，绝不瞎配对。
+        JSON 直接剪那条路库里本来没有 planned 行（clips 只在 AI 结果落库时建），
+        所以这里按实际剪的区间**补建** rendered 行，血缘才不会断。
         再把成品挂回「哪份高光方案 + 哪版 PRM」，以后拿成品能反查全链路。
         """
         video = self._auto_video or self.video_path
@@ -2632,8 +2675,17 @@ class MainWindow(QMainWindow):
         if db is None or vid is None:
             return
         ranges = list(getattr(self.clip_worker, "cut_ranges", None) or ())
+        specs = list(getattr(self.clip_worker, "cut_specs", None) or ())
         try:
             pending = [c for c in db_repo.get_clips(db, vid) if c["status"] != "rendered"]
+            if not pending:
+                # 只用 JSON 剪的那条路：没有 planned 行，按实际剪出来的补建
+                made = db_assets.record_clips(db, vid, target, specs)
+                if made:
+                    first = specs[0]
+                    self.append_log(f"[数据库] 已登记实际剪辑区间 {len(made)} 段："
+                                    f"{float(first['start']):.2f} → {float(first['end']):.2f}")
+                return
             if ranges and len(ranges) != len(pending):
                 self.append_log(f"[数据库] 片段 {len(pending)} 条与实际剪出 {len(ranges)} 段"
                                 "对不上，只标状态不改时间")
@@ -2770,7 +2822,7 @@ class MainWindow(QMainWindow):
         if payload is None or not db_repo.clips_from_payload(payload):
             QMessageBox.information(self, "高光方案", "这份 JSON 里抠不出可用片段，剪不了")
             return False
-        video_row = db.one("SELECT * FROM videos WHERE id = ?", (int(asset["video_id"]),))
+        video_row = db_repo.get_video(db, int(asset["video_id"]))
         video = Path(str(video_row["file_path"])) if video_row is not None else None
         if video is None or not video.is_file():
             QMessageBox.information(self, "高光方案", f"源视频不在盘上：{video}")
@@ -2781,8 +2833,10 @@ class MainWindow(QMainWindow):
         self._last_asset_id = int(asset["id"])
         self._last_prm_id = int(prm["id"]) if prm is not None else None
         suffix = f"_{asset['name']}" + (f"_{prm['name']}" if prm is not None else "")
-        self.append_log(f"[高光方案] 按 {asset['name']} 开剪（不调 AI）"
+        self.append_log(f"[高光 JSON] 按 高光 JSON #{asset['id']}（{asset['name']}）开剪"
+                        "（不调 AI）"
                         + (f"，记 PRM {prm['name']}" if prm is not None else ""))
+
         self.run_highlight(json.dumps(payload, ensure_ascii=False, indent=2),
                            ai=True, name_suffix=suffix)
         return True

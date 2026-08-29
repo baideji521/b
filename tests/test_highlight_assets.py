@@ -673,7 +673,145 @@ def test_upgrade_only_adds(tmp_path: Path) -> None:
     db.close()
 
 
+# ------------------------------------------------------------------ T25
+def test_center_rows_aggregates_and_filters(tmp_path: Path) -> None:
+    """资产中心主列表：一次查询就给出方案数 / 高光数 / 成品数 / 最近 AI，还能筛能排。"""
+    cfg, db = make_project(tmp_path)
+    rich, vid_a = video_row(cfg, db, "c1.mp4")
+    lean, vid_b = video_row(cfg, db, "c2.mp4")
+    _bare, vid_c = video_row(cfg, db, "zz_bare.mp4")
+    db_assets.create_asset(db, vid_a, payload(video=rich.name), provider="gemini",
+                           model="gemini-2.5-flash")
+    db_assets.create_asset(db, vid_a, {"clips": [payload()["clip"], payload(30.0, 38.0)["clip"]]},
+                           provider="qwen", model="qwen3-vl")
+    db_assets.create_asset(db, vid_b, payload(video=lean.name), provider="gemini",
+                           model="gemini-2.5-pro")
+    product = cfg.path("output_dir") / "c1_高光时刻.mp4"
+    product.write_bytes(b"z" * 4096)
+    db_repo.register_artifact(db, vid_a, "final_video", product)
+
+    rows = {r["id"]: r for r in db_assets.center_rows(db)}
+    assert rows[vid_a]["json_count"] == 2 and rows[vid_a]["highlight_count"] == 3
+    assert rows[vid_a]["product_count"] == 1 and rows[vid_b]["product_count"] == 0
+    assert rows[vid_a]["provider"] == "qwen", "最近一份 JSON 的 AI 就是列表里显示的那个"
+    assert rows[vid_c]["json_count"] == 0
+
+    assert [r["id"] for r in db_assets.center_rows(db, search="c2")] == [vid_b]
+    assert {r["id"] for r in db_assets.center_rows(db, provider="gemini")} == {vid_a, vid_b}
+    assert {r["id"] for r in db_assets.center_rows(db, status="no_json")} == {vid_c}
+    assert {r["id"] for r in db_assets.center_rows(db, status="has_product")} == {vid_a}
+    assert [r["id"] for r in db_assets.center_rows(db, order="json")][0] == vid_a
+    assert db_assets.center_rows(db, order="name")[0]["file_name"] == "c1.mp4"
+    assert set(db_assets.known_providers(db)) == {"gemini", "qwen"}
+    db.close()
+
+
+# ------------------------------------------------------------------ T26
+def test_center_rows_ignores_deleted_assets(tmp_path: Path) -> None:
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "c3.mp4")
+    keep = db_assets.create_asset(db, vid, payload(), provider="gemini", model="m")
+    gone = db_assets.create_asset(db, vid, payload(20.0, 27.0), provider="gemini", model="m")
+    db_assets.delete_asset(db, gone)
+
+    row = db_assets.center_rows(db, search="c3")[0]
+    assert row["json_count"] == 1 and row["highlight_count"] == 1, "软删的不算在数量里"
+    assert db_assets.get_asset(db, gone) is not None, "但它本身还在库里"
+    assert int(db_assets.current_asset(db, vid)["id"]) == keep
+    db.close()
+
+
+# ------------------------------------------------------------------ T27
+def test_prm_copy_and_restore(tmp_path: Path) -> None:
+    cfg, db = make_project(tmp_path)
+    origin = db_assets.create_prm(db, "PRM V1", "prm/prm_en.txt", language="en", version="V1")
+    copy = db_assets.copy_prm(db, origin)
+    assert copy is not None and copy != origin
+    copied = db_assets.get_prm(db, copy)
+    assert copied["name"] != "PRM V1" and copied["filename"] == "prm/prm_en.txt"
+    assert copied["version"] == "V1", "复制连语言/版本一起带过去"
+    assert db_assets.get_prm(db, origin)["name"] == "PRM V1", "原档案一个字不动"
+
+    assert db_assets.delete_prm(db, copy) is True
+    assert db_assets.restore_prm(db, copy) is True
+    assert db_assets.restore_prm(db, copy) is False, "没删的不用恢复"
+    assert {int(r["id"]) for r in db_assets.list_prms(db)} == {origin, copy}
+    db.close()
+
+
+# ------------------------------------------------------------------ T28
+def test_center_rows_combines_json_and_product(tmp_path: Path) -> None:
+    """三维筛选：JSON 有/无 × 成品 有/无 × 分析状态，可以同时生效；旧 status 值还认。"""
+    cfg, db = make_project(tmp_path)
+    _a, both = video_row(cfg, db, "d1.mp4")          # 有 JSON + 有成品
+    _b, only_json = video_row(cfg, db, "d2.mp4")     # 有 JSON + 无成品
+    _c, bare = video_row(cfg, db, "d3.mp4")          # 都没有
+    db_assets.create_asset(db, both, payload(), provider="gemini", model="m")
+    db_assets.create_asset(db, only_json, payload(), provider="gemini", model="m")
+    product = cfg.path("output_dir") / "d1_高光时刻.mp4"
+    product.write_bytes(b"z" * 2048)
+    db_repo.register_artifact(db, both, "final_video", product)
+
+    def ids(**kw):
+        return {int(r["id"]) for r in db_assets.center_rows(db, **kw)}
+
+    assert ids(json="has", product="none") == {only_json}, "有 JSON + 无成品要一步筛出来"
+    assert ids(json="has", product="has") == {both}
+    assert ids(json="none") == {bare}
+    assert ids(product="has") == {both}
+    assert ids() == {both, only_json, bare}, "默认什么都不筛"
+    # 旧参数还认（CLI / 老代码传的是 status）
+    assert ids(status="no_json") == {bare}
+    assert ids(status="has_product") == {both}
+    assert ids(status="has_json", product="none") == {only_json}, "新参数优先，旧的当兜底"
+    db.close()
+
+
+# ------------------------------------------------------------------ T29
+def test_batch_apis_replace_per_row_queries(tmp_path: Path) -> None:
+    """成品/计数走批量接口：一个视频一次查完，界面不用逐行 products_for_asset。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "d4.mp4")
+    prm = db_assets.create_prm(db, "PRM V1", str(prm_file(cfg, "prm_zh.txt")))
+    first = db_assets.create_asset(db, vid, payload(), provider="gemini", model="m")
+    second = db_assets.create_asset(db, vid, payload(20.0, 27.0), provider="qwen", model="q")
+    made = []
+    for index in range(3):
+        target = cfg.path("output_dir") / f"d4_{index}.mp4"
+        target.write_bytes(b"z" * 1024)
+        made.append(int(db_assets.record_product(
+            db, vid, target, specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}],
+            asset_id=first if index < 2 else second, prm_id=prm)["artifact_id"]))
+
+    assert db_assets.product_counts_for_assets(db, vid) == {first: 2, second: 1}
+    assert [int(r["id"]) for r in db_assets.list_products(db, vid)] == sorted(made, reverse=True)
+    assert db_assets.product_path(db, made[0]).name == "d4_0.mp4"
+    assert db_assets.product_path(db, 10**6) is None, "查不到就老实返回 None"
+
+    overview = db_assets.products_overview(db, vid)
+    assert len(overview) == 3 and overview[0]["artifact_id"] == max(made), "新的排前面"
+    head = overview[0]
+    assert head["asset_id"] == second and head["prm_name"] == "PRM V1"
+    assert head["asset_deleted"] is False and head["exists_on_disk"] is True
+    assert [(s["start"], s["end"]) for s in head["spans"]] == [(4.0, 13.0)], "实际区间来自 clips"
+
+    # 软删来源之后，成品照样列得出来，只是多个「已删除」标记
+    db_assets.delete_asset(db, second)
+    again = db_assets.products_overview(db, vid)[0]
+    assert again["asset_id"] == second and again["asset_deleted"] is True
+
+    # 三层区间：一次算完，和分开算的结果一致
+    layers = db_assets.asset_layers(db, first, artifact_id=made[0])
+    spans = db_assets.asset_spans(db, first)
+    trace = db_assets.lineage_spans(db, made[0])
+    assert layers["ai"] == spans["ai"] and layers["engine"] == spans["engine"]
+    assert layers["actual"] == trace["actual"], "实际渲染那一层还是 clips 说的算"
+    assert db_assets.asset_layers(db, first)["actual"] == [], "不给成品就不算实际渲染"
+    db.close()
+
+
 # ------------------------------------------------------------------ S1
+
 def _function(source: str, name: str):
     tree = ast.parse(source)
     for node in ast.walk(tree):
@@ -732,9 +870,16 @@ def test_panel_saves_the_new_switches(tmp_path: Path) -> None:
     dumped = ast.dump(saver)
     assert "highlight_source" in dumped and "prm_id" in dumped, "save() 必须把两个开关写进 config"
     panel = (ROOT / "src" / "vidscribe" / "gui" / "assets_dialog.py").read_text(encoding="utf-8")
-    for needed in ("class AssetDialog", "class PrmDialog", "def on_render", "def on_delete",
-                   "def on_set_current", "def on_default"):
-        assert needed in panel, f"数据管理界面少了 {needed}"
+    for needed in ("class AssetCenter", "class AssetDialog", "class VideoAssetsPage",
+                   "class PrmPanel", "class JsonPanel", "class RenderDialog",
+                   "def on_render", "def on_delete",
+                   "def on_set_current", "def on_default", "def refresh_lineage",
+                   "center_rows"):
+        assert needed in panel, f"资产中心少了 {needed}"
+    # 弹窗套娃已经拆掉：JSON 详情和 PRM 都是页内面板，不再是子对话框
+    for gone in ("class JsonDialog", "class PrmDialog("):
+        assert gone not in panel, f"{gone} 应该已经被页内面板取代"
+
 
 
 # ------------------------------------------------------------------ 直接跑
@@ -763,6 +908,11 @@ TESTS = (
     test_deleted_selection_falls_back_to_default,
     test_migration_matches_a_fresh_v4_database,
     test_upgrade_only_adds,
+    test_center_rows_aggregates_and_filters,
+    test_center_rows_ignores_deleted_assets,
+    test_prm_copy_and_restore,
+    test_center_rows_combines_json_and_product,
+    test_batch_apis_replace_per_row_queries,
     test_auto_step_prefers_the_library_over_ai,
     test_product_registration_records_its_source,
     test_panel_saves_the_new_switches,

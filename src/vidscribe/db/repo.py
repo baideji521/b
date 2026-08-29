@@ -93,6 +93,61 @@ def upsert_video(db: Database, video: str | Path, *, info: dict[str, Any] | None
         return int(row["id"])
 
 
+def ensure_duration(db: Database, video_id: int, video: str | Path) -> float | None:
+    """库里没有时长就现探一次写回去；已经有值不动，探不到就保持 NULL。
+
+    探测复用 `video_io.probe_video`（剪辑引擎本来就要探这一下），所以这里不是第二套
+    获取逻辑，只是把探到的结果顺手落库——资产中心显示时长只查库，不扫盘。
+    """
+    row = db.one("SELECT duration, width, height, fps FROM videos WHERE id = ?", (video_id,))
+    if row is None:
+        return None
+    if row["duration"] is not None and float(row["duration"]) > 0:
+        return float(row["duration"])          # 已有值就用库里的，绝不覆盖
+    path = Path(video)
+    if not path.is_file():
+        return None
+    try:
+        from ..video_io import probe_video  # noqa: PLC0415 - cv2/av 很重，用到才导
+
+        info = probe_video(path)
+    except Exception as exc:  # noqa: BLE001 - 探不到就保持空，绝不写假数据
+        logger.warning("探不到 %s 的时长（%s），duration 保持空", path.name, exc)
+        return None
+    duration = float(info.duration or 0.0)
+    if duration <= 0:
+        return None
+    fields: dict[str, Any] = {"duration": duration}
+    for key, value in (("width", info.width), ("height", info.height), ("fps", info.fps)):
+        if row[key] is None and value:
+            fields[key] = value
+    sets = ", ".join(f"{key} = ?" for key in fields)
+    with db.tx() as conn:
+        conn.execute(f"UPDATE videos SET {sets}, updated_at = ? WHERE id = ?",
+                     (*fields.values(), now(), video_id))
+    return duration
+
+
+def fill_missing_durations(db: Database, *, limit: int | None = None) -> dict[str, int]:
+    """给老数据补时长的**显式**入口（`run.py db --fill-duration`）。
+
+    只碰 duration 为空、文件还在盘上的视频。GUI 不会自动调这个，免得一开界面
+    就把整个视频库探一遍。
+    """
+    rows = db.all("SELECT id, file_path FROM videos WHERE duration IS NULL "
+                  "AND exists_on_disk = 1 ORDER BY id", ())
+    if limit:
+        rows = rows[:limit]
+    stats = {"checked": 0, "filled": 0, "failed": 0}
+    for row in rows:
+        stats["checked"] += 1
+        if ensure_duration(db, int(row["id"]), str(row["file_path"])) is None:
+            stats["failed"] += 1
+        else:
+            stats["filled"] += 1
+    return stats
+
+
 def upsert_missing_video(db: Database, path: str | Path, *, cache_slug: str | None = None,
                          info: dict[str, Any] | None = None) -> int:
     """登记一个「盘上已经没有」的视频（导入旧缓存时常见：缓存还在，原片被删了）。
