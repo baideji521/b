@@ -2210,11 +2210,16 @@ class MainWindow(QMainWindow):
     def _resume_auto_queue(self) -> None:
         """开程序时把上次没跑完的任务捞回来接着跑（强关、崩溃都算）。
 
-        processing/uploading/waiting 且心跳超时的退回 pending，然后照常一条条领。
+        先跟磁盘对一次账，再捞任务：上次可能是"成品已经渲染出来了，但还没来得及
+        登记进 artifacts"就被强关的，不对账就会把那条任务当没干完，白剪第二遍。
+        对完账 processing/uploading/waiting 且心跳超时的退回 pending，然后照常一条条领。
         """
         db = self._db()
         if db is None:
             return
+        # 磁盘扫描 + reconcile：已经落地的 final_video / ai_script / merged_txt 先进库，
+        # 后面 _auto_step 的跳过判断（全部查库）才看得见它们
+        self._sync_disk()
         timeout = float(self.cfg.runtime.get("ai_task_timeout_minutes", 30) or 30)
         try:
             recovered = db_repo.recover_stale_ai_tasks(db, timeout)
