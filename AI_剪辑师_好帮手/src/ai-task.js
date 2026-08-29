@@ -176,6 +176,9 @@ const SITES = {
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
     // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
     dropAll: true,
+    // 它有正规发送键，绝不许走「输入框旁边最后一个图标键」那条兜底：
+    // 旁边就是建议卡片和图片生成那排工具，误点一下就变成它替你出题。
+    nearFallback: false,
     upload: "添加照片和文件|上传文件|添加文件|attach|upload|add files",
     // 云端硬盘那条会弹 Google Drive 选择器，纯挡路；发送/录音也别碰
     uploadSkip: "云端|硬盘|drive|发送|send|停止|stop|麦克风|mic|语音|录音|图片生成|制作",
@@ -193,6 +196,8 @@ const SITES = {
     spinners: "[role='progressbar'], [class*='loading'], [class*='uploading']",
     // DeepSeek 输入框那几层和 body 各挂了一个 drop 监听，砸多了会被收好几遍
     dropAll: false,
+    // DeepSeek 的发送键没有任何文字标签，只能靠近旁图标键兜底
+    nearFallback: true,
     upload: "上传附件|添加附件|上传文件|attach|upload",
     uploadSkip: "深度思考|联网搜索|发送|send|停止|stop|语音|录音|新对话|new chat",
   },
@@ -448,7 +453,7 @@ function pageUploadSettled(spinnerSelector) {
  * 按钮是 Angular 按输入内容动态启用的，第一次拿到可能还是 disabled，所以要重试几次。
  * 返回值带上诊断字段，日志里能看出到底卡在哪一步。
  */
-async function pageSendMessage(selector, text, sendSelectors) {
+async function pageSendMessage(selector, text, sendSelectors, allowNear) {
   const editor = document.querySelector(selector);
   if (!editor) return { ok: false, error: "输入框不见了" };
   const nap = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -519,9 +524,11 @@ async function pageSendMessage(selector, text, sendSelectors) {
       if (hit) return hit;
     }
     // 最后兜底：从输入框往上找几层，取容器里最后一个「只有图标的」按钮——发送键就是这种。
-    // 必须挑得很死：Gemini 输入框旁边还蹲着图片生成、视频、Canvas、深度研究这些工具键，
-    // 以及首页那几张建议卡片。误点一下就变成它替你出题（问出来一堆「可爱宠物照片建议」），
-    // 附件白挂、回答里当然没有 JSON。
+    // 只给确实需要它的站点开（DeepSeek 的发送键没有任何文字标签）。Gemini 有正规的
+    // 发送按钮，绝不能走这条：它输入框旁边就是建议卡片和图片生成那排工具键，
+    // 误点一下就变成它替你出题（问出来「可爱宠物照片建议」「大熊猫吃什么」这种），
+    // 挂上去的 txt 全白费，回答里当然没有 JSON。
+    if (!allowNear) return null;
     const trap = /停止|stop|取消|cancel|录音|mic|语音|附件|attach|upload|图片|image|图像|生成|generate|创建|create|视频|video|canvas|研究|research|学习|guided|建议|试试|suggest|分享|share|复制|copy|设置|setting|菜单|menu|登录|account/i;
     for (let node = editor, up = 0; node && up < 5; node = node.parentElement, up += 1) {
       const near = Array.from(node.querySelectorAll("button, [role='button']")).filter((b) => {
@@ -1103,7 +1110,7 @@ async function handleAiTask(task) {
     const baselineText = String(before?.text || "");
     const baselineJson = String(before?.json || "");
     const sent = await runInTab(tabId, pageSendMessage,
-                               [editor.selector, message, site.sends]);
+                               [editor.selector, message, site.sends, Boolean(site.nearFallback)]);
 
 
     if (!sent?.ok) {
@@ -1150,7 +1157,8 @@ async function handleAiTask(task) {
             && (Number(snapshot?.editorLen || 0) > 0 || !snapshot?.anchored)) {
           resent = true;
           const again = await runInTab(tabId, pageSendMessage,
-                                     [editor.selector, message, site.sends]).catch(() => null);
+                                     [editor.selector, message, site.sends,
+                                      Boolean(site.nearFallback)]).catch(() => null);
           log("页面上没有我们的提问，补发一次", again?.sent || "失败", diag);
         }
         if (polls % 10 === 0) log("还没等到新回答", diag);
