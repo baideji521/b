@@ -241,7 +241,41 @@ def entries(cfg: Any) -> list[dict[str, Any]]:
     return _entries(cfg)
 
 
+PREVIEW_AUDIO = "preview_audio.wav"
+
+
+def drop_preview_audio(cfg: Any, video: str | Path | None = None) -> dict[str, Any]:
+    """只删预览音轨（preview_audio.wav），json 那些分析结果一个不碰。
+
+    音轨是从视频里解出来的，一个视频能占几十兆，删了下次预览重新解一遍就有；
+    而 json 是分析结果本体，删了得重跑，所以这里只挑 wav。
+    video 给了就只删那一个视频的，不给就清整个 cache/videos。
+    """
+    root = videos_root(cache_dir(cfg))
+    if video is not None:
+        targets = [video_dir_in(cache_dir(cfg), video, create=False) / PREVIEW_AUDIO]
+    else:
+        targets = sorted(root.glob(f"*/{PREVIEW_AUDIO}")) if root.is_dir() else []
+    removed = 0
+    freed = 0
+    for path in targets:
+        if not _inside(path, root) or not path.is_file():  # 护栏：只能动缓存里的
+            continue
+        size = path.stat().st_size
+        try:
+            path.unlink()
+        except OSError as exc:
+            logger.warning("音轨删不掉 %s：%s", path, exc)
+            continue
+        removed += 1
+        freed += size
+    if removed:
+        logger.info("删掉 %d 个预览音轨，腾出 %s", removed, human_size(freed))
+    return {"removed": removed, "freed": freed, "freed_text": human_size(freed)}
+
+
 def remove(cfg: Any, paths: list[str | Path]) -> dict[str, Any]:
+
     """按路径删指定的几份缓存（界面上勾选的那些）。
 
     和 cleanup() 共用同一条护栏：路径必须真的在 cache/videos 或 logs 里面，

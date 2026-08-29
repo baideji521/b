@@ -2473,6 +2473,8 @@ class MainWindow(QMainWindow):
             else:
                 self.append_log("重新加载结果")
                 self.load_results()
+                if label == "分析":
+                    self._drop_preview_audio()
                 if self._auto_video is not None and label == "分析":
                     # 自动剪辑那一串：分析完就生成 <视频名>.txt 接着发 AI
                     self._auto_after_analyze()
@@ -2491,6 +2493,16 @@ class MainWindow(QMainWindow):
 
 
     # ------------------------------------------------------------------ 声音
+    def _drop_preview_audio(self) -> None:
+        """开了「分析完就删预览音轨」就把这个视频的 wav 删掉，cache 里只剩 json。"""
+        if not self.cfg.runtime.get("drop_preview_audio", False) or self.video_path is None:
+            return
+        from .. import cache as cache_mod  # noqa: PLC0415
+
+        result = cache_mod.drop_preview_audio(self.cfg, self.video_path)
+        if result["removed"]:
+            self.append_log(f"[缓存] 删掉预览音轨，腾出 {result['freed_text']}")
+
     def prepare_audio(self) -> None:
         if self.video_path is None:
             return

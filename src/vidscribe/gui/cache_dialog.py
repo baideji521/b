@@ -16,6 +16,7 @@ from typing import Any
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QAbstractItemView,
+    QCheckBox,
     QDialog,
     QDoubleSpinBox,
     QHBoxLayout,
@@ -68,12 +69,21 @@ class CacheDialog(QDialog):
         self.spin_days.setSuffix(" 天没动")
         self.spin_days.setToolTip("配合右边「按天数勾选」用；改这里不会自动删任何东西")
 
+        self.chk_drop_wav = QCheckBox("分析完就删预览音轨")
+        self.chk_drop_wav.setChecked(bool(cfg.runtime.get("drop_preview_audio", False)))
+        self.chk_drop_wav.setToolTip("开了以后 cache 里只留 json：分析一跑完就把这个视频的 "
+                                    "preview_audio.wav 删掉。代价是下次看波形/听预览要重新解音轨")
+        self.chk_drop_wav.toggled.connect(self.on_drop_wav_toggled)
+
         btn_refresh = QPushButton("刷新")
         btn_refresh.clicked.connect(self.reload)
         btn_pick_old = QPushButton("按天数勾选")
         btn_pick_old.clicked.connect(self.select_stale)
         btn_pick_logs = QPushButton("勾选日志")
         btn_pick_logs.clicked.connect(self.select_logs)
+        btn_drop_wav = QPushButton("只删音轨")
+        btn_drop_wav.setToolTip("把所有视频的 preview_audio.wav 删掉，分析结果（json）全留着")
+        btn_drop_wav.clicked.connect(self.drop_audio)
         btn_delete = QPushButton("删除勾选")
         btn_delete.setProperty("role", "primary")
         btn_delete.clicked.connect(self.delete_checked)
@@ -89,14 +99,17 @@ class CacheDialog(QDialog):
         picks.addWidget(btn_pick_old)
         picks.addWidget(btn_pick_logs)
         picks.addStretch(1)
+        picks.addWidget(self.chk_drop_wav)
         picks.addWidget(btn_refresh)
 
         actions = QHBoxLayout()
         actions.addWidget(btn_delete)
+        actions.addWidget(btn_drop_wav)
         actions.addWidget(btn_all)
         actions.addStretch(1)
         actions.addWidget(btn_open)
         actions.addWidget(btn_close)
+
 
         layout = QVBoxLayout(self)
         layout.addWidget(self.lbl_summary)
@@ -195,6 +208,33 @@ class CacheDialog(QDialog):
             QMessageBox.warning(self, "缓存管理",
                                 "有几项没删掉，可能正被占用（比如预览音轨还在播）：\n"
                                 + "\n".join(result["failed"][:8]))
+
+    def on_drop_wav_toggled(self, checked: bool) -> None:
+        """开关写回 config.json，下次分析完就自动删这个视频的预览音轨。"""
+        self.cfg.runtime["drop_preview_audio"] = bool(checked)
+        self.cfg.save_patch({"runtime": {"drop_preview_audio": bool(checked)}})
+        if self._log:
+            self._log("[缓存] 分析完自动删预览音轨：" + ("开" if checked else "关"))
+
+    def drop_audio(self) -> None:
+        """把所有视频的 preview_audio.wav 删掉，json 全留着。"""
+        wavs = sorted(cache_mod.videos_root(cache_mod.cache_dir(self.cfg))
+                      .glob(f"*/{cache_mod.PREVIEW_AUDIO}"))
+        if not wavs:
+            QMessageBox.information(self, "缓存管理", "缓存里没有预览音轨")
+            return
+        size = cache_mod.human_size(sum(p.stat().st_size for p in wavs))
+        ok = QMessageBox.question(
+            self, "缓存管理",
+            f"要删掉 {len(wavs)} 个预览音轨吗？\n共 {size}\n\n"
+            f"分析结果（json）一个不动，只是下次看波形/听预览要重新解一遍音轨。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ok != QMessageBox.Yes:
+            return
+        result = cache_mod.drop_preview_audio(self.cfg)
+        if self._log:
+            self._log(f"[缓存] 删掉 {result['removed']} 个预览音轨，腾出 {result['freed_text']}")
+        self.reload()
 
     def delete_checked(self) -> None:
         items = self.checked_items()

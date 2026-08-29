@@ -210,6 +210,10 @@ DEFAULTS: dict[str, Any] = {
         # 缓存（cache/ 断点与预览音频 + logs/ 日志）：开软件只扫一眼报现状，绝不自动删。
         # 这个天数只用来在清单里标"多久没动过"，清理都从「高级选项 -> 缓存管理」手动来
         "cache_max_age_days": 3,
+        # 分析完就把这个视频的 preview_audio.wav 删掉：cache 里只剩 json，省几百兆。
+        # 代价是下次要看波形/听预览得重新解一遍音轨（几秒到几十秒）
+        "drop_preview_audio": False,
+
     },
     "mirrors": {
         # 优先国内镜像，只加速下载，仓库仍是官方仓库

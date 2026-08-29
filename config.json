@@ -190,7 +190,7 @@
     "port": 5998,
     "port_fallbacks": 0,
     "mode": "extension",
-    "provider": "deepseek",
+    "provider": "gemini",
     "api_key": "",
     "api_key_env": "GEMINI_API_KEY",
     "api_model": "gemini-2.5-flash",
@@ -205,12 +205,10 @@
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
-    "ai_input_dir": "",
-    "ai_output_dir": "",
+    "ai_input_dir": "F:/视频_工作目录/清洗out/挑战巧克力",
+    "ai_output_dir": "F:/视频_工作目录/成片素材/巧克力挑战素材",
     "ai_job": "full",
-
     "upload_mode": "auto",
-
     "focus_browser": true,
     "side_window": true,
     "keep_merged_file": false,
@@ -221,7 +219,8 @@
     "max_auto_retries": 3,
     "keep_models_loaded": true,
     "unload_speech_before_visual": true,
-    "cache_max_age_days": 3
+    "cache_max_age_days": 3,
+    "drop_preview_audio": true
   },
   "mirrors": {
     "pypi": [
