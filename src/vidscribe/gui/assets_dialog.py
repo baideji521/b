@@ -1055,23 +1055,17 @@ class VideoAssetsPage(QWidget):
         stats.setBold(True)
         self.lbl_meta.setFont(stats)
 
-        self.btn_source = QPushButton("查看原视频")
-        self.btn_source.setToolTip("在文件管理器里定位这个视频文件")
-        self.btn_source.clicked.connect(self.on_reveal_video)
+        # 高频动作只留两个：主按钮「直接剪辑」+ 普通按钮「查看」。
+        # 「查看原视频 / 打开成品」这类定位动作一律进「更多 ▾」，版面上不再抢注意力。
         self.btn_render = _primary(QPushButton("直接剪辑"))   # 唯一主动作，唯一加粗
         self.btn_render.setToolTip("用选中的这份高光 JSON 出成品：选个 PRM 就开剪，一次 AI 都不调")
         self.btn_render.clicked.connect(self.on_render)
-        self.btn_open = QPushButton("打开成品")
-        self.btn_open.setToolTip("在文件管理器里定位选中的成品")
-        self.btn_open.clicked.connect(self.on_reveal)
         self.btn_view = QPushButton("查看")
         self.btn_view.setToolTip("看选中 JSON 的每一段区间（右边直接显示，不弹窗）")
         self.btn_view.clicked.connect(self.on_view)
 
         quick = QHBoxLayout()
-        quick.addWidget(self.btn_source)
         quick.addWidget(self.btn_render)
-        quick.addWidget(self.btn_open)
         quick.addStretch(1)
 
 
@@ -1110,7 +1104,8 @@ class VideoAssetsPage(QWidget):
         more = QHBoxLayout()
         more.addWidget(self.btn_view)
         self.btn_more = QPushButton("更多 ▾")
-        self.btn_more.setToolTip("低频动作都在这里：编辑 / 复制 / 设为当前 / 导入 / 删除 / 恢复 / 原文")
+        self.btn_more.setToolTip("低频动作都在这里：编辑 / 复制 / 设为当前 / 导入 / 删除 / 恢复 / "
+                                 "原文 / 定位文件")
         menu = QMenu(self.btn_more)
         menu.addAction("编辑（保存会新建一份）", self.on_edit_json)
         menu.addAction("复制这份 JSON", self.on_copy)
@@ -1119,6 +1114,9 @@ class VideoAssetsPage(QWidget):
         menu.addAction("导入现成 JSON…", self.on_import)
         menu.addAction("删除（软删）", self.on_delete)
         menu.addAction("恢复已删除", self.on_restore)
+        menu.addSeparator()
+        menu.addAction("查看原视频", self.on_reveal_video)
+        menu.addAction("打开成品", self.on_reveal)
         menu.addSeparator()
         self.act_raw = menu.addAction("显示 JSON 原文", self.on_toggle_raw)
         self.act_raw.setCheckable(True)

@@ -394,7 +394,7 @@ def test_only_one_primary_button(tmp_path: Path) -> None:
     """高频动作只剩「直接剪辑（唯一加粗）」和「查看」，其余进「更多 ▾」。"""
     _cfg, _db, _made, _window, view = center(tmp_path)
     texts = [b.text() for b in view.videos.findChildren(QPushButton) if b.isVisibleTo(view)]
-    assert set(texts) == {"查看原视频", "直接剪辑", "打开成品", "查看", "更多 ▾"}, \
+    assert set(texts) == {"直接剪辑", "查看", "更多 ▾"}, \
         f"视频页按钮没收干净：{texts}"
     bold = [b.text() for b in view.videos.findChildren(QPushButton) if b.font().bold()]
     assert bold == ["直接剪辑"], f"主动作必须只有一个加粗按钮：{bold}"
@@ -402,6 +402,7 @@ def test_only_one_primary_button(tmp_path: Path) -> None:
     actions = [a.text() for a in menu.actions() if a.text()]
     for needed in ("编辑（保存会新建一份）", "复制这份 JSON", "设为当前 JSON",
                    "导入现成 JSON…", "删除（软删）", "恢复已删除",
+                   "查看原视频", "打开成品",
                    "显示 JSON 原文", "复制 JSON 原文", "复制血缘"):
         assert needed in actions, f"「更多」里少了 {needed}：{actions}"
 
