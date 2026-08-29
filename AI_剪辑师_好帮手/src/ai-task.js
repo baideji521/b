@@ -35,7 +35,7 @@ const READY_TIMEOUT_MS = 60000;
 // 拖进去之后等这一个出卡片的时间；手动也就一秒多，超了就换下一种方式
 const ATTACH_VERIFY_MS = 5000;
 // 都挂上之后再确认一下没在转圈，很短；到点就直接按回车
-const SETTLE_TIMEOUT_MS = 30000;
+const SETTLE_TIMEOUT_MS = 10000;
 // 「+」只是个软信号：等一小会儿认不出就往下走，别把整条流程卡在这儿
 const PLUS_READY_MS = 6000;
 // 挂完文件先缓一下再看发送键：页面要过一拍才把卡片画出来、发送键才从灰变亮
@@ -1495,9 +1495,11 @@ async function handleAiTask(task) {
         break;
       }
       if (Date.now() > settleDeadline) {
-        log("附件一直没加载完", JSON.stringify(settle || {}));
-        return finish({ status: "failed",
-                        error: `附件一直没加载完（${JSON.stringify(settle || {})}），没敢发送` });
+        // 别在这儿判死刑：Gemini 页面上常年挂着看不见的进度条，发送键在没打字之前
+        // 也可能是灰的——昨天能跑通的那条路就是「等一会儿照样往下走」。真正的门槛
+        // 放在后面：提示语必须真的在输入框里、发送键必须是亮的，那两处才拦。
+        log("附件没等到「安静」，照样往下走", JSON.stringify(settle || {}));
+        break;
       }
       if (await cancelled("sending", "附件还在加载")) return;
       await sleep(500);
@@ -1513,10 +1515,12 @@ async function handleAiTask(task) {
             || Number(check?.chips || 0) > chipsBase) onPage += 1;
       }
       if (!onPage) {
-        log("发送前复查：附件不在页面上了");
-        return finish({ status: "failed", error: "附件已经不在输入框里了，没敢发送" });
+        // 只是提个醒：Gemini 的卡片会把文件名截断，按名字数不一定数得出来，
+        // 拿这个当失败条件会误杀。真门槛是后面的「提示语在不在」和「发送键亮不亮」。
+        log("发送前复查：按文件名没数出来（卡片名会截断），继续");
+      } else {
+        log("发送前复查：附件还在", `命中 ${onPage}/${probe.length}`);
       }
-      log("发送前复查：附件还在", `命中 ${onPage}/${probe.length}`);
     }
 
 
