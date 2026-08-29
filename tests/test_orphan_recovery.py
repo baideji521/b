@@ -117,6 +117,12 @@ class Win:
     _auto_done_file = mw.MainWindow._auto_done_file
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
+    _register_final_video = mw.MainWindow._register_final_video
+    _link_final_video = mw.MainWindow._link_final_video       # 成品挂方案 / PRM
+    _asset_json_for_render = mw.MainWindow._asset_json_for_render
+    highlight_source = mw.MainWindow.highlight_source
+    selected_prm = mw.MainWindow.selected_prm
+    _register_highlight_asset = mw.MainWindow._register_highlight_asset
     _settle_auto_task = mw.MainWindow._settle_auto_task
     _mark_auto_rendering = mw.MainWindow._mark_auto_rendering   # 真写库：复用 JSON 就进 processing
 
@@ -135,6 +141,8 @@ class Win:
         self._auto_total = 0
         self._last_highlight_json = ""
         self._last_prompt = {}
+        self._last_prm_id = None
+        self._last_asset_id = None
         self.speech = []
         self.timeline = []
         self.calls = {k: 0 for k in ("send_file_to_ai", "dispatch_ai", "run_highlight",
@@ -515,6 +523,66 @@ def test_overlay_evaluation_lands_in_clips(tmp_path: Path) -> None:
     db.close()
 
 
+class _FakeClipWorker:
+    """渲染线程的替身：只需要交出实际剪的区间。"""
+
+    def __init__(self, cut_ranges):
+        self.cut_ranges = list(cut_ranges)
+
+
+def test_rendered_clip_keeps_the_real_cut_range(tmp_path: Path) -> None:
+    """引擎把边界挪过之后，clips 里必须是实际剪的区间，不是 AI 的原值。"""
+    cfg, db = make_project(tmp_path)
+    video = fake_video(cfg, "cut.mp4")
+    payload = {"video": video.name,
+               "clip": {"start": 32.58, "end": 45.30, "duration": 12.72, "score": 93,
+                        "type": "搞笑", "reason": "赌注揭晓",
+                        "overlays": {"comment": {"time": 40.0, "text": "no way", "kind": "comment"},
+                                     "evaluation": "节奏明快"}}}
+    win = Win(cfg, db)
+    win._auto_video = video
+    win._save_ai_result(payload, json.dumps(payload, ensure_ascii=False))
+
+    product = cfg.path("output_dir") / "cut_高光时刻.mp4"
+    product.write_bytes(b"z" * 4096)
+    win.clip_worker = _FakeClipWorker([(31.84, 45.30)])   # 引擎修正后的真实区间
+    win._register_final_video(str(product))
+
+    vid = db_repo.find_video(db, video)["id"]
+    clip = db_repo.get_clips(db, vid)[0]
+    assert clip["status"] == "rendered" and clip["output_path"] == str(product)
+    assert float(clip["start_time"]) == 31.84, "起点要按实际剪的回写"
+    assert float(clip["end_time"]) == 45.30
+    assert float(clip["duration"]) == 13.46, "时长跟着一起算，不留 AI 的 12.72"
+    assert clip["reason"] == "赌注揭晓" and clip["evaluation"] == "节奏明快", "文案不许被改"
+    db.close()
+
+
+def test_mismatched_segment_count_leaves_times_alone(tmp_path: Path) -> None:
+    """一条 clip 却剪出两段（或反过来）：只标状态，绝不瞎配对时间。"""
+    cfg, db = make_project(tmp_path)
+    video = fake_video(cfg, "mismatch.mp4")
+    payload = {"video": video.name,
+               "clip": {"start": 10.0, "end": 18.0, "duration": 8.0,
+                        "overlays": {"comment": {"time": 12.0, "text": "hi", "kind": "comment"}}}}
+    win = Win(cfg, db)
+    win._auto_video = video
+    win._save_ai_result(payload, "")
+
+    product = cfg.path("output_dir") / "mismatch_高光时刻.mp4"
+    product.write_bytes(b"z" * 2048)
+    win.clip_worker = _FakeClipWorker([(9.5, 17.0), (20.0, 25.0)])
+    win._register_final_video(str(product))
+
+    vid = db_repo.find_video(db, video)["id"]
+    clip = db_repo.get_clips(db, vid)[0]
+    assert clip["status"] == "rendered", "状态还是要标"
+    assert float(clip["start_time"]) == 10.0 and float(clip["end_time"]) == 18.0, \
+        "对不上就别动时间"
+    assert any("对不上" in line for line in win.logs), win.logs
+    db.close()
+
+
 # ------------------------------------------------------------------ 直接跑
 TESTS = (
     test_orphan_with_ai_result_renders_without_ai,
@@ -533,6 +601,8 @@ TESTS = (
     test_close_releases_current_task,
     test_error_reply_is_not_marked_validated,
     test_overlay_evaluation_lands_in_clips,
+    test_rendered_clip_keeps_the_real_cut_range,
+    test_mismatched_segment_count_leaves_times_alone,
 )
 
 

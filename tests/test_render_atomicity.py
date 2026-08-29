@@ -172,6 +172,9 @@ class Win:
     _auto_product_ready = mw.MainWindow._auto_product_ready
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
+    _asset_json_for_render = mw.MainWindow._asset_json_for_render   # 库里有方案就不问 AI
+    highlight_source = mw.MainWindow.highlight_source
+    selected_prm = mw.MainWindow.selected_prm
     _mark_auto_rendering = mw.MainWindow._mark_auto_rendering   # 真写库：复用 JSON 就进 processing
 
     def __init__(self, cfg, db):
@@ -189,6 +192,8 @@ class Win:
         self._auto_total = 0
         self._last_highlight_json = ""
         self._last_prompt = {}
+        self._last_prm_id = None
+        self._last_asset_id = None
         self.speech = []
         self.timeline = []
         self.settled: list[str] = []
