@@ -180,6 +180,8 @@ const SITES = {
     // 旁边就是建议卡片和图片生成那排工具，误点一下就变成它替你出题。
     nearFallback: false,
     upload: "添加照片和文件|上传文件|添加文件|attach|upload|add files",
+    // 每轮先点它开个干净对话，否则 /app 会自动接着上次的聊天
+    newChat: "发起新对话|新对话|新聊天|new chat|new-chat",
     // 云端硬盘那条会弹 Google Drive 选择器，纯挡路；发送/录音也别碰
     uploadSkip: "云端|硬盘|drive|发送|send|停止|stop|麦克风|mic|语音|录音|图片生成|制作",
   },
@@ -199,6 +201,7 @@ const SITES = {
     // DeepSeek 的发送键没有任何文字标签，只能靠近旁图标键兜底
     nearFallback: true,
     upload: "上传附件|添加附件|上传文件|attach|upload",
+    newChat: "开启新对话|新对话|新聊天|new chat",
     uploadSkip: "深度思考|联网搜索|发送|send|停止|stop|语音|录音|新对话|new chat",
   },
 };
@@ -428,6 +431,28 @@ function pageCountAttachment(name) {
 }
 
 
+
+
+/**
+ * 开一个干净的新对话。
+ *
+ * gemini.google.com/app 打开时会自动接着上一个对话，那段旧回答边渲染边变长，
+ * 读回答时看着跟正在写没两样（实测把一整段 ChatTTS 的旧问答当成结果读回来过）。
+ * 只认带标签的「新对话」键——绝不靠位置猜，免得又点到旁边的工具键。
+ */
+function pageStartNewChat(labels) {
+  const rx = new RegExp(labels || "新对话|新聊天|new chat", "i");
+  for (const el of document.querySelectorAll("button, [role='button'], a")) {
+    const own = (el.innerText || el.textContent || "").trim();
+    const label = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("mattooltip") || ""} `
+      + `${el.getAttribute("data-test-id") || ""} ${own.slice(0, 20)}`;
+    if (!rx.test(label)) continue;
+    if (el.disabled || el.getAttribute("aria-disabled") === "true") continue;
+    el.click();
+    return { ok: true, clicked: label.trim().slice(0, 40) };
+  }
+  return { ok: false };
+}
 
 
 /** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
@@ -915,6 +940,18 @@ async function handleAiTask(task) {
                       error: `${site.label} 页面找不到输入框，可能没登录或页面结构变了` });
     }
 
+    // 每轮都先开个干净对话：复用的标签页里留着上次的聊天，读回答时很容易把旧内容
+    // 当成这次的结果。点完要等输入框重新长出来。
+    const opened = await runInTab(tabId, pageStartNewChat, [site.newChat || ""]).catch(() => null);
+    if (opened?.ok) {
+      log("开了个新对话", opened.clicked || "");
+      await sleep(1200);
+      editor = await runInTab(tabId, pageProbeEditor, [site.editors]).catch(() => null);
+      if (!editor?.ok) {
+        return finish({ status: "failed", error: `${site.label} 开新对话后找不到输入框` });
+      }
+    }
+
     // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
     // 两个文件是一起拖进去的，所以只要认出 prm_en 那个就说明都进去了，
     // 第二个名字太长会被截断成「2026082619....」，本来就认不准，不拿它当门槛。
@@ -1144,12 +1181,16 @@ async function handleAiTask(task) {
         + `选择器=${snapshot?.used || "无"} 块=${snapshot?.hint || "无"} `
         + `文字=${shot.length} JSON=${shotJson.length} 整页=${snapshot?.bodyLen ?? "?"} `
         + `输入框=${snapshot?.editorLen ?? "?"}`;
-      // 新回答算不算冒出来：先要在页面上找得到我们那句提问（锚点），否则读到的多半是
-      // 复用标签页里的旧对话；有锚点之后，三个信号任一成立即可——回答块变多、
-      // 最后那块文字变了、锚点之后扫出来的 JSON 跟发之前不一样。
-      const fresh = Number(snapshot?.blocks || 0) > baselineBlocks
-        || (shot && shot !== baselineText && !shot.includes(message.slice(0, 20)))
-        || (shotJson && shotJson !== baselineJson);
+      // 新回答算不算冒出来。关键前提：页面上得找得到我们那句提问（锚点）。
+      // 没锚点时「最后那块文字变了」这个信号完全不可信——打开 gemini.google.com/app
+      // 会自动接着上一个对话，那段旧回答边渲染边变长，看起来跟正在写一模一样
+      // （实测被当成回答读回来过一整段 ChatTTS 的旧问答）。所以没锚点时只认一件事：
+      // 整页扫出来的 JSON 变了——我们要的就是 JSON，这个不会张冠李戴。
+      const anchored = Boolean(snapshot?.anchored);
+      const jsonChanged = Boolean(shotJson) && shotJson !== baselineJson;
+      const grew = Number(snapshot?.blocks || 0) > baselineBlocks
+        || (shot && shot !== baselineText && !shot.includes(message.slice(0, 20)));
+      const fresh = jsonChanged || (anchored && grew);
       if (!fresh) {
         // 补发的两个理由：那句话还留在输入框里（压根没发出去），
         // 或者页面上找不到我们的提问气泡（发出去了但没落到这个对话里）
@@ -1176,7 +1217,7 @@ async function handleAiTask(task) {
         stableSince = 0;
         text = current;
       }
-      if (await cancelled("waiting_answer", `已收到 ${current.length} 字`)) return;
+      if (await cancelled("waiting_answer", `已收到 ${current.length} 字｜${diag}`)) return;
     }
 
     if (!text) {
