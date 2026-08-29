@@ -480,6 +480,8 @@ class MainWindow(QMainWindow):
         # 状态都从数据库读，句柄按需打开；打不开就退回「什么都没有」，界面照样能用
         self._db_handle = None
         self._db_failed = False
+        # 最近一次真正发出去的提示词指纹（hash/path/size），只做追溯记录，不参与上传
+        self._last_prompt: dict[str, Any] | None = None
         # AI 面板（第二主界面）：非模态，只开一个
         self.ai_panel = None
 
@@ -1825,8 +1827,31 @@ class MainWindow(QMainWindow):
         self.dispatch_ai(prompt_path, text_path, 0)
         return True
 
+    def _note_prompt_use(self, prompt_path: Path) -> None:
+        """记下这一次真正要发出去的提示词是哪一版（只写库，不动上传内容）。
+
+        必须在真要发的这一刻算：一批任务可能排很久，中间 prm_en.txt 被改过，
+        入队时算的指纹就不是实际发出去的那一版了。
+        记录失败绝不能拦住发送——AI 剪辑照跑，只是这条少一份审计信息。
+        """
+        self._last_prompt = None
+        try:
+            info = db_repo.prompt_fingerprint(prompt_path)
+        except OSError as exc:
+            self.append_log(f"[AI 对接] 提示词指纹算不出来（不影响发送）：{exc}")
+            return
+        self._last_prompt = info
+        db = self._db()
+        if db is None or self._auto_task_id is None:
+            return
+        try:
+            db_repo.note_task_prompt(db, self._auto_task_id, prompt_path)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[数据库] 任务 #{self._auto_task_id} 的提示词指纹写不进去：{exc}")
+
     def dispatch_ai(self, prompt_path: Path, merged_path: Path, count: int) -> None:
         """两个附件都齐了，按 bridge.mode 决定走接口还是走扩展。"""
+        self._note_prompt_use(prompt_path)   # 只记账：发什么、怎么发都没变
         cfg = self.cfg.bridge
         if str(cfg.get("mode") or "api") == "api":
             self.send_via_api(prompt_path, merged_path, count)
@@ -2329,7 +2354,8 @@ class MainWindow(QMainWindow):
     def _save_ai_result(self, parsed: dict, raw_text: str = "") -> None:
         """AI 回的 JSON 进库，挂在当前这条任务下面（ai_results.task_id 指回 ai_tasks.id）。
 
-        手工单发（没有队列任务）时 task_id 是空的，结果照样留档，不会挂到别人身上。
+        手工单发（没有队列任务）时 task_id 是空的，结果照样留档，不会挂到别人身上；
+        提示词指纹这三列两条路都写，所以手工发的结果也能回答用的是哪一版提示词。
         """
         video = self._auto_video or self.video_path
         if video is None:
@@ -2340,11 +2366,14 @@ class MainWindow(QMainWindow):
         vid = self._db_video_id(video, create=True)
         if vid is None:
             return
+        prompt = self._last_prompt or {}
         try:
             clips = db_repo.clips_from_payload(parsed)
             result_id = db_repo.save_ai_result(
                 db, vid, task_id=self._auto_task_id, raw_response=raw_text or None,
-                json_data=parsed, candidate_count=len(clips) or None, validated=True)
+                json_data=parsed, candidate_count=len(clips) or None, validated=True,
+                prompt_hash=prompt.get("prompt_hash"), prompt_path=prompt.get("prompt_path"),
+                prompt_size=prompt.get("prompt_size"))
             for spec in clips:
                 db_repo.create_clip(db, vid, spec, ai_result_id=result_id)
         except Exception as exc:  # noqa: BLE001

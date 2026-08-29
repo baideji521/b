@@ -16,7 +16,7 @@ from typing import Any
 
 from ..logging_setup import get_logger
 from .db import Database
-from .fingerprint import config_hash, fingerprint
+from .fingerprint import config_hash, fingerprint, full_sha256
 from .schema import ANALYSIS_STATES, AUTO_TASK_TYPE, TASK_ACTIVE, TASK_OPEN, TASK_STATES
 
 logger = get_logger(__name__)
@@ -394,6 +394,33 @@ def get_speech_words(db: Database, analysis_id: int) -> list[sqlite3.Row]:
 
 
 # =================================================================== AI 任务
+def prompt_fingerprint(path: str | Path) -> dict[str, Any]:
+    """提示词文件的指纹：全文件 sha256（64 位）、绝对路径、字节数。
+
+    只读不写，内容不进库——库里存指纹就够回答「当时用的是哪一版」。
+    读不了文件抛 OSError，由调用方决定要不要吞。
+    """
+    target = Path(path)
+    return {"prompt_hash": full_sha256(target),
+            "prompt_path": str(target.resolve()),
+            "prompt_size": target.stat().st_size}
+
+
+def note_task_prompt(db: Database, task_id: int, path: str | Path) -> dict[str, Any]:
+    """记下这条任务**真正发出去的**那份提示词。返回写进去的三个值。
+
+    必须在 dispatch（真要上传/请求）那一刻调，不能在入队时调：
+    一批任务可能排两小时，中间提示词文件被改过，入队时算的指纹就是假的。
+    """
+    info = prompt_fingerprint(path)
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE ai_tasks SET prompt_hash = ?, prompt_path = ?, prompt_size = ?, "
+            "updated_at = ? WHERE id = ?",
+            (info["prompt_hash"], info["prompt_path"], info["prompt_size"], now(), task_id))
+    return info
+
+
 def create_ai_task(db: Database, video_id: int, *, mode: str = "full",
                    provider: str | None = None, model: str | None = None,
                    prompt_version: str | None = None,
@@ -702,17 +729,25 @@ def recover_stale_ai_tasks(db: Database, timeout_minutes: float = 30.0) -> int:
 def save_ai_result(db: Database, video_id: int, *, task_id: int | None = None,
                    raw_response: str | None = None, json_data: Any = None,
                    candidate_count: int | None = None, winner_score: float | None = None,
-                   validated: bool = False, validation_error: str | None = None) -> int:
-    """存 AI 结果。raw_response 一定要存原文，以后要追溯 AI 当时到底回了什么。"""
+                   validated: bool = False, validation_error: str | None = None,
+                   prompt_hash: str | None = None, prompt_path: str | None = None,
+                   prompt_size: int | None = None) -> int:
+    """存 AI 结果。raw_response 一定要存原文，以后要追溯 AI 当时到底回了什么。
+
+    prompt_* 三个是本次实际发出去的提示词指纹：自动任务从任务那儿带过来，
+    手工单发没有任务行，就直接记在这儿，两条路都能回答「这份 JSON 用的哪版提示词」。
+    """
     with db.tx() as conn:
         cur = conn.execute(
             """
             INSERT INTO ai_results(task_id, video_id, raw_response, json_data, candidate_count,
-                                   winner_score, validated, validation_error, created_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   winner_score, validated, validation_error, created_at,
+                                   prompt_hash, prompt_path, prompt_size)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (task_id, video_id, raw_response, _dumps(json_data), candidate_count,
-             winner_score, int(validated), validation_error, now()))
+             winner_score, int(validated), validation_error, now(),
+             prompt_hash, prompt_path, prompt_size))
         return int(cur.lastrowid)
 
 

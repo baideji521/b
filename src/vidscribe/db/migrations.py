@@ -46,6 +46,16 @@ _STEPS: dict[int, list[str]] = {
          WHERE status IN ('pending', 'uploading', 'waiting', 'processing')
         """,
     ],
+    # v3：记下每次真正发给 AI 的那份提示词文件的指纹（内容不进库）。
+    # 只加列、不动索引不动外键：老数据全留着，新列一律 NULL。
+    3: [
+        "ALTER TABLE ai_tasks ADD COLUMN prompt_hash TEXT",
+        "ALTER TABLE ai_tasks ADD COLUMN prompt_path TEXT",
+        "ALTER TABLE ai_tasks ADD COLUMN prompt_size INTEGER",
+        "ALTER TABLE ai_results ADD COLUMN prompt_hash TEXT",
+        "ALTER TABLE ai_results ADD COLUMN prompt_path TEXT",
+        "ALTER TABLE ai_results ADD COLUMN prompt_size INTEGER",
+    ],
 }
 
 

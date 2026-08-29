@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
 TASK_STATES = ("pending", "uploading", "waiting", "processing",
@@ -164,7 +164,12 @@ TABLES: tuple[str, ...] = (
         priority       INTEGER NOT NULL DEFAULT 100,
         max_attempts   INTEGER NOT NULL DEFAULT 1,
         worker_id      TEXT,
-        updated_at     TEXT
+        updated_at     TEXT,
+        -- 这次真正发给 AI 的那份提示词文件（内容不进库，只留指纹/路径/大小）：
+        -- 事后能回答「这条任务当时用的是哪一版 prm_en.txt」
+        prompt_hash    TEXT,
+        prompt_path    TEXT,
+        prompt_size    INTEGER
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_tasks_status ON ai_tasks(status, created_at)",
@@ -187,7 +192,11 @@ TABLES: tuple[str, ...] = (
         winner_score     REAL,
         validated        INTEGER NOT NULL DEFAULT 0,
         validation_error TEXT,
-        created_at       TEXT    NOT NULL
+        created_at       TEXT    NOT NULL,
+        -- 这份结果是拿哪一版提示词换回来的（手工单发没有任务行，就靠这三列追溯）
+        prompt_hash      TEXT,
+        prompt_path      TEXT,
+        prompt_size      INTEGER
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_results_video ON ai_results(video_id, created_at)",
