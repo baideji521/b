@@ -233,7 +233,7 @@ function pageProbeEditor(selectors) {
  * 把 txt 塞进页面，默认走「模仿手动拖进去」——页面里能手动拖，就用同一条路。
  * mode: drop（拖放，默认）/ paste（粘贴）/ input（塞 file 控件，兜底）。
  */
-function pageAttachFiles(payloads, mode, editorSelector, targetIndex) {
+async function pageAttachFiles(payloads, mode, editorSelector, targetIndex, plusLabels) {
   const transfer = new DataTransfer();
   for (const item of payloads) {
     const binary = atob(item.b64);
@@ -270,8 +270,13 @@ function pageAttachFiles(payloads, mode, editorSelector, targetIndex) {
     }
 
     const box = document.body || root;
-    const rect = box.getBoundingClientRect();
-    const point = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 };
+    // 落点：真人是把文件拖到输入框那一片松手的，坐标就取输入框中心；
+    // 拿页面正中当落点时，有的站点会按「不在拖放区里」处理
+    const aim = (editor && editor.getBoundingClientRect) ? editor : box;
+    const rect = aim.getBoundingClientRect();
+    const point = rect.width || rect.height
+      ? { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2 }
+      : { clientX: 0, clientY: 0 };
     let fired = 0;
     for (const target of chosen) {
       for (const type of ["dragenter", "dragover", "drop"]) {
@@ -307,27 +312,52 @@ function pageAttachFiles(payloads, mode, editorSelector, targetIndex) {
     }
   }
 
-  // input 兜底：连 shadow root 一起翻，Angular Material 常把控件藏在里面
-  const inputs = [];
-  const walk = (root) => {
-    if (!root?.querySelectorAll) return;
-    inputs.push(...root.querySelectorAll("input[type='file']"));
-    for (const el of root.querySelectorAll("*")) {
-      if (el.shadowRoot) walk(el.shadowRoot);
-    }
+  // input：这条才是「正常上传」——把文件塞进页面自己的 <input type=file>，
+  // 后面的流程跟你手点「+ → 上传文件」选出来的一模一样。控件常常要等「+」菜单
+  // 打开才渲染出来，所以找不到就先点一下「+」（只点 + 本身，绝不点菜单里的
+  // 「上传文件」，那会弹系统文件框，弹出来就没法关了）。
+  const findInputs = () => {
+    const found = [];
+    const walk = (root) => {
+      if (!root?.querySelectorAll) return;
+      found.push(...root.querySelectorAll("input[type='file']"));
+      for (const el of root.querySelectorAll("*")) {
+        if (el.shadowRoot) walk(el.shadowRoot);
+      }
+    };
+    walk(document);
+    return found;
   };
-  walk(document);
+  let inputs = findInputs();
+  let plus = "";
+  if (!inputs.length) {
+    const want = new RegExp(plusLabels || "添加照片和文件|添加文件|上传|attach|upload", "i");
+    const avoid = /云端|硬盘|drive|发送|send|停止|stop|录音|mic/i;
+    for (const node of document.querySelectorAll("button, [role='button']")) {
+      const label = `${node.getAttribute("aria-label") || ""} `
+        + `${node.getAttribute("mattooltip") || ""}`;
+      if (!want.test(label) || avoid.test(label) || node.disabled) continue;
+      try {
+        node.click();
+        plus = label.trim().replace(/\s+/g, " ").slice(0, 24);
+      } catch {}
+      break;
+    }
+    await new Promise((done) => setTimeout(done, 600));
+    inputs = findInputs();
+  }
   // 优先挑没限制 accept 或明确收 text 的那个
   const input =
     inputs.find((el) => {
       const accept = (el.getAttribute("accept") || "").toLowerCase();
       return !accept || accept.includes("text") || accept.includes("*/*") || accept.includes(".txt");
     }) || inputs[0];
-  if (!input) return { ok: false, error: "页面上找不到文件上传控件" };
+  if (!input) return { ok: false, error: "页面上找不到文件上传控件", plus };
   input.files = transfer.files;
   input.dispatchEvent(new Event("input", { bubbles: true }));
   input.dispatchEvent(new Event("change", { bubbles: true }));
-  return { ok: true, via: "input", count: input.files.length,
+  return { ok: true, via: "input", count: input.files.length, plus,
+
            accept: input.getAttribute("accept") || "" };
 }
 
@@ -431,6 +461,61 @@ function pageCountAttachment(name) {
 }
 
 
+
+
+/**
+ * 装一个「动作录音机」：从打开页面起，把你在页面上的点击、拖放、选文件、粘贴、
+ * 回车都记下来（记的是元素标签和名字，不记内容），之后 dump 到 AI_剪辑师 的日志里。
+ * 你手动做一遍正常操作，日志里就能看到到底该点哪个键、文件是从哪个控件进去的。
+ */
+function pageInstallRecorder(limit) {
+  const cap = Number(limit) > 0 ? Number(limit) : 40;
+  if (window.__vsRecOn) return { ok: true, already: true };
+  window.__vsRec = [];
+  window.__vsRecOn = true;
+  const nameOf = (el) => {
+    if (!el || el === document || el === window) return "document";
+    if (!el.tagName) return String(el.nodeName || "?");
+    const label = el.getAttribute?.("aria-label") || el.getAttribute?.("mattooltip") || "";
+    const own = (el.innerText || el.textContent || "").trim().replace(/\s+/g, " ").slice(0, 20);
+    const cls = String(el.className || "").split(/\s+/).filter(Boolean).slice(0, 2).join(".");
+    const type = el.tagName === "INPUT" ? `:${el.getAttribute("type") || ""}` : "";
+    return `${el.tagName}${type}${cls ? `.${cls}` : ""}[${label || own}]`;
+  };
+  const note = (type, event) => {
+    try {
+      const target = event.target;
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const chain = path.slice(1, 3).map(nameOf).filter(Boolean).join(" < ");
+      const files = Number(event.dataTransfer?.files?.length || 0)
+        || Number(target?.files?.length || 0);
+      window.__vsRec.push(`${type} ${nameOf(target)}${chain ? ` < ${chain}` : ""}`
+        + `${files ? ` 文件=${files}` : ""}`);
+      if (window.__vsRec.length > cap) window.__vsRec.shift();
+    } catch {}
+  };
+  for (const type of ["click", "drop", "dragover", "change", "paste"]) {
+    document.addEventListener(type, (event) => {
+      // dragover 太密，只记第一下
+      if (type === "dragover" && window.__vsDrag) return;
+      if (type === "dragover") window.__vsDrag = true;
+      note(type, event);
+    }, true);
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") note("回车", event);
+  }, true);
+  return { ok: true, already: false };
+}
+
+
+/** 取走录到的动作并清空。 */
+function pageDumpRecorder() {
+  const items = Array.isArray(window.__vsRec) ? window.__vsRec.slice() : [];
+  window.__vsRec = [];
+  window.__vsDrag = false;
+  return { items, url: location.href };
+}
 
 
 /**
@@ -737,7 +822,19 @@ function pageReadAnswer(groups, editorSelector, mine) {
           const slice = scanText.slice(start, i + 1);
           if (slice.length > json.length) {
             for (const candidate of [slice, slice.replace(/[\r\n]+/g, " ")]) {
-              try {
+  // 把你在页面上的动作捞出来写进 AI_剪辑师 的日志：你手动操作一遍，
+  // 日志里就有「点了哪个键、文件从哪个控件进去的」，照着改比猜快得多
+  const dumpActions = async (stage) => {
+    if (!tabId) return;
+    const rec = await runInTab(tabId, pageDumpRecorder, []).catch(() => null);
+    const items = rec?.items || [];
+    if (!items.length) return;
+    const line = items.join(" ｜ ").slice(0, 600);
+    log("你的动作", line);
+    await reportProgress(taskId, stage, `你的动作：${line}`);
+  };
+
+  try {
                 const parsed = JSON.parse(candidate);
                 if (parsed && typeof parsed === "object") {
                   json = candidate;
@@ -951,6 +1048,10 @@ async function handleAiTask(task) {
     // 已经开着而且加载完的，直接干，不等；只有新开的或还在转的才等页面 complete
     if (!target.ready) await waitForTabComplete(tabId, READY_TIMEOUT_MS);
 
+    // 一进页面就装上动作录音机（从打开 Gemini 开始监听）
+    const rec = await runInTab(tabId, pageInstallRecorder, [40]).catch(() => null);
+    log("动作录音机", rec?.already ? "已经装着了" : (rec?.ok ? "装好了" : "装不上"));
+
 
     // 新开的页面框架还要渲染一会儿；复用的页面通常第一次探测就命中
     let editor = null;
@@ -1025,11 +1126,15 @@ async function handleAiTask(task) {
       };
 
 
-      // 拖放怎么砸看站点：Gemini 只有一处收，砸整页最稳（target=-1）；
-      // DeepSeek 那几层各挂一个监听，只能一次砸一个，砸完数卡片，没进去才换下一个目标。
+      // 顺序：先走「正常上传」——把文件塞进页面自己的 input[type=file]，
+      // 跟你手点「+ → 上传文件」选出来的完全一样，页面的状态也就一定是对的。
+      // 合成拖放只当兜底：卡片虽然也会出来，但那是页面级 drop 收下的，附件挂在
+      // 输入框上的状态跟正常选文件不一样（卡片位置都不对），发送键常常不认。
       // 注意每个 plan 都必须带上 target 这个数字——executeScript 的 args 里出现
       // undefined 会直接报「Value is unserializable」。
-      const plans = [];
+      const plans = [{ mode: "input", batch: true, target: 0 }];
+      // 拖放怎么砸看站点：Gemini 只有一处收，砸整页最稳（target=-1）；
+      // DeepSeek 那几层各挂一个监听，只能一次砸一个，砸完数卡片，没进去才换下一个目标。
       if (site.dropAll) {
         plans.push({ mode: "drop", batch: true, target: -1 });
       } else {
@@ -1037,7 +1142,6 @@ async function handleAiTask(task) {
       }
       plans.push({ mode: "drop", batch: false, target: site.dropAll ? -1 : 0 });
       plans.push({ mode: "paste", batch: true, target: 0 });
-      plans.push({ mode: "input", batch: true, target: 0 });
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
         // 卡片可能晚一点才冒出来，换下一种方式之前先复查一遍，别白塞第二遍
@@ -1055,7 +1159,8 @@ async function handleAiTask(task) {
         try {
           if (plan.batch) {
             const attached = await runInTab(tabId, pageAttachFiles,
-                                           [payloads, plan.mode, editor.selector, plan.target]);
+                                           [payloads, plan.mode, editor.selector, plan.target,
+                                            site.upload || ""]);
             if (!attached?.ok) {
               log("塞入失败", plan.mode, attached?.error || "未知原因");
               // 拖放目标试完了就别再往下试同类方案
@@ -1065,12 +1170,14 @@ async function handleAiTask(task) {
               continue;
             }
             if (plan.mode === "drop") log("拖了一次", `目标${attached.target}=${attached.where}`);
+            if (plan.mode === "input") log("走正常上传", `控件=有 点了+=${attached.plus || "不用"}`);
             autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
           } else {
             autoDone = true;
             for (const item of payloads) {
               const attached = await runInTab(tabId, pageAttachFiles,
-                                             [[item], plan.mode, editor.selector, plan.target]);
+                                             [[item], plan.mode, editor.selector, plan.target,
+                                              site.upload || ""]);
               if (!attached?.ok) {
                 log("塞入失败", item.name, plan.mode, attached?.error || "未知原因");
                 autoDone = false;
@@ -1143,6 +1250,7 @@ async function handleAiTask(task) {
     }
 
     if (await cancelled("sending", "等附件加载完")) return;
+    await dumpActions("sending");
     // 「+」菜单这类浮层会盖住输入框，回车也发不出去，先关掉
     const closed = await runInTab(tabId, pageCloseOverlays).catch(() => null);
     if (closed?.backdrops || closed?.menus) log("关掉浮层", JSON.stringify(closed));
@@ -1230,6 +1338,7 @@ async function handleAiTask(task) {
           log("页面上没有我们的提问，补发一次", again?.sent || "失败", diag);
         }
         if (polls % 10 === 0) log("还没等到新回答", diag);
+        if (polls % 5 === 0) await dumpActions("waiting_answer");
         if (await cancelled("waiting_answer", `等新回答出现｜${sentInfo}｜${diag}`)) return;
         continue;
       }
@@ -1260,6 +1369,7 @@ async function handleAiTask(task) {
       });
       if (!text) {
         log("读不到回答", detail);
+        await dumpActions("reporting");
         return finish({ status: "failed", error: `AI 没有产出可读的回答 ${detail}` });
       }
       log("超时前从整页 JSON 里救回来了", detail);
