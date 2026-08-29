@@ -35,7 +35,7 @@ const READY_TIMEOUT_MS = 60000;
 // 拖进去之后等这一个出卡片的时间；手动也就一秒多，超了就换下一种方式
 const ATTACH_VERIFY_MS = 5000;
 // 都挂上之后再确认一下没在转圈，很短；到点就直接按回车
-const SETTLE_TIMEOUT_MS = 3000;
+const SETTLE_TIMEOUT_MS = 30000;
 
 
 // 半自动模式等你手动把文件选进去的上限
@@ -1379,7 +1379,8 @@ async function handleAiTask(task) {
     await sleep(300);
 
 
-    // 附件还在转圈就按回车会白发一条，等页面彻底安静下来
+    // 附件没挂稳就发送必然是错的：Gemini 会拿着半成品去回答，或者干脆无视附件。
+    // 所以这里等到「不在上传中、没有可见转圈」为止，等不到就当场失败，绝不硬发。
     const settleDeadline = Date.now() + SETTLE_TIMEOUT_MS;
     for (;;) {
       const settle = await runInTab(tabId, pageUploadSettled, [site.spinners]).catch(() => null);
@@ -1388,11 +1389,28 @@ async function handleAiTask(task) {
         break;
       }
       if (Date.now() > settleDeadline) {
-        log("等加载超时，仍然按回车试一次", JSON.stringify(settle || {}));
-        break;
+        log("附件一直没加载完", JSON.stringify(settle || {}));
+        return finish({ status: "failed",
+                        error: `附件一直没加载完（${JSON.stringify(settle || {})}），没敢发送` });
       }
       if (await cancelled("sending", "附件还在加载")) return;
       await sleep(500);
+    }
+
+    // 再确认一遍卡片还在：上面那些方式里有的会把附件塞进去又被页面清掉，
+    // 空着附件发出去等于白跑一趟
+    if (uploadMode === "auto") {
+      let onPage = 0;
+      for (const name of probe) {
+        const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+        if (Number(check?.count || 0) > baselines[name]
+            || Number(check?.chips || 0) > chipsBase) onPage += 1;
+      }
+      if (!onPage) {
+        log("发送前复查：附件不在页面上了");
+        return finish({ status: "failed", error: "附件已经不在输入框里了，没敢发送" });
+      }
+      log("发送前复查：附件还在", `命中 ${onPage}/${probe.length}`);
     }
 
 
