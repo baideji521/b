@@ -627,7 +627,7 @@ function pageStartNewChat(labels) {
 
 
 /** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
-function pageUploadSettled(spinnerSelector) {
+function pageUploadSettled(spinnerSelector, sendSelectors) {
   const body = document.body;
   const text = body ? body.innerText || body.textContent || "" : "";
 
@@ -640,7 +640,27 @@ function pageUploadSettled(spinnerSelector) {
     const rect = el.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) spinner += 1;
   }
-  return { settled: !pending && spinner === 0, pending, spinner };
+  // 最靠得住的判据（你指出来的）：附件没传完，发送键是灰的；传完了它才变亮。
+  // 所以只要发送键亮了就算传完，不用再盯着转圈猜。
+  let sendFound = false;
+  let sendEnabled = false;
+  const buttons = [];
+  for (const selector of sendSelectors || []) {
+    buttons.push(...document.querySelectorAll(selector));
+  }
+  buttons.push(...document.querySelectorAll(
+    "button[aria-label*='发送'], button[aria-label*='Send']"
+  ));
+  for (const el of buttons) {
+    if (!el) continue;
+    sendFound = true;
+    if (!(el.disabled || el.getAttribute("aria-disabled") === "true")) {
+      sendEnabled = true;
+      break;
+    }
+  }
+  const quiet = !pending && spinner === 0;
+  return { settled: quiet || (sendEnabled && !pending), pending, spinner, sendFound, sendEnabled };
 }
 
 
@@ -795,6 +815,17 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
       editor.dispatchEvent(new InputEvent("input", { bubbles: true, cancelable: false }));
     }
     await nap(250);
+  }
+
+  // 按钮找到了却一直是灰的：这说明附件还没传完（你说的那个判据——传完发送键才变亮），
+  // 这时候再去瞎按回车就是白发一条，宁可当场失败，让日志说清楚卡在哪。
+  if (button && disabled) {
+    return {
+      ok: false, how, focused, typed: message.length,
+      editorLen: content().trim().length, clicked: "没点",
+      button: `灰着=${nameOf(button)}`,
+      error: "发送键一直是灰的（附件多半还没传完），没敢发送",
+    };
   }
 
   const key = {
@@ -1383,9 +1414,10 @@ async function handleAiTask(task) {
     // 所以这里等到「不在上传中、没有可见转圈」为止，等不到就当场失败，绝不硬发。
     const settleDeadline = Date.now() + SETTLE_TIMEOUT_MS;
     for (;;) {
-      const settle = await runInTab(tabId, pageUploadSettled, [site.spinners]).catch(() => null);
+      const settle = await runInTab(tabId, pageUploadSettled,
+                                   [site.spinners, site.sends || []]).catch(() => null);
       if (settle?.settled) {
-        log("附件加载完成");
+        log("附件加载完成", `发送键=${settle.sendFound ? (settle.sendEnabled ? "亮" : "灰") : "没找到"}`);
         break;
       }
       if (Date.now() > settleDeadline) {
