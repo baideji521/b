@@ -36,8 +36,6 @@ const READY_TIMEOUT_MS = 60000;
 const ATTACH_VERIFY_MS = 5000;
 // 都挂上之后再确认一下没在转圈，很短；到点就直接按回车
 const SETTLE_TIMEOUT_MS = 10000;
-// 「+」只是个软信号：等一小会儿认不出就往下走，别把整条流程卡在这儿
-const PLUS_READY_MS = 6000;
 // 挂完文件先缓一下再看发送键：页面要过一拍才把卡片画出来、发送键才从灰变亮
 const ATTACH_GRACE_MS = 2000;
 
@@ -551,47 +549,6 @@ function pageCountAttachment(name) {
 }
 
 
-
-
-/**
- * 「+」（添加文件）那个键能不能点。
- *
- * 它是页面「可以挂文件了」最直接的信号：Gemini 刚打开时输入框虽然已经渲染出来，
- * 但那一排工具键还是灰的，这时候塞文件多半白塞。等它变亮再动手。
- */
-function pagePlusReady(labels) {
-  const want = new RegExp(labels || "添加照片和文件|添加文件|上传|attach|upload", "i");
-  const avoid = /云端|硬盘|drive|发送|send|停止|stop|录音|mic/i;
-  let found = false;
-  // 认不出来的时候，把输入框附近的按钮长什么样一起报回去，省得靠猜
-  const seen = [];
-  const editor = document.querySelector(".ql-editor, textarea, [contenteditable='true']");
-  const box = editor?.closest("form, fieldset, [class*='input-area'], [class*='composer']")
-    || document.body;
-  for (const node of (box || document).querySelectorAll("button, [role='button']")) {
-    const icon = node.querySelector("mat-icon, gem-icon, [fonticon], [data-icon]");
-    const iconName = `${icon?.getAttribute("fonticon") || ""} ${icon?.getAttribute("data-icon") || ""} `
-      + `${icon?.getAttribute("name") || ""} ${(icon?.textContent || "").trim().slice(0, 12)}`;
-    const label = `${node.getAttribute("aria-label") || ""} `
-      + `${node.getAttribute("mattooltip") || ""} ${node.getAttribute("data-test-id") || ""} `
-      + `${String(node.className || "")}`;
-    const off = node.disabled || node.getAttribute("aria-disabled") === "true";
-    if (seen.length < 8) {
-      seen.push(`${node.tagName}${off ? "(灰)" : ""}[${(label + iconName).trim()
-        .replace(/\s+/g, " ").slice(0, 40)}]`);
-    }
-    // 「+」常常一个字都没有，只挂个 add / attach 图标，所以图标名和类名也算命中
-    const hit = want.test(label) || want.test(iconName)
-      || /^\s*add|attach|plus/i.test(iconName) || /add|attach|upload|plus/i.test(label);
-    if (!hit || avoid.test(label)) continue;
-    found = true;
-    if (!off) {
-      return { found: true, enabled: true,
-               label: (label.trim().replace(/\s+/g, " ") || iconName.trim()).slice(0, 30) };
-    }
-  }
-  return { found, enabled: false, seen };
-}
 
 
 /**
@@ -1276,26 +1233,6 @@ async function handleAiTask(task) {
       if (!editor?.ok) {
         return finish({ status: "failed", error: `${site.label} 开新对话后找不到输入框` });
       }
-    }
-
-    // 等「+」变亮：它能点了才说明这个对话框真的准备好收文件了。
-    // 只等一小会儿——这是个软信号，认不出来也别耽误正事（paste 那条路不靠它），
-    // 认不出来时把输入框附近的按钮长什么样打进日志，下一轮就能把选择器定死。
-    const plusDeadline = Date.now() + PLUS_READY_MS;
-    let plusReady = null;
-    for (;;) {
-      plusReady = await runInTab(tabId, pagePlusReady, [site.upload || ""]).catch(() => null);
-      if (plusReady?.enabled) {
-        log("+ 可以点了，能挂文件", plusReady.label || "");
-        break;
-      }
-      if (Date.now() > plusDeadline) {
-        log("没认出「+」，直接往下挂文件", `找到=${plusReady?.found ? "灰的" : "没有"}`,
-            `附近的键：${(plusReady?.seen || []).join(" ｜ ")}`);
-        break;
-      }
-      if (await cancelled("waiting_editor", "等「+」变成可点状态")) return;
-      await sleep(400);
     }
 
     // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
