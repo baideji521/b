@@ -33,7 +33,9 @@ from PyQt5.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
+    QLineEdit,
     QListWidget,
+
     QListWidgetItem,
     QMainWindow,
     QMenu,
@@ -890,6 +892,18 @@ class MainWindow(QMainWindow):
         self.btn_bridge_pair.setToolTip("打开 120 秒配对窗口，扩展会自动把令牌领走；"
                                        "扩展选项页里的地址要填这里显示的端口")
         self.btn_bridge_pair.clicked.connect(self.on_bridge_pair)
+        # 令牌摆在明面上：扩展选项页里要填它，配对领不到时可以手抄
+        self.lbl_token_tag = QLabel("Token:")
+        self.edit_token = QLineEdit()
+        self.edit_token.setReadOnly(True)
+        self.edit_token.setMinimumWidth(200)
+        self.edit_token.setPlaceholderText("Bridge 没启动")
+        self.edit_token.setToolTip("这台机器 Bridge 的令牌。点「配对扩展」扩展会自动领；"
+                                  "领不到就复制它，粘到扩展选项页里")
+        self.btn_token_copy = QPushButton("复制 Token")
+        self.btn_token_copy.setToolTip("把令牌复制到剪贴板")
+        self.btn_token_copy.clicked.connect(self.on_copy_token)
+
         self.btn_ai_options = QPushButton("AI 面板")
         self.btn_ai_options.setToolTip("第二主界面：干哪一串、AI 专属目录、任务统计和任务表，"
                                       "自动剪辑也在那儿点")
@@ -1061,22 +1075,26 @@ class MainWindow(QMainWindow):
         first_row = QHBoxLayout()
         first_row.setContentsMargins(0, 0, 0, 0)
         first_row.addWidget(flow.wrap(top), 1)
+        first_row.addWidget(self.lbl_token_tag, 0, Qt.AlignVCenter)
+        first_row.addWidget(self.edit_token, 0, Qt.AlignVCenter)
+        first_row.addWidget(self.btn_token_copy, 0, Qt.AlignTop)
+        first_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
         first_row.addWidget(self.btn_advanced, 0, Qt.AlignTop)
         layout.addLayout(first_row)
-        # 第二行同样的结构：左边动作，右边扩展状态 + 配对，两行右侧对齐
+        # 第二行同样的结构：左边动作，右边扩展状态 + AI 那几个按钮，两行右侧对齐
         second_row = QHBoxLayout()
         second_row.setContentsMargins(0, 0, 0, 0)
         second_row.addWidget(flow.wrap(export_row), 1)
-        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 停止_AI | 配对扩展 | AI 面板
+        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 停止_AI | AI接口 | AI 面板
         second_row.addWidget(self.chk_auto_ai, 0, Qt.AlignVCenter)
         second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
         second_row.addWidget(self.btn_bridge_send, 0, Qt.AlignTop)
 
 
         second_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
-        second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_ai_api, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
+
 
         layout.addLayout(second_row)
         layout.addWidget(vertical, 1)
@@ -1652,10 +1670,12 @@ class MainWindow(QMainWindow):
         self.bridge = None
 
     def refresh_bridge_label(self) -> None:
-        """刷状态药丸：文字 + 颜色（绿=通了，琥珀=忙/等配对，红=没通）。"""
+        """刷状态药丸：文字 + 颜色（绿=通了，琥珀=忙/等配对，红=没通）。顺手刷令牌框。"""
+        self.edit_token.setText(self.bridge.token if self.bridge is not None else "")
         if self.bridge is None:
             self.set_bridge_pill("未启动", "off")
             return
+
         state = self.bridge.state()
         port = state["url"].rsplit(":", 1)[-1]
         task = state["task"]
@@ -1690,7 +1710,20 @@ class MainWindow(QMainWindow):
             self.lbl_bridge.style().unpolish(self.lbl_bridge)
             self.lbl_bridge.style().polish(self.lbl_bridge)
 
+    def on_copy_token(self) -> None:
+        """把 Bridge 令牌复制到剪贴板，扩展选项页里手填时用。"""
+        if self.bridge is None:
+            self.start_bridge()
+        if self.bridge is None:
+            QMessageBox.warning(self, "AI 对接", "Bridge 没有启动，端口可能被占用")
+            return
+        QApplication.clipboard().setText(self.bridge.token)
+        self.edit_token.setText(self.bridge.token)
+        self.append_log("[AI 对接] 令牌已复制到剪贴板")
+        self.statusBar().showMessage("令牌已复制到剪贴板", 5000)
+
     def on_bridge_pair(self) -> None:
+
         """开一个 120 秒配对窗口：扩展轮询到就自动把令牌领走，不用手抄。"""
         if self.bridge is None:
             self.start_bridge()
