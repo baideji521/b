@@ -185,6 +185,13 @@ DEFAULTS: dict[str, Any] = {
         # 留空＝按老规矩来：合并导出落 cache/，AI 自动剪的成品落导出目录
         "ai_input_dir": "",
         "ai_output_dir": "",
+        # 「自动剪辑」按钮干哪一串（GUI 的 AI 选项里选）：
+        # full   剪辑成片：扫 AI_输入目录，缺 <视频名>.txt 就先分析生成，再发 AI，
+        #        拿到 JSON 按主界面高光配置直接出成片，落 AI_输出目录
+        # collect 收取脚本：只把 AI 回的 JSON 存成 <视频名>_脚本.json，不剪
+        # script 脚本剪辑：直接读 AI_输入目录里现成的脚本 JSON 开剪，不问 AI
+        "ai_job": "full",
+
         # 高光筛选提示词：相对项目根目录。这份和合并导出都是当附件上传给网页版 AI
         "prompt_file": "prm/prm_en.txt",
         # 合并导出临时落在项目根目录，任务结束就删（想留档改成 true）

@@ -168,7 +168,21 @@ class AiOptionsDialog(QDialog):
         idx = self.cmb_upload.findData(str(bridge.get("upload_mode") or "auto"))
         self.cmb_upload.setCurrentIndex(max(0, idx))
 
+        self.cmb_job = QComboBox()
+        self.cmb_job.addItem("剪辑成片（缺 txt 先分析，拿 JSON 直接出成片）", "full")
+        self.cmb_job.addItem("收取脚本（只把 AI 回的 JSON 存成脚本，不剪）", "collect")
+        self.cmb_job.addItem("脚本剪辑（读现成脚本 JSON 直接剪，不问 AI）", "script")
+        self.cmb_job.setToolTip("主界面「自动剪辑」按钮跑哪一串：\n"
+                                "剪辑成片＝扫 AI_输入目录里的视频，有同名 .txt 就不再分析、"
+                                "直接发给 AI，回的 JSON 按主界面高光配置剪，成品落 AI_输出目录；"
+                                "没有 .txt 就先按主界面配置分析、生成 .txt 再走同一串\n"
+                                "收取脚本＝同上但只存脚本 JSON，不渲染\n"
+                                "脚本剪辑＝跳过 AI，直接用 AI_输入目录里现成的脚本 JSON 开剪")
+        idx = self.cmb_job.findData(str(bridge.get("ai_job") or "full"))
+        self.cmb_job.setCurrentIndex(max(0, idx))
+
         self.chk_side = QCheckBox("对话页放到不抢焦点的小窗口")
+
         self.chk_side.setChecked(bool(bridge.get("side_window", True)))
         self.chk_side.setToolTip("后台标签页会被浏览器冻结，什么都干不了；独立窗口照常渲染")
         self.chk_focus = QCheckBox("允许浏览器跳到前台")
@@ -197,6 +211,8 @@ class AiOptionsDialog(QDialog):
         form.addRow("超时", self.spin_timeout)
         form.addRow("Bridge 端口", self.spin_port)
         form.addRow("扩展上传方式", self.cmb_upload)
+        form.addRow("自动剪辑干什么", self.cmb_job)
+
         form.addRow(self.chk_side)
         form.addRow(self.chk_focus)
         form.addRow(self.chk_clip)
@@ -277,6 +293,8 @@ class AiOptionsDialog(QDialog):
             "api_timeout": int(self.spin_timeout.value()),
             "port": int(self.spin_port.value()),
             "upload_mode": self.cmb_upload.currentData(),
+            "ai_job": self.cmb_job.currentData(),
+
             "side_window": self.chk_side.isChecked(),
             "focus_browser": self.chk_focus.isChecked(),
             "auto_clip": self.chk_clip.isChecked(),

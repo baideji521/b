@@ -207,6 +207,8 @@
     "prompt_file": "prm/prm_en.txt",
     "ai_input_dir": "",
     "ai_output_dir": "",
+    "ai_job": "full",
+
     "upload_mode": "auto",
 
     "focus_browser": true,

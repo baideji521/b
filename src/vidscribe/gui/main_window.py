@@ -464,6 +464,12 @@ class MainWindow(QMainWindow):
         # 发给扩展的临时文件（合并导出），任务结束就删
         self._bridge_temp_files: list[Path] = []
         self._last_highlight_json = ""
+        # 「自动剪辑」的队列：扫 AI_输入目录得到的视频挨个跑，一次只跑一个
+        self._auto_queue: list[Path] = []
+        self._auto_total = 0
+        self._auto_video: Path | None = None
+        self._auto_job = ""
+
         # 剪辑高光的三个加减秒数（起始 / 结束 / 文本），从设置里带回来
 
         self._highlight_offsets = (0.0, 0.0, 0.0)
@@ -875,8 +881,14 @@ class MainWindow(QMainWindow):
                                         "回来的 JSON 直接开剪。走哪条路在「AI 选项」里选")
         self.btn_bridge_send.clicked.connect(self.on_bridge_send)
         self.btn_bridge_stop = QPushButton("停止_AI")
-        self.btn_bridge_stop.setToolTip("取消正在跑的 AI 任务")
+        self.btn_bridge_stop.setToolTip("取消正在跑的 AI 任务（自动剪辑排着的队也一并中止）")
         self.btn_bridge_stop.clicked.connect(self.on_bridge_stop)
+        self.btn_auto_clip = QPushButton("自动剪辑")
+        self.btn_auto_clip.setToolTip("扫 AI_输入目录里的视频，挨个跑完整串：有同名 .txt 就不再分析、"
+                                      "直接发 AI，回的 JSON 按主界面高光配置剪，成品落 AI_输出目录；"
+                                      "没有 .txt 就先分析生成。具体跑哪一串在「AI 选项 - 自动剪辑干什么」里选")
+        self.btn_auto_clip.clicked.connect(self.on_auto_clip)
+
         # 第二行按用起来的顺序排：发给 AI -> 停止 -> 剪辑高光。
         # 端口状态和配对按钮是扩展那边的杂事，钉到最右边，跟第一行的「高级选项」对齐
         export_row.addWidget(self.btn_highlight)
@@ -1030,10 +1042,12 @@ class MainWindow(QMainWindow):
         second_row = QHBoxLayout()
         second_row.setContentsMargins(0, 0, 0, 0)
         second_row.addWidget(flow.wrap(export_row), 1)
-        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 停止_AI | 配对扩展 | AI 选项
+        # 第二行右侧一串：自动 | 状态药丸 | 发送_AI | 自动剪辑 | 停止_AI | 配对扩展 | AI 选项
         second_row.addWidget(self.chk_auto_ai, 0, Qt.AlignVCenter)
         second_row.addWidget(self.lbl_bridge, 0, Qt.AlignVCenter)
         second_row.addWidget(self.btn_bridge_send, 0, Qt.AlignTop)
+        second_row.addWidget(self.btn_auto_clip, 0, Qt.AlignTop)
+
         second_row.addWidget(self.btn_bridge_stop, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_bridge_pair, 0, Qt.AlignTop)
         second_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
@@ -1661,32 +1675,39 @@ class MainWindow(QMainWindow):
         self.refresh_bridge_label()
 
     def on_bridge_send(self) -> None:
-        """把 prm/prm_en.txt 和 <视频名>_merged.txt 发给 AI 要高光 JSON。
+        """把 prm/prm_en.txt 和当前视频的合并文本发给 AI 要高光 JSON。
 
         两条路，由 bridge.mode 决定：
         - api（默认）：Python 直接调 AI 接口（Gemini 或 DeepSeek）。纯后台，不开浏览器。
         - extension：老路子，扩展去驱动网页版对话页。要开着浏览器且窗口不能被冻结。
-        合并导出写进 AI_输入目录（AI 选项里设的）；那栏留空就落 cache/，任务结束删掉。
-
+        合并文本写进 AI_输入目录（<视频名>.txt，留着）；那栏留空就落 cache/，任务结束删掉。
         """
+
         if self.video_path is None:
             QMessageBox.information(self, "提示", "请先打开一个视频")
             return
         if not self.speech and not self.timeline:
             QMessageBox.information(self, "提示", "还没有分析结果，先跑一次分析")
             return
-        cfg = self.cfg.bridge
         prompt_path = self.resolve_prompt_file()
         if prompt_path is None:
             QMessageBox.warning(self, "AI 对接",
                                 "找不到高光筛选提示词。放一份 prm_en.txt 到 prm/ 或项目根目录")
             return
+        merged_path, count = self.write_ai_text()
+        self.dispatch_ai(prompt_path, merged_path, count)
 
-        # 合并导出放 AI_输入目录（AI 选项里设的）；没设就落 cache/，任务结束就删
+    def write_ai_text(self) -> tuple[Path, int]:
+        """把当前结果写成一份给 AI 看的合并 txt，返回（路径，时间线条数）。
+
+        设了 AI_输入目录就写 <视频名>.txt 留在那儿（下次「自动剪辑」看见它就不再分析）；
+        没设就落 cache/ 的 <视频名>_merged.txt，任务结束删掉。
+        """
         ai_in = self.ai_dir("ai_input_dir")
-        cache = ai_in or self.cfg.path("cache_dir")
-        cache.mkdir(parents=True, exist_ok=True)
-        merged_path = cache / f"{self.video_path.stem}_merged.txt"
+        target_dir = ai_in or self.cfg.path("cache_dir")
+        target_dir.mkdir(parents=True, exist_ok=True)
+        stem = self.video_path.stem if self.video_path is not None else "video"
+        merged_path = target_dir / (f"{stem}.txt" if ai_in else f"{stem}_merged.txt")
         count = write_merged_txt(
             merged_path, self.video_path.name, self.speech, self._events_for_export(),
             self.show_translated, self.export_language(),
@@ -1697,8 +1718,22 @@ class MainWindow(QMainWindow):
         self._bridge_temp_files = [] if ai_in else [merged_path]
         if ai_in:
             self.append_log(f"[AI 对接] 合并 txt 写到 AI_输入目录：{merged_path}")
+        return merged_path, count
 
+    def send_file_to_ai(self, text_path: Path) -> bool:
+        """把一份现成的 txt 直接发给 AI，不重新导出（「有同名 .txt 就不再分析」那条路）。"""
+        prompt_path = self.resolve_prompt_file()
+        if prompt_path is None:
+            self.append_log("[AI 对接] 找不到高光筛选提示词（prm_en.txt），发不出去")
+            return False
+        self._bridge_temp_files = []  # 是用户自己的文件，别删
+        self.append_log(f"[AI 对接] 用现成的 {text_path.name}，不再重新导出")
+        self.dispatch_ai(prompt_path, text_path, 0)
+        return True
 
+    def dispatch_ai(self, prompt_path: Path, merged_path: Path, count: int) -> None:
+        """两个附件都齐了，按 bridge.mode 决定走接口还是走扩展。"""
+        cfg = self.cfg.bridge
         if str(cfg.get("mode") or "api") == "api":
             self.send_via_api(prompt_path, merged_path, count)
             return
@@ -1716,7 +1751,8 @@ class MainWindow(QMainWindow):
             str(cfg.get("task_type") or "gemini_json"),
             {"url": spec["ai_url"],
              "provider": spec["provider"],
-             "video": self.video_path.name,
+             "video": self.video_path.name if self.video_path else merged_path.stem,
+
              "message": str(cfg.get("message") or ""),
              "upload_mode": str(cfg.get("upload_mode") or "manual"),
              "focus_browser": bool(cfg.get("focus_browser", False)),
@@ -1799,8 +1835,12 @@ class MainWindow(QMainWindow):
             self.clean_bridge_temp()
             self.lbl_stage.setText("失败")
             self.append_log(f"[AI 接口] 失败：{error}")
+            if self.auto_running():
+                self._auto_advance()
+                return
             QMessageBox.warning(self, "AI 接口", error)
             return
+
         from ..bridge import providers  # noqa: PLC0415
 
         self.append_log(f"[AI 接口] 收到 {len(text)} 字")
@@ -1829,8 +1869,11 @@ class MainWindow(QMainWindow):
         return None
 
     def on_bridge_stop(self) -> None:
+        if self.auto_running():
+            self._auto_finish("已中止，剩下的不跑了")
         if self.bridge is None:
             return
+
         self.bridge.cancel()
         self.clean_bridge_temp()
         self.append_log("[AI 对接] 已请求取消当前任务")
@@ -1848,9 +1891,154 @@ class MainWindow(QMainWindow):
                 self.append_log(f"[AI 对接] 临时文件删不掉：{path.name} {exc}")
         self._bridge_temp_files = []
 
+    # -------------------------------------------------------- 自动剪辑（批量）
+    VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi", ".flv", ".webm", ".m4v",
+                      ".ts", ".mpg", ".mpeg", ".wmv")
+
+    def auto_busy(self) -> str:
+        """有活在跑就返回一句人话，闲着返回空串。跟 busy() 同样的判断，只是不弹窗。"""
+        if self.worker is not None and self.worker.isRunning():
+            return "分析还在跑"
+        if self.clip_worker is not None and self.clip_worker.isRunning():
+            return "高光剪辑还在渲染"
+        if self.ai_worker is not None and self.ai_worker.isRunning():
+            return "上一次 AI 请求还没回来"
+        return ""
+
+    def on_auto_clip(self) -> None:
+        """扫 AI_输入目录里的视频，挨个跑「AI 选项 - 自动剪辑干什么」选的那一串。
+
+        剪辑成片 / 收取脚本：有同名 .txt 就不再分析，直接把它发给 AI；没有就先按
+        主界面配置分析、生成 <视频名>.txt，再发。回来的 JSON 按主界面高光配置剪，
+        成品落 AI_输出目录。脚本剪辑：跳过 AI，直接用现成的脚本 JSON 开剪。
+        """
+        if self._auto_video is not None or self._auto_queue:
+            QMessageBox.information(self, "自动剪辑", "已经在跑了，要停就点「停止_AI」")
+            return
+        reason = self.auto_busy()
+        if reason:
+            QMessageBox.information(self, "自动剪辑", f"{reason}，等它跑完再点")
+            return
+        ai_in = self.ai_dir("ai_input_dir")
+        if ai_in is None:
+            QMessageBox.information(self, "自动剪辑", "先在「AI 选项」里设好 AI_输入目录")
+            return
+        videos = sorted(p for p in ai_in.iterdir()
+                        if p.is_file() and p.suffix.lower() in self.VIDEO_SUFFIXES)
+        if not videos:
+            QMessageBox.information(self, "自动剪辑", f"{ai_in} 里没有视频")
+            return
+        job = str(self.cfg.bridge.get("ai_job") or "full")
+        labels = {"full": "剪辑成片", "collect": "收取脚本", "script": "脚本剪辑"}
+        self._auto_queue = list(videos)
+        self._auto_total = len(videos)
+        self._auto_job = job
+        self.btn_auto_clip.setEnabled(False)
+        self.append_log(f"[自动剪辑] {labels.get(job, job)}：{ai_in} 里排了 {len(videos)} 个视频")
+        self._auto_step()
+
+    def _auto_step(self) -> None:
+        """轮到下一个视频。后面几步都靠各自的完成回调推进，这儿只负责起头。"""
+        if not self._auto_queue:
+            self._auto_finish("全部跑完")
+            return
+        video = self._auto_queue.pop(0)
+        self._auto_video = video
+        index = self._auto_total - len(self._auto_queue)
+        self.append_log(f"[自动剪辑] ({index}/{self._auto_total}) {video.name}")
+        self.load_video(video)
+        if self._auto_job == "script":
+            self._auto_clip_from_script(video)
+            return
+        text_file = self._auto_text_file(video)
+        if text_file is not None:
+            self.append_log(f"[自动剪辑] 已有 {text_file.name}，不再分析，直接发 AI")
+            if not self.send_file_to_ai(text_file):
+                self._auto_advance()
+            return
+        self.append_log(f"[自动剪辑] 没有 {video.stem}.txt，先按主界面配置分析")
+        self.on_analyze(False)
+
+    def _auto_clip_from_script(self, video: Path) -> None:
+        """脚本剪辑：读 AI_输入目录里现成的脚本 JSON，直接开剪。"""
+        script = self._auto_script_file(video)
+        if script is None:
+            self.append_log(f"[自动剪辑] {video.stem} 旁边没有脚本 JSON，跳过")
+            self._auto_advance()
+            return
+        try:
+            text = script.read_text(encoding="utf-8")
+        except OSError as exc:
+            self.append_log(f"[自动剪辑] 脚本读不了：{exc}，跳过")
+            self._auto_advance()
+            return
+        self.append_log(f"[自动剪辑] 按现成脚本剪：{script.name}")
+        self._last_highlight_json = text
+        self.run_highlight(text, ai=True)
+
+    def _auto_text_file(self, video: Path) -> Path | None:
+        """视频旁边的同名文本。空文件不算，免得拿个 0 字节的去糊弄 AI。"""
+        for name in (f"{video.stem}.txt", f"{video.stem}_merged.txt"):
+            candidate = video.parent / name
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+        return None
+
+    def _auto_script_file(self, video: Path) -> Path | None:
+        for name in (f"{video.stem}_脚本.json", f"{video.stem}.json"):
+            candidate = video.parent / name
+            if candidate.is_file():
+                return candidate
+        return None
+
+    def _auto_after_analyze(self) -> None:
+        """分析跑完了（自动剪辑那一串里）：生成 <视频名>.txt，接着发给 AI。"""
+        if self._auto_video is None:
+            return
+        if not self.speech and not self.timeline:
+            self.append_log("[自动剪辑] 分析完了却没读到结果，跳过这个")
+            self._auto_advance()
+            return
+        prompt_path = self.resolve_prompt_file()
+        if prompt_path is None:
+            self.append_log("[自动剪辑] 找不到 prm_en.txt，整串停下")
+            self._auto_finish("缺提示词，已停")
+            return
+        merged_path, count = self.write_ai_text()
+        self.dispatch_ai(prompt_path, merged_path, count)
+
+    def _auto_save_script(self) -> None:
+        """收取脚本：把 AI 回的 JSON 存进 AI_输出目录，不渲染。"""
+        out = self.ai_dir("ai_output_dir") or self.export_root()
+        stem = self._auto_video.stem if self._auto_video is not None else "script"
+        target = out / f"{stem}_脚本.json"
+        try:
+            target.write_text(self._last_highlight_json, encoding="utf-8")
+        except OSError as exc:
+            self.append_log(f"[自动剪辑] 脚本存不下来：{exc}")
+            return
+        self.append_log(f"[自动剪辑] 脚本已存：{target}")
+
+    def _auto_advance(self) -> None:
+        """当前这个不管是成了、跳了还是砸了，都排队叫下一个。"""
+        if self._auto_video is None:
+            return
+        self._auto_video = None
+        QTimer.singleShot(0, self._auto_step)  # 让当前回调先返回，别在信号里套信号
+
+    def _auto_finish(self, why: str) -> None:
+        self._auto_queue = []
+        self._auto_video = None
+        self._auto_total = 0
+        self.btn_auto_clip.setEnabled(True)
+        self.append_log(f"[自动剪辑] {why}")
+
+    def auto_running(self) -> bool:
+        return self._auto_video is not None or bool(self._auto_queue)
 
     def on_bridge_event(self, kind: str, data: object) -> None:
         """Bridge 的 HTTP 线程事件（已经过 BridgeEvents 搬到 GUI 线程）。"""
+
         info = data if isinstance(data, dict) else {}
         if kind == "paired":
             self.append_log("[AI 对接] 扩展已配对，令牌已领取")
@@ -1872,6 +2060,9 @@ class MainWindow(QMainWindow):
             text = str(info.get("text") or "")
             if text:
                 self.append_log(f"[AI 对接] AI 原文前 200 字：{text[:200]}")
+            if self.auto_running():  # 批量里不弹窗拦着，记一笔接着下一个
+                self._auto_advance()
+                return
             QMessageBox.warning(self, "AI 对接", f"没拿到可用 JSON：{reason}")
             return
         self._last_highlight_json = json.dumps(parsed, ensure_ascii=False, indent=2)
@@ -1880,7 +2071,16 @@ class MainWindow(QMainWindow):
                         f"clip.end={clip.get('end')}")
         idle = ((self.clip_worker is None or not self.clip_worker.isRunning())
                 and (self.worker is None or not self.worker.isRunning()))
+        if self.auto_running():
+            if self._auto_job == "collect":  # 收取脚本：只存不剪
+                self._auto_save_script()
+                self._auto_advance()
+                return
+            self.append_log("[自动剪辑] 拿到 JSON，按主界面高光配置开剪")
+            self.run_highlight(self._last_highlight_json, ai=True)
+            return
         if self.cfg.bridge.get("auto_clip", True) and idle:
+
             self.append_log("[AI 对接] 直接按这份 JSON 开始剪辑（bridge.auto_clip）")
             self.run_highlight(self._last_highlight_json, ai=True)
 
@@ -1901,7 +2101,11 @@ class MainWindow(QMainWindow):
         else:
             self.lbl_stage.setText("失败")
             self.append_log(f"[剪辑高光] 失败：{message}")
-            QMessageBox.warning(self, "剪辑高光失败", message)
+            if not self.auto_running():
+                QMessageBox.warning(self, "剪辑高光失败", message)
+        if self.auto_running():
+            self._auto_advance()
+
 
 
     def start_worker(self, argv: list[str], label: str) -> None:
@@ -2117,14 +2321,22 @@ class MainWindow(QMainWindow):
             else:
                 self.append_log("重新加载结果")
                 self.load_results()
+                if self._auto_video is not None and label == "分析":
+                    # 自动剪辑那一串：分析完就生成 <视频名>.txt 接着发 AI
+                    self._auto_after_analyze()
                 # 「自动」勾着就顺手把文本发给 AI，回来的 JSON 再按 auto_clip 开剪
-                if label == "分析" and self.chk_auto_ai.isChecked():
+                elif label == "分析" and self.chk_auto_ai.isChecked():
                     self.append_log("[自动] 分析完了，直接发给 AI")
                     self.on_bridge_send()
         else:
             self.lbl_stage.setText("失败")
             self.append_log(f"{label}失败：{message}")
+            if self._auto_video is not None and label == "分析":
+                self.append_log("[自动剪辑] 这个分析没成，跳过")
+                self._auto_advance()
+                return
             QMessageBox.warning(self, f"{label}失败", f"{message}\n详细日志见 logs/ 目录")
+
 
     # ------------------------------------------------------------------ 声音
     def prepare_audio(self) -> None:
