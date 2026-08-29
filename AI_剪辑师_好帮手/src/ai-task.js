@@ -568,6 +568,33 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
     return null;
   };
 
+  // 富文本有时要等一拍才把粘贴进来的内容收进自己的模型，先补一次再判死
+  if (message && !landed()) {
+    await nap(400);
+    if (!landed()) {
+      try {
+        const retry = new DataTransfer();
+        retry.setData("text/plain", message);
+        editor.focus();
+        editor.dispatchEvent(new ClipboardEvent("paste", {
+          bubbles: true, cancelable: true, clipboardData: retry,
+        }));
+        await nap(300);
+        if (landed()) how = `${how || "无"}+重粘`;
+      } catch {}
+    }
+  }
+
+  // 提交前对账：提示语必须真的躺在输入框里。空着就点发送，等于只把附件丢过去，
+  // 页面会自己找话说（之前那些牛头不对马嘴的回答就是这么来的），宁可当场失败。
+  if (message && !landed()) {
+    return {
+      ok: false, how: how || "没打进去", focused, typed: message.length,
+      editorLen: content().trim().length,
+      error: `提示语没打进输入框（方式=${how || "都失败"}），没敢提交`,
+    };
+  }
+
   let button = null;
   let disabled = false;
   // 点了哪个键：误点工具键这种事只有把它记下来才查得出
