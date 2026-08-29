@@ -1979,9 +1979,11 @@ class MainWindow(QMainWindow):
     def on_auto_clip(self) -> None:
         """扫 AI_输入目录里的视频，挨个跑「AI 面板 - 自动剪辑干什么」选的那一串。
 
-        剪辑成片 / 收取脚本：有同名 .txt 就不再分析，直接把它发给 AI；没有就先按
-        主界面配置分析、生成 <视频名>.txt，再发。回来的 JSON 按主界面高光配置剪，
-        成品落 AI_输出目录。脚本剪辑：跳过 AI，直接用现成的脚本 JSON 开剪。
+        剪辑成片 / 收取脚本：有同名 .txt 就不再分析，直接把它发给 AI；没有 .txt 但缓存里
+        有上次的分析结果，就照缓存导出 <视频名>.txt，也不重跑分析；两样都没有才分析。
+        回来的 JSON 按主界面高光配置剪，成品落 AI_输出目录。
+        脚本剪辑：跳过 AI，直接用现成的脚本 JSON 开剪。
+
         """
         if self._auto_video is not None or self._auto_queue:
             QMessageBox.information(self, "自动剪辑", "已经在跑了，要停就点「停止_AI」")
@@ -2044,9 +2046,17 @@ class MainWindow(QMainWindow):
             if not self.send_file_to_ai(text_file):
                 self._auto_advance()
             return
-        self.append_log(f"[自动剪辑] 没有 {video.stem}.txt，先按主界面配置分析")
+        # 没有 txt，但缓存里有上次分析的结果（load_video 刚读过 output/<视频名>/），
+        # 那就直接照缓存导出合并 txt，不用再跑一遍分析
+        if self.speech or self.timeline:
+            self.append_log(f"[自动剪辑] 缓存里有 {video.stem} 的分析结果，直接导出 TXT，不重跑分析")
+            self._set_auto_step(video.stem, "导出")
+            self._auto_after_analyze()
+            return
+        self.append_log(f"[自动剪辑] 没有 {video.stem}.txt 也没缓存，先按主界面配置分析")
         self._set_auto_step(video.stem, "分析")
         self.on_analyze(False)
+
 
 
     def _auto_clip_from_script(self, video: Path) -> None:
