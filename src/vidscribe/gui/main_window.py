@@ -670,13 +670,27 @@ class MainWindow(QMainWindow):
         self.apply_export_dir(Path(chosen))
 
     def apply_export_dir(self, path: Path) -> None:
-        """设导出目录。第一行的「导出目录…」和「AI 选项」里的输出目录都走这里，
-        免得两处各存一份、对不上。"""
+        """设导出目录。第一行的「导出目录…」用这个（AI 那两个目录另存，互不影响）。"""
         self.export_dir = Path(path)
         self.save_settings()
         self.refresh_export_hint()
         self.append_log(f"[导出目录] {self.export_dir}")
         self.statusBar().showMessage(f"导出目录：{self.export_dir}")
+
+    # ------------------------------------------------------- AI 自己的目录
+    def ai_dir(self, key: str) -> Path | None:
+        """读 bridge.ai_input_dir / ai_output_dir。留空或建不出来就返回 None（按老规矩走）。"""
+        raw = str(self.cfg.bridge.get(key) or "").strip()
+        if not raw:
+            return None
+        path = Path(raw)
+        try:
+            path.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            self.append_log(f"[AI 目录] {key} 建不了：{path} {exc}；这次按默认目录走")
+            return None
+        return path
+
 
     # --------------------------------------------------------------- 缓存
     def cache_dir_for_video(self) -> Path:
@@ -1484,7 +1498,8 @@ class MainWindow(QMainWindow):
         """按 JSON 直接起渲染。手动走对话框和 AI 自动回填都汇到这里。
 
         用的是界面上「剪辑高光」那套配置（加减秒数、音效类别/增益）。
-        AI 自动那条只出一个成品：<视频名>_高光时刻.mp4，落在「导出目录」选的位置。
+        AI 自动那条只出一个成品：<视频名>_高光时刻.mp4，落在「AI_输出目录」；
+        那栏留空才退回界面上选的「导出目录」。
         """
         self._last_highlight_json = text
         self.btn_highlight.setEnabled(False)
@@ -1493,12 +1508,18 @@ class MainWindow(QMainWindow):
 
         self.statusBar().showMessage("正在渲染高光片段…")
         directory = self.export_dir
+        ai_out = self.ai_dir("ai_output_dir") if ai else None
+        if ai_out is not None:
+            directory = ai_out
         self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, directory,
                                            self._highlight_offsets, self._highlight_sfx,
                                            video_only=ai)
         if ai:
-            self.append_log(f"[剪辑高光] 输出到导出目录：{self.export_root()}"
+            where = ai_out if ai_out is not None else self.export_root()
+            label = "AI_输出目录" if ai_out is not None else "导出目录"
+            self.append_log(f"[剪辑高光] 输出到{label}：{where}"
                             f"（加减秒数 {self._highlight_offsets}，音效 {self._highlight_sfx[0] or '自动'}）")
+
 
         self.clip_worker.log.connect(self.append_log)
         self.clip_worker.progress.connect(self.on_highlight_progress)
@@ -1645,7 +1666,8 @@ class MainWindow(QMainWindow):
         两条路，由 bridge.mode 决定：
         - api（默认）：Python 直接调 AI 接口（Gemini 或 DeepSeek）。纯后台，不开浏览器。
         - extension：老路子，扩展去驱动网页版对话页。要开着浏览器且窗口不能被冻结。
-        合并导出临时落在项目根目录，任务结束就删。
+        合并导出写进 AI_输入目录（AI 选项里设的）；那栏留空就落 cache/，任务结束删掉。
+
         """
         if self.video_path is None:
             QMessageBox.information(self, "提示", "请先打开一个视频")
@@ -1660,8 +1682,9 @@ class MainWindow(QMainWindow):
                                 "找不到高光筛选提示词。放一份 prm_en.txt 到 prm/ 或项目根目录")
             return
 
-        # 合并导出是临时文件，放 cache/ 里，运行目录不留东西；任务结束就删
-        cache = self.cfg.path("cache_dir")
+        # 合并导出放 AI_输入目录（AI 选项里设的）；没设就落 cache/，任务结束就删
+        ai_in = self.ai_dir("ai_input_dir")
+        cache = ai_in or self.cfg.path("cache_dir")
         cache.mkdir(parents=True, exist_ok=True)
         merged_path = cache / f"{self.video_path.stem}_merged.txt"
         count = write_merged_txt(
@@ -1670,7 +1693,11 @@ class MainWindow(QMainWindow):
             actions=self.timeline_doc.get("action_track"),
             emotions=self.timeline_doc.get("expression_track"),
             duration=float(self.timeline_doc.get("duration") or 0.0))
-        self._bridge_temp_files = [merged_path]
+        # 自己指定了 AI_输入目录就当归档留着，别偷偷删用户自己的目录
+        self._bridge_temp_files = [] if ai_in else [merged_path]
+        if ai_in:
+            self.append_log(f"[AI 对接] 合并 txt 写到 AI_输入目录：{merged_path}")
+
 
         if str(cfg.get("mode") or "api") == "api":
             self.send_via_api(prompt_path, merged_path, count)
@@ -1780,7 +1807,7 @@ class MainWindow(QMainWindow):
         self.on_bridge_result({"json": providers.extract_json(text), "text": text})
 
     def resolve_prompt_file(self) -> Path | None:
-        """找高光筛选提示词。按 config 里的路径、prm/、项目根、包内副本依次找。
+        """找高光筛选提示词。按 config 里的路径、AI_输入目录、prm/、项目根、包内副本依次找。
 
         这份文件被挪过好几次位置，找不到就返回 None，由调用方提示，别让任务默默少一个附件。
         """
@@ -1789,7 +1816,11 @@ class MainWindow(QMainWindow):
         if configured:
             path = Path(configured)
             candidates.append(path if path.is_absolute() else self.cfg.root / path)
+        ai_in = str(self.cfg.bridge.get("ai_input_dir") or "").strip()
+        if ai_in:
+            candidates.append(Path(ai_in) / "prm_en.txt")
         candidates += [self.cfg.root / "prm" / "prm_en.txt",
+
                        self.cfg.root / "prm_en.txt",
                        Path(__file__).resolve().parents[1] / "prm_en.txt"]
         for path in candidates:

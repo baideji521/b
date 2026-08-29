@@ -2,7 +2,9 @@
 
 改完直接写回 config.json（只写涉及的键，文件里其它内容不动），下次「发送_AI」立刻生效；
 只有端口要重启 GUI 才换得过去，因为 Bridge 服务在启动时就绑好了。
-输出目录跟第一行的「导出目录…」是同一个设置，改哪边都算数——存在 gui_settings.json 里。
+AI_输入目录 / AI_输出目录 只归 AI 用：跟界面第一行的「导入文件」「导出目录…」互不相干，
+留空就按老规矩来（合并导出落 cache/，AI 自动剪的成品落导出目录）。
+
 提供方（Gemini / DeepSeek）各有自己的 key 和模型，切换时这两栏会跟着换，互不覆盖。
 """
 
@@ -110,14 +112,18 @@ class AiOptionsDialog(QDialog):
         super().__init__(parent)
         self.cfg = cfg
         self._log = log
-        self._window = parent  # 用来同步导出目录（跟第一行那个按钮共用一个设置）
+        self._window = parent
+
         self.setWindowTitle("AI 选项")
         self.setMinimumWidth(560)
         bridge = cfg.bridge
 
-        # --- 目录 ---
-        self.edit_input = DropDirEdit(str(cfg.path("input_dir")))
-        self.edit_output = DropDirEdit(self._current_export_dir())
+        # --- 目录（只归 AI 用，跟界面的导入/导出目录各走各的）---
+        self.edit_input = DropDirEdit(str(bridge.get("ai_input_dir") or ""))
+        self.edit_output = DropDirEdit(str(bridge.get("ai_output_dir") or ""))
+        self.edit_input.setToolTip("发给 AI 的合并 txt 放这儿。留空＝放 cache/ 并在任务结束后删掉")
+        self.edit_output.setToolTip("AI 自动剪的高光成品放这儿。留空＝放界面上选的导出目录")
+
 
         # --- 找哪家 AI ---
         self.cmb_provider = QComboBox()
@@ -181,8 +187,9 @@ class AiOptionsDialog(QDialog):
         buttons.rejected.connect(self.reject)
 
         form = QFormLayout(self)
-        form.addRow("输入目录", self._dir_row(self.edit_input, "选择输入目录"))
-        form.addRow("输出目录", self._dir_row(self.edit_output, "选择输出目录"))
+        form.addRow("AI_输入目录", self._dir_row(self.edit_input, "选择 AI_输入目录"))
+        form.addRow("AI_输出目录", self._dir_row(self.edit_output, "选择 AI_输出目录"))
+
         form.addRow("找哪家 AI", self.cmb_provider)
         form.addRow("走哪条路", self.cmb_mode)
         form.addRow("API key", self.edit_key)
@@ -223,13 +230,8 @@ class AiOptionsDialog(QDialog):
         if chosen:
             edit.setText(chosen)
 
-    def _current_export_dir(self) -> str:
-        getter = getattr(self._window, "export_root", None)
-        if callable(getter):
-            return str(getter())
-        return str(self.cfg.path("output_dir"))
-
     # --------------------------------------------------------- 提供方切换
+
     def on_provider_changed(self) -> None:
         """换提供方：先把当前这家的 key / 模型收进草稿，再摊开新那家的。"""
         self.stash_provider()
@@ -278,7 +280,11 @@ class AiOptionsDialog(QDialog):
             "side_window": self.chk_side.isChecked(),
             "focus_browser": self.chk_focus.isChecked(),
             "auto_clip": self.chk_clip.isChecked(),
+            # AI 专属目录：只写进 bridge，不碰 paths.input_dir 也不碰导出目录
+            "ai_input_dir": self.edit_input.text().strip(),
+            "ai_output_dir": self.edit_output.text().strip(),
         }
+
         # 每家的 key / 模型写回各自那一节（Gemini 是 bridge 下的老键，DeepSeek 在 bridge.deepseek）
         for name, draft in self._draft.items():
             section = providers.section_for(name)
@@ -287,27 +293,20 @@ class AiOptionsDialog(QDialog):
             else:
                 bridge.update(draft)
         patch: dict[str, Any] = {"bridge": bridge}
-        indir = self.edit_input.text().strip()
-        if indir:
-            patch["paths"] = {"input_dir": indir}
         try:
             path = self.cfg.save_patch(patch)
         except OSError as exc:
             QMessageBox.warning(self, "AI 选项", f"写 config.json 失败：{exc}")
             return
 
-        # 输出目录存在 gui_settings.json 里，跟第一行的「导出目录…」共用
-        outdir = self.edit_output.text().strip()
-        apply_export = getattr(self._window, "apply_export_dir", None)
-        if outdir and callable(apply_export):
-            apply_export(Path(outdir))
-
         if self._log:
             mode = "接口直连" if bridge["mode"] == "api" else "网页版扩展"
             spec = providers.PROVIDERS[self._provider]
             self._log(f"[AI 选项] 已保存到 {path}：{mode}，{spec['label']} "
                       f"{self._draft[self._provider]['api_model']}，端口 {bridge['port']}")
-            self._log(f"[AI 选项] 输入目录 {indir or '（没改）'}；输出目录 {outdir or '（没改）'}")
+            self._log(f"[AI 选项] AI_输入目录 {bridge['ai_input_dir'] or '（留空，用 cache/）'}；"
+                      f"AI_输出目录 {bridge['ai_output_dir'] or '（留空，用导出目录）'}")
+
         if int(self.spin_port.value()) != old_port:
             QMessageBox.information(self, "AI 选项",
                                     "端口改了，要重开 GUI 才会换过去；"

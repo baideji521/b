@@ -181,6 +181,10 @@ DEFAULTS: dict[str, Any] = {
             "base_url": "https://api.deepseek.com",
             "ai_url": "https://chat.deepseek.com/",
         },
+        # AI 自己的输入/输出目录，跟 GUI 的「导入文件」「导出目录」互不相干。
+        # 留空＝按老规矩来：合并导出落 cache/，AI 自动剪的成品落导出目录
+        "ai_input_dir": "",
+        "ai_output_dir": "",
         # 高光筛选提示词：相对项目根目录。这份和合并导出都是当附件上传给网页版 AI
         "prompt_file": "prm/prm_en.txt",
         # 合并导出临时落在项目根目录，任务结束就删（想留档改成 true）
