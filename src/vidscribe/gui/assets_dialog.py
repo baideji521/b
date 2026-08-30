@@ -42,6 +42,7 @@ from PyQt5.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -49,9 +50,10 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
-
     QPlainTextEdit,
+    QScrollArea,
     QPushButton,
+    QSizePolicy,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -273,24 +275,32 @@ class JsonPanel(QWidget):
         self.lbl_meta.setWordWrap(True)
 
         self.table = _plain_table(self.HEADERS, stretch=6)
-        self.table.setMinimumHeight(140)
+        self.table.setMinimumHeight(40)
 
-        # 三层区间：固定三行网格（层级名定宽、数字等宽右对齐、最右一格结论徽标）
+        # 三层区间：网格高度跟着段数走（以前写死三行高，两段以上的后几行会被截掉看不见）
         self.tbl_layers = _plain_table(self.LAYER_HEADERS, stretch=4)
         self.tbl_layers.setSelectionMode(QAbstractItemView.NoSelection)
-        self.tbl_layers.setFixedHeight(3 * 24 + 26)
-        self.tbl_layers.verticalHeader().setDefaultSectionSize(24)
+        self.tbl_layers.verticalHeader().setDefaultSectionSize(20)
+        self.tbl_layers.setMinimumHeight(3 * 20 + 22)
+        self.tbl_layers.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.tbl_layers.setToolTip("AI 原始区间 → Clip Engine 修正 → 实际渲染区间"
                                    "（规则来源就是真剪时用的那一套）")
         self.lbl_engine = QLabel("—")          # 结论 + 原因（Engine 为什么改了）
         self.lbl_engine.setWordWrap(True)
-        self.lbl_engine.setFrameShape(QFrame.StyledPanel)
+        self.lbl_engine.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        # 原因可能好几行，但**不许**因此把整个面板的最小高度顶上去：
+        # 放进一个定高的滚动区，写多少都只占这一条，读不完就在里面滚。
+        self.box_engine = QScrollArea()
+        self.box_engine.setWidget(self.lbl_engine)
+        self.box_engine.setWidgetResizable(True)
+        self.box_engine.setFixedHeight(40)
+        self.box_engine.setFrameShape(QFrame.StyledPanel)
 
 
         self.view = QPlainTextEdit()
         self.view.setReadOnly(True)
         self.view.setLineWrapMode(QPlainTextEdit.NoWrap)
-        self.view.setMinimumHeight(120)
+        self.view.setMinimumHeight(80)
 
         # 平时一个动作按钮都不显示：编辑从「更多 ▾ → 编辑」进来，进了编辑态才出现这两个
         self.btn_save = QPushButton("保存为新 JSON")
@@ -300,16 +310,14 @@ class JsonPanel(QWidget):
         self.btn_cancel.clicked.connect(self.on_cancel_edit)
         self.lbl_editing = QLabel("正在编辑：保存会新建一份高光 JSON，原件不动")
 
-        self.lbl_spans = QLabel("区间：AI 原始 → Clip Engine 修正 → 实际渲染")
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 4, 4, 4)
+        outer.setSpacing(4)
         outer.addWidget(self.lbl_head)
         outer.addWidget(self.lbl_meta)
-        outer.addWidget(_title("高光区间（AI 原始）"))
         outer.addWidget(self.table, 2)
-        outer.addWidget(self.lbl_spans)
         outer.addWidget(self.tbl_layers)
-        outer.addWidget(self.lbl_engine)
+        outer.addWidget(self.box_engine)
         outer.addWidget(self.view, 3)
         row = QHBoxLayout()
         row.addWidget(self.lbl_editing, 1)
@@ -350,8 +358,11 @@ class JsonPanel(QWidget):
         self.lbl_head.setText(message or "还没选高光 JSON")
         self.lbl_meta.setText("左边选一份高光 JSON，这里显示它是谁生成的、选了哪些区间")
         self.table.setRowCount(0)
-        self.tbl_layers.setRowCount(0)
-        self.lbl_engine.setText("—")
+        self._fill_layers([("AI 原始", "—", "—", "—", "—"),
+                           ("Clip Engine", "—", "—", "—", "—"),
+                           ("实际渲染", "—", "—", "—", "—")])
+        self.lbl_engine.setText("选一份高光 JSON，这里给出 AI 原始 / Clip Engine / 实际渲染"
+                                "三层区间的结论和原因")
         self.view.setPlainText("")
         self._set_editing(False)
 
@@ -436,8 +447,12 @@ class JsonPanel(QWidget):
             db, asset_id, row=row,
             artifact_id=None if product is None else int(product["id"]))
         if not spans["engine"]:
-            return [], ["算不出 Engine 区间（这个视频还没有逐词时间戳，"
-                        "或 JSON 里没有可用片段）"]
+            # 三层永远都在（就算算不出来也摆着三行），只是值是「—」并写清为什么
+            return ([("AI 原始", "—", "—", "—", "—"),
+                     ("Clip Engine", "—", "—", "—", "算不出"),
+                     ("实际渲染", "—", "—", "—", "还没剪")],
+                    ["⚠ 算不出 Clip Engine 区间（这个视频还没有逐词时间戳，"
+                     "或 JSON 里没有可用片段）"])
         actual: list[dict[str, Any]] = spans["actual"]
         grid: list[tuple[str, ...]] = []
         notes: list[str] = []
@@ -461,21 +476,19 @@ class JsonPanel(QWidget):
                              f"{_score(clip['duration'])}s", "✓ 一致" if hit else "⚠ 不一致"))
             else:
                 grid.append((f"{tag}实际渲染", "—", "—", "—", "还没剪"))
+        # 结论写在最前面，原因紧跟其后 —— 用户先看到「一致 / 不一致」，再看为什么
         if not actual:
-            notes.append("实际渲染：还没剪过，点「直接剪辑」就按上面的 Engine 区间出成品")
-            return grid, notes
+            return grid, ["○ 还没剪过：点「直接剪辑」就按上面的 Clip Engine 区间出成品", *notes]
         same_all = (len(actual) == len(spans["engine"])
                     and all(abs(float(p["start"]) - float(c["start"] or 0)) < 0.01
                             and abs(float(p["end"]) - float(c["end"] or 0)) < 0.01
                             for p, c in zip(spans["engine"], actual)))
-        notes.append("✓ Engine 与实际渲染一致" if same_all
-                     else "⚠ Engine 与实际渲染不一致（加减秒之后剪的，或分析数据后来变过）")
-        return grid, notes
+        verdict = ("✓ Engine 与实际渲染一致" if same_all else
+                   "⚠ 实际渲染与 Engine 不一致（加减秒之后剪的，或分析数据后来变过）")
+        return grid, [verdict, *notes]
 
-    def _layers_text(self, db: Any, asset_id: int, products: Any = (),
-                     row: Any = None) -> str:
-        """填三层区间网格，返回结论 / 原因那几行文字（给下面的结论条用）。"""
-        grid, notes = self._layer_rows(db, asset_id, products, row)
+    def _fill_layers(self, grid: list[tuple[str, ...]]) -> None:
+        """把三层区间填进网格：高度按行数走，最少三行（层级永远看得见）。"""
         self.tbl_layers.setRowCount(0)
         for cells in grid:
             line = self.tbl_layers.rowCount()
@@ -488,6 +501,18 @@ class JsonPanel(QWidget):
             self.tbl_layers.setItem(line, 4, _cell(cells[4], center=True))
         self.tbl_layers.resizeColumnsToContents()
         self.tbl_layers.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        rows = max(3, min(9, self.tbl_layers.rowCount()))     # 至少三层，多段最多撑到九行
+        self.tbl_layers.setMinimumHeight(3 * 20 + 22)
+        self.tbl_layers.setMaximumHeight(rows * 20 + 22)
+
+    def _layers_text(self, db: Any, asset_id: int, products: Any = (),
+                     row: Any = None) -> str:
+        """填三层区间网格，返回结论 / 原因那几行文字（给下面的结论条用）。
+
+        网格高度按实际行数算：一段就是三行，两段就是六行，绝不把后面的层级藏起来。
+        """
+        grid, notes = self._layer_rows(db, asset_id, products, row)
+        self._fill_layers(grid)
         return "\n".join(notes)
 
 
@@ -628,6 +653,7 @@ class PrmPanel(QWidget):
     HEADERS = ("ID", "名称", "文件", "语言", "版本", "默认", "剪出成品", "更新时间", "状态")
 
     changed = pyqtSignal()
+    notice = pyqtSignal(str)         # 一句人话的操作结果，显示在窗口顶部
 
     def __init__(self, cfg: Any, parent=None, log=None):
         super().__init__(parent)
@@ -638,6 +664,9 @@ class PrmPanel(QWidget):
         self.table = _plain_table(self.HEADERS, stretch=2)
         self.table.setColumnHidden(0, True)          # id 留着取值，界面上不露主键
         self.table.itemSelectionChanged.connect(self.on_selected)
+        self.table.doubleClicked.connect(lambda _=None: self.on_double_click())
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.on_menu)
 
         self.edit_search = QLineEdit()
         self.edit_search.setPlaceholderText("🔎 搜索 PRM 名称 / 文件")
@@ -677,6 +706,12 @@ class PrmPanel(QWidget):
         self.chk_all = QCheckBox("含已删除")
         self.chk_all.stateChanged.connect(lambda _=0: self.reload())
 
+        # 一份 PRM 都没有时给出下一步，而不是留一张空表（Phase 16 空状态）
+        self.lbl_empty = QLabel("暂无 PRM，请先创建或导入一套 PRM"
+                                "（在右边填好名称和文件，再点「新建」）")
+        self.lbl_empty.setWordWrap(True)
+
+
         outer = QVBoxLayout(self)
         head = QHBoxLayout()
         head.addWidget(_title("PRM 管理"))
@@ -691,6 +726,7 @@ class PrmPanel(QWidget):
         left_lay = QVBoxLayout(left)
         left_lay.setContentsMargins(0, 0, 0, 0)
         left_lay.addWidget(self.table, 1)
+        left_lay.addWidget(self.lbl_empty)
         left_lay.addLayout(self._buttons())
         right = QWidget()
         right_lay = QVBoxLayout(right)
@@ -747,6 +783,7 @@ class PrmPanel(QWidget):
         self.table.setRowCount(0)
         if db is None:
             return
+        made = db_assets.product_counts_for_prms(db)    # 一条 SQL，不逐行查成品
         for row in db_assets.list_prms(db, include_deleted=self.chk_all.isChecked()):
             key = self.edit_search.text().strip().lower()
             if key and key not in f"{row['name']} {row['filename']}".lower():
@@ -763,13 +800,14 @@ class PrmPanel(QWidget):
             self.table.setItem(line, 4, _cell(row["version"] or "—", center=True))
             self.table.setItem(line, 5, _cell("★" if int(row["is_default"] or 0) else "",
                                               center=True))
-            self.table.setItem(line, 6, _num(len(db_assets.products_for_prm(db,
-                                                                           int(row["id"])))))
+            self.table.setItem(line, 6, _num(made.get(int(row["id"]), 0)))
             self.table.setItem(line, 7, _cell(_short_time(row["updated_at"]), center=True))
             self.table.setItem(line, 8, _cell("已删除" if row["deleted_at"] else "在用",
                                               center=True))
         self.table.resizeColumnsToContents()
         self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        # 空状态说人话：不留一张白表让用户猜（Phase 16）
+        self.lbl_empty.setVisible(not self.table.rowCount())
         self.select(keep)
 
     def select(self, prm_id: int | None) -> None:
@@ -807,9 +845,11 @@ class PrmPanel(QWidget):
                                f"　修改 {_short_time(row['updated_at'])}")
         self.on_load_text()
 
-    def _note(self, text: str) -> None:
+    def _note(self, text: str, flash: str | None = None) -> None:
         if self._log:
             self._log(text)
+        if flash:
+            self.notice.emit(flash)      # 顶部直接给一句反馈，不用去翻日志
         self.changed.emit()
 
     def _need(self) -> tuple[Any, int] | None:
@@ -862,7 +902,7 @@ class PrmPanel(QWidget):
         except OSError as exc:
             QMessageBox.warning(self, "PRM", f"写不进去：{exc}")
             return
-        self._note(f"[PRM] 已把正文写回 {path}")
+        self._note(f"[PRM] 已把正文写回 {path}", "✓ 已保存")
 
     def on_add(self) -> None:
         db = self._handle()
@@ -876,7 +916,7 @@ class PrmPanel(QWidget):
         prm_id = db_assets.create_prm(db, name, filename,
                                       language=self.edit_lang.text().strip() or None,
                                       version=self.edit_version.text().strip() or None)
-        self._note(f"[PRM] 已登记 #{prm_id} {name}（{filename}）")
+        self._note(f"[PRM] 已登记 #{prm_id} {name}（{filename}）", f"✓ 已新建 PRM：{name}")
         self.reload()
         self.select(prm_id)
 
@@ -889,7 +929,8 @@ class PrmPanel(QWidget):
                                   filename=self.edit_file.text().strip() or None,
                                   language=self.edit_lang.text().strip() or None,
                                   version=self.edit_version.text().strip() or None)
-        self._note(f"[PRM] #{prm_id} {'已更新' if ok else '没改动'}")
+        self._note(f"[PRM] #{prm_id} {'已更新' if ok else '没改动'}",
+                   "✓ 已保存" if ok else "没改动")
         self.reload()
 
     def on_copy(self) -> None:
@@ -898,7 +939,7 @@ class PrmPanel(QWidget):
             return
         db, prm_id = got
         new_id = db_assets.copy_prm(db, prm_id)
-        self._note(f"[PRM] #{prm_id} 已复制成 #{new_id}（原件没动）")
+        self._note(f"[PRM] #{prm_id} 已复制成 #{new_id}（原件没动）", "✓ 已复制 PRM")
         self.reload()
         self.select(new_id)
 
@@ -908,7 +949,7 @@ class PrmPanel(QWidget):
             return
         db, prm_id = got
         if db_assets.set_default_prm(db, prm_id):
-            self._note(f"[PRM] #{prm_id} 已设为默认")
+            self._note(f"[PRM] #{prm_id} 已设为默认", "✓ 已设为默认 PRM")
         else:
             QMessageBox.information(self, "PRM", "已删除的 PRM 不能设为默认")
         self.reload()
@@ -925,7 +966,7 @@ class PrmPanel(QWidget):
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         if db_assets.delete_prm(db, prm_id):
-            self._note(f"[PRM] #{prm_id} 已软删")
+            self._note(f"[PRM] #{prm_id} 已软删", "✓ 已移入回收状态")
         self.reload()
 
     def on_restore(self) -> None:
@@ -934,10 +975,74 @@ class PrmPanel(QWidget):
             return
         db, prm_id = got
         if db_assets.restore_prm(db, prm_id):
-            self._note(f"[PRM] #{prm_id} 已恢复")
+            self._note(f"[PRM] #{prm_id} 已恢复", "✓ 已恢复")
         else:
             QMessageBox.information(self, "PRM", "这一份本来就没删")
         self.reload()
+        self.select(prm_id)
+
+    # ------------------------------------------------------------ 单击 / 双击 / 右键
+    def on_double_click(self) -> None:
+        """双击 PRM：选中并把光标放进「名称」，直接就能改档案。"""
+        if self.selected() is None:
+            return
+        self.edit_name.setFocus()
+        self.edit_name.selectAll()
+
+    def on_menu(self, pos) -> None:
+        """右键 PRM：查看/编辑、复制、设为默认、恢复/删除、复制正文、打开文件。
+
+        已经是默认的那一份不再显示「设为默认」，而是显示一条灰的「★ 默认 PRM」；
+        已删除的显示「恢复」，在用的显示「删除」——菜单永远只给现在能做的动作。
+        """
+        line = self.table.rowAt(pos.y())
+        if line >= 0:
+            self.table.selectRow(line)
+        db = self._handle()
+        prm_id = self.selected()
+        if db is None or prm_id is None:
+            return
+        row = db_assets.get_prm(db, prm_id)
+        if row is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("查看 / 编辑", self.on_double_click)
+        menu.addAction("复制", self.on_copy)
+        menu.addSeparator()
+        if int(row["is_default"] or 0):
+            star = menu.addAction("★ 默认 PRM")
+            star.setEnabled(False)
+        else:
+            menu.addAction("设为默认", self.on_default)
+        if row["deleted_at"]:
+            menu.addAction("恢复", self.on_restore)
+        else:
+            menu.addAction("删除", self.on_delete)
+        menu.addSeparator()
+        menu.addAction("复制提示词正文", self.on_copy_text)
+        menu.addAction("打开提示词文件", self.on_open_file)
+        menu.exec_(self.table.viewport().mapToGlobal(pos))
+
+    def on_copy_text(self) -> None:
+        """把提示词正文复制到剪贴板（不改文件）。"""
+        QApplication.clipboard().setText(self.view_text.toPlainText())
+        if self._log:
+            self._log("[PRM] 提示词正文已复制到剪贴板")
+        self.notice.emit("✓ 已复制提示词正文")
+
+    def on_open_file(self) -> None:
+        """打开这份 PRM 的提示词文件（不在盘上就直说，绝不悄悄新建）。"""
+        path = self._path()
+        if path is None:
+            QMessageBox.information(self, "PRM", "先选一份 PRM")
+            return
+        if not path.is_file():
+            QMessageBox.information(self, "PRM", f"文件已经不在盘上：\n{path}")
+            return
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606 - 打开用户自己的提示词文件
+            return
+        QMessageBox.information(self, "PRM", str(path))
 
 
 # ================================================================ 视频资产页
@@ -945,12 +1050,16 @@ class VideoAssetsPage(QWidget):
     """左边视频列表，右边这个视频的高光 JSON 和成品血缘。"""
 
     VIDEO_HEADERS = ("ID", "视频", "时长", "分析", "JSON", "高光", "成品", "AI / 模型", "更新时间")
-    ASSET_HEADERS = ("当前", "高光 JSON", "AI / 模型", "高光数", "最高分", "成品",
-                     "生成时间", "状态")
+    # JSON 表：状态、名字、自己的方案名、区间、评分、AI、模型、成品、创建时间都摆出来，
+    # 主键只藏在 UserRole 里（界面上不出现裸 ID 列）。
+    ASSET_HEADERS = ("当前", "高光 JSON", "名称", "区间", "时长", "高光数", "评分",
+                     "AI", "模型", "成品", "创建时间", "状态")
     PRODUCT_HEADERS = ("ID", "成品", "来源 JSON", "PRM", "时长", "实际区间", "生成时间", "状态")
 
 
     changed = pyqtSignal()
+    notice = pyqtSignal(str)          # 操作结果一句人话（顶部反馈，不用翻日志）
+    focus_changed = pyqtSignal(str)   # 「当前：视频 X · 高光 JSON #Y · N 个成品」
 
     def __init__(self, cfg: Any, window: Any = None, parent=None, log=None):
         super().__init__(parent)
@@ -968,6 +1077,9 @@ class VideoAssetsPage(QWidget):
         split.addWidget(self._build_right())
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
+        split.setChildrenCollapsible(False)   # 视频索引和工作区都不许被拖没
+        split.setSizes([400, 600])
+        self.split_main = split
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
         outer.addWidget(split, 1)
@@ -976,21 +1088,23 @@ class VideoAssetsPage(QWidget):
     # ------------------------------------------------------------ 左：视频库
     def _build_left(self) -> QWidget:
         self.edit_search = QLineEdit()
-        self.edit_search.setPlaceholderText("🔎 搜索视频 / 文件名 / ID")
+        self.edit_search.setPlaceholderText("🔎 搜索文件名 / 视频 ID")
         self.edit_search.setClearButtonEnabled(True)
         self.edit_search.returnPressed.connect(self.reload)
         self.edit_search.textChanged.connect(self._search_changed)
 
         self.cmb_status = QComboBox()
-        self.cmb_status.setToolTip("有没有做过视觉 / 语音分析")
+        self.cmb_status.setToolTip("状态：全部 / 已分析 / 未分析（有没有做过视觉 / 语音分析）")
         for title, key in STATUS_CHOICES:
             self.cmb_status.addItem(title, key)
         self.cmb_json = QComboBox()
-        self.cmb_json.setToolTip("有没有高光 JSON（和「成品」是两个独立条件，可以一起用）")
+        self.cmb_json.setToolTip("JSON：全部 / 有 JSON / 无 JSON"
+                                 "（和「成品」是两个独立条件，可以一起用）")
         for title, key in JSON_CHOICES:
             self.cmb_json.addItem(title, key)
         self.cmb_product = QComboBox()
-        self.cmb_product.setToolTip("有没有剪出成品；「有 JSON + 无成品」= 还没剪的那些")
+        self.cmb_product.setToolTip("成品：全部 / 有成品 / 无成品；"
+                                    "「JSON = 有」+「成品 = 无」就是还没剪的那些")
         for title, key in PRODUCT_CHOICES:
             self.cmb_product.addItem(title, key)
         self.cmb_ai = QComboBox()
@@ -1007,33 +1121,38 @@ class VideoAssetsPage(QWidget):
                        self.cmb_ai, self.cmb_order, self.cmb_page):
             widget.currentIndexChanged.connect(lambda _=0: self.reload())
 
-        filters = QHBoxLayout()
-        filters.addWidget(QLabel("状态"))
-        filters.addWidget(self.cmb_status)
-        filters.addWidget(QLabel("JSON"))
-        filters.addWidget(self.cmb_json)
-        filters.addWidget(QLabel("成品"))
-        filters.addWidget(self.cmb_product)
-        filters.addWidget(QLabel("AI"))
-        filters.addWidget(self.cmb_ai)
-        filters.addWidget(QLabel("排序"))
-        filters.addWidget(self.cmb_order)
-        filters.addWidget(self.cmb_page)
-        filters.addStretch(1)
+        # 六个筛选控件摆成两行三列：一排横着摆在窄窗口下会把下拉挤出可视区
+        filters = QGridLayout()
+        filters.setHorizontalSpacing(6)
+        filters.setVerticalSpacing(4)
+        for column, (title, widget) in enumerate((
+                ("状态", self.cmb_status), ("JSON", self.cmb_json),
+                ("成品", self.cmb_product))):
+            filters.addWidget(QLabel(title), 0, column * 2)
+            filters.addWidget(widget, 0, column * 2 + 1)
+        for column, (title, widget) in enumerate((
+                ("AI", self.cmb_ai), ("排序", self.cmb_order), ("条数", self.cmb_page))):
+            filters.addWidget(QLabel(title), 1, column * 2)
+            filters.addWidget(widget, 1, column * 2 + 1)
+        for column in (1, 3, 5):
+            filters.setColumnStretch(column, 1)
 
 
         self.tbl_videos = _plain_table(self.VIDEO_HEADERS, stretch=1)
         self.tbl_videos.setColumnHidden(0, True)          # id 留着取值，不占版面
+        self.tbl_videos.setMinimumWidth(240)
         head = self.tbl_videos.horizontalHeader()
         head.setSortIndicatorShown(True)
         head.setSectionsClickable(True)
         head.sectionClicked.connect(self.on_header_sort)
         self.tbl_videos.itemSelectionChanged.connect(self.on_video_changed)
         self.tbl_videos.doubleClicked.connect(lambda _=None: self.on_open_video())
+        self.tbl_videos.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_videos.customContextMenuRequested.connect(self.on_video_menu)
 
         self.lbl_count = QLabel("—")
 
-        box = QGroupBox("视频库")
+        box = QGroupBox("① 视频库")
         lay = QVBoxLayout(box)
         lay.addWidget(self.edit_search)
         lay.addLayout(filters)
@@ -1043,20 +1162,28 @@ class VideoAssetsPage(QWidget):
 
     # ------------------------------------------------------------ 右：详情
     def _build_right(self) -> QWidget:
-        self.lbl_video = _title("还没选视频")
+        self.lbl_step = QLabel("② 当前视频")      # 层级标号：左边是索引，右边是工作区
+        self.lbl_video = _title("请选择一个视频")
         font = self.lbl_video.font()
-        font.setPointSize(font.pointSize() + 6)      # 当前视频 = 页面唯一最大标题
+        font.setPointSize(max(9, font.pointSize()) + 6)   # 没有 QSS 时也要大一号
         self.lbl_video.setFont(font)
+        # 程序的主题 QSS 里有一条 `QWidget { font-size: 12px }`，它会盖掉上面的 pointSize；
+        # 直接给这个 label 自己写一条更具体的样式，保证「当前视频」在真程序里也是最大的字。
+        self.lbl_video.setStyleSheet("font-size: 20px; font-weight: 600;")
+        self.lbl_video.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.lbl_state = QLabel("左边选一个视频，这里就是它的工作区")
+        self.lbl_state.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         self.lbl_meta = QLabel("")                   # 统计行：JSON ｜ 高光 ｜ 成品
         self.lbl_meta.setWordWrap(True)
         stats = self.lbl_meta.font()
         stats.setPointSize(stats.pointSize() + 1)
         stats.setBold(True)
         self.lbl_meta.setFont(stats)
+        self.lbl_meta.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Minimum)
 
-        # 高频动作只留两个：主按钮「直接剪辑」+ 普通按钮「查看」。
-        # 「查看原视频 / 打开成品」这类定位动作一律进「更多 ▾」，版面上不再抢注意力。
+        # 高频动作只留两个：主按钮「直接剪辑」+ 普通按钮「查看」，
+        # 两个都摆在「③ 高光 JSON」那一区里 —— 它们作用的对象就是选中的那份 JSON。
+        # 「查看原视频 / 打开成品」这类定位动作一律进「更多 ▾」和右键菜单，不抢版面。
         self.btn_render = _primary(QPushButton("直接剪辑"))   # 唯一主动作，唯一加粗
         self.btn_render.setToolTip("用选中的这份高光 JSON 出成品：选个 PRM 就开剪，一次 AI 都不调")
         self.btn_render.clicked.connect(self.on_render)
@@ -1064,25 +1191,34 @@ class VideoAssetsPage(QWidget):
         self.btn_view.setToolTip("看选中 JSON 的每一段区间（右边直接显示，不弹窗）")
         self.btn_view.clicked.connect(self.on_view)
 
-        quick = QHBoxLayout()
-        quick.addWidget(self.btn_render)
-        quick.addStretch(1)
-
-
         split = QSplitter(Qt.Vertical)
         split.addWidget(self._build_assets())
         split.addWidget(self._build_products())
         split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 3)
+        split.setStretchFactor(1, 2)
+        split.setChildrenCollapsible(False)     # 谁都不许被拖成 0 高，成品区不会被挤没
+        split.setSizes([380, 260])
+        self.split_detail = split
+
+        # 当前视频 = 右侧唯一的视觉焦点：单独一块卡片，标题字号最大
+        hero = QFrame()
+        hero.setFrameShape(QFrame.StyledPanel)
+        hero_lay = QVBoxLayout(hero)
+        hero_lay.setContentsMargins(8, 2, 8, 2)
+        hero_lay.setSpacing(2)
+        hero_lay.addWidget(self.lbl_step)
+        hero_lay.addWidget(self.lbl_video)
+        hero_lay.addWidget(self.lbl_state)
+        hero_lay.addWidget(self.lbl_meta)
+        self.box_current = hero
 
         page = QWidget()
         lay = QVBoxLayout(page)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.lbl_video)
-        lay.addWidget(self.lbl_state)
-        lay.addWidget(self.lbl_meta)
-        lay.addLayout(quick)
+        lay.setSpacing(4)
+        lay.addWidget(hero)
         lay.addWidget(split, 1)
+        page.setMinimumWidth(420)
         return page
 
     def _build_assets(self) -> QWidget:
@@ -1096,12 +1232,17 @@ class VideoAssetsPage(QWidget):
         self.chk_deleted.stateChanged.connect(lambda _=0: self.refresh_assets())
 
         self.tbl_assets = _plain_table(self.ASSET_HEADERS, stretch=1)
+        self.tbl_assets.setMinimumHeight(66)
         self.tbl_assets.itemSelectionChanged.connect(self.on_asset_changed)
+        self.tbl_assets.doubleClicked.connect(lambda _=None: self.on_view())
+        self.tbl_assets.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_assets.customContextMenuRequested.connect(self.on_asset_menu)
 
         self.json_panel = JsonPanel(self.cfg, self, log=self._log)
         self.json_panel.saved.connect(self.on_json_saved)
 
         more = QHBoxLayout()
+        more.addWidget(self.btn_render)        # 唯一 Primary，就在 JSON 列表旁边
         more.addWidget(self.btn_view)
         self.btn_more = QPushButton("更多 ▾")
         self.btn_more.setToolTip("低频动作都在这里：编辑 / 复制 / 设为当前 / 导入 / 删除 / 恢复 / "
@@ -1146,8 +1287,11 @@ class VideoAssetsPage(QWidget):
         inner.addWidget(self.json_panel)
         inner.setStretchFactor(0, 3)
         inner.setStretchFactor(1, 2)
+        inner.setChildrenCollapsible(False)
+        inner.setSizes([420, 320])
+        self.split_assets = inner
 
-        box = QGroupBox("高光 JSON（选中一份，上面的「直接剪辑」就用它）")
+        box = QGroupBox("③ 高光 JSON（选中一份，上面的「直接剪辑」就用它；双击=查看，右键=更多）")
         lay = QVBoxLayout(box)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.addWidget(inner, 1)
@@ -1156,24 +1300,37 @@ class VideoAssetsPage(QWidget):
     def _build_products(self) -> QWidget:
         self.tbl_products = _plain_table(self.PRODUCT_HEADERS, stretch=1)
         self.tbl_products.setColumnHidden(0, True)
+        self.tbl_products.setMinimumHeight(60)
         self.tbl_products.itemSelectionChanged.connect(self.refresh_lineage)
+        self.tbl_products.doubleClicked.connect(lambda _=None: self.on_open_product())
+        self.tbl_products.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tbl_products.customContextMenuRequested.connect(self.on_product_menu)
 
         self.lbl_product_head = QLabel("—")
         self.lbl_product_head.setWordWrap(True)
         self.lbl_product = QLabel("选一个成品")
         self.lbl_product.setWordWrap(True)
+        # 技术细节（分析批次 / AI 任务 / Engine 原因 / 路径）默认收起，勾上才进血缘树
+        self.chk_details = QCheckBox("详细信息")
+        self.chk_details.setToolTip("展开分析批次、AI 任务 ID、Engine 修正原因这些技术细节")
+        self.chk_details.stateChanged.connect(lambda _=0: self.refresh_lineage())
         self.tree_lineage = QTreeWidget()
         self.tree_lineage.setHeaderLabels(["血缘", "内容"])
         self.tree_lineage.setColumnWidth(0, 210)
         self.tree_lineage.setAlternatingRowColors(True)
-        self.tree_lineage.setToolTip("点「高光 JSON」或「实际成品」节点，上面的表格会跳到对应那一行")
+        self.tree_lineage.setMinimumHeight(60)
+        self.tree_lineage.setToolTip("点「高光 JSON」「PRM」或「实际成品」节点，"
+                                     "对应的表格 / 页签会自动跳过去")
         self.tree_lineage.itemClicked.connect(self.on_lineage_clicked)
 
 
         right = QWidget()
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
-        right_lay.addWidget(self.lbl_product)
+        head = QHBoxLayout()
+        head.addWidget(self.lbl_product, 1)
+        head.addWidget(self.chk_details)
+        right_lay.addLayout(head)
         right_lay.addWidget(self.tree_lineage, 1)
 
 
@@ -1182,8 +1339,11 @@ class VideoAssetsPage(QWidget):
         inner.addWidget(right)
         inner.setStretchFactor(0, 3)
         inner.setStretchFactor(1, 2)
+        inner.setChildrenCollapsible(False)
+        inner.setSizes([420, 320])
+        self.split_products = inner
 
-        box = QGroupBox("成品")
+        box = QGroupBox("④ 成品（双击=打开成品，右键=追溯来源 JSON / PRM / 血缘）")
         lay = QVBoxLayout(box)
         lay.setContentsMargins(6, 6, 6, 6)
         lay.addWidget(self.lbl_product_head)
@@ -1321,28 +1481,33 @@ class VideoAssetsPage(QWidget):
         db = self._handle()
         self._product_rows = None        # 换视频 = 成品缓存作废，下一次刷新重新查
         if vid is None or db is None:
-            self.lbl_video.setText("还没选视频")
-            self.lbl_state.setText("左边选一个视频，这里就是它的工作区")
-            self.lbl_meta.setText("")
+            self.lbl_video.setText("请选择一个视频")
+            self.lbl_state.setText("左边「① 视频库」里点一个视频，这里就是它的工作区")
+            self.lbl_meta.setText("JSON　—　｜　高光　—　｜　成品　—")
             self.tbl_assets.setRowCount(0)
             self.tbl_products.setRowCount(0)
-            self.json_panel.clear()
+            self.json_panel.clear("请先选择一个视频")
             self.tree_lineage.clear()
+            self.tree_lineage.addTopLevelItem(QTreeWidgetItem(
+                ["血缘", "选一个视频，再选它的成品，这里显示完整来源"]))
+            self._emit_focus()
             return
         row = next((r for r in self._rows if r["id"] == vid), None)
         self.lbl_video.setText(f"{row['file_name'] if row else f'视频 #{vid}'}")
         analysis = db_repo.latest_analysis(db, vid)
         state = f"{_seconds(row['duration']) if row else '—'}　　" \
                 f"{'已分析' if analysis is not None else '未分析'}"
-        if row and row["file_path"]:
-            state += f"　　{row['file_path']}"
+        # 完整路径不写进标题区（一条长路径会把整块最小宽度顶到 1300+），
+        # 放进 tooltip，右键「复制视频路径 / 打开所在文件夹」照旧能用
         self.lbl_state.setText(state)
+        self.lbl_state.setToolTip(str(row["file_path"]) if row and row["file_path"] else "")
         self.lbl_meta.setText("　｜　".join((
             f"JSON　{row['json_count'] if row else 0}",
             f"高光　{row['highlight_count'] if row else 0}",
             f"成品　{row['product_count'] if row else 0}")))
         self.refresh_assets()
         self.refresh_products(reload=False)   # 上面那一步已经把成品缓存填好了
+        self._emit_focus()
 
 
 
@@ -1351,6 +1516,258 @@ class VideoAssetsPage(QWidget):
         if self.tbl_assets.rowCount():
             self.tbl_assets.selectRow(0)
             self.tbl_assets.setFocus()
+
+    # ------------------------------------------------------------ 右键：视频
+    def _row_of(self, video_id: int | None) -> dict[str, Any] | None:
+        return next((r for r in self._rows if int(r["id"]) == int(video_id)), None) \
+            if video_id is not None else None
+
+    def _center(self):
+        """往上找资产中心本体（切 PRM 页要用它）；找不到就返回 None。"""
+        node = self.parent()
+        while node is not None:
+            if hasattr(node, "show_prm"):
+                return node
+            node = node.parent()
+        return None
+
+    def on_video_menu(self, pos) -> None:
+        """右键视频：打开 / 定位 / 只看它的高光或成品 / 复制路径 / 重新分析。"""
+        line = self.tbl_videos.rowAt(pos.y())
+        if line >= 0:
+            self.tbl_videos.selectRow(line)
+        row = self._row_of(self.current_video_id())
+        if row is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("打开视频", self.on_play_video)
+        menu.addAction("查看高光 JSON", self.on_open_video)
+        menu.addAction("查看成品", self.on_focus_products)
+        menu.addSeparator()
+        menu.addAction("只看这个视频的高光", self.on_only_json)
+        menu.addAction("只看这个视频的成品", self.on_only_products)
+        menu.addSeparator()
+        again = menu.addAction("重新分析", self.on_reanalyse)
+        if not callable(getattr(self._window, "load_video", None)) \
+                or not callable(getattr(self._window, "on_analyze", None)):
+            again.setEnabled(False)     # 没有安全入口就灰着：资产中心绝不自己实现分析
+            again.setText("重新分析（由主界面 / AI 自动剪辑面板执行）")
+        menu.addAction("打开所在文件夹", self.on_reveal_video)
+        menu.addAction("复制视频路径", self.on_copy_video_path)
+        menu.exec_(self.tbl_videos.viewport().mapToGlobal(pos))
+
+    def on_play_video(self) -> None:
+        """打开视频本体（交给系统默认播放器）。"""
+        row = self._row_of(self.current_video_id())
+        if row is None or not row["file_path"]:
+            QMessageBox.information(self, "资产中心", "先选一个视频")
+            return
+        path = Path(str(row["file_path"]))
+        if not path.is_file():
+            QMessageBox.information(self, "资产中心", f"文件已经不在盘上：\n{path}")
+            return
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606 - 打开用户自己的视频
+            return
+        QMessageBox.information(self, "资产中心", str(path))
+
+    def on_focus_products(self) -> None:
+        """把焦点放到成品表（右键「查看成品」）。"""
+        if self.tbl_products.rowCount():
+            if self.selected_product() is None:
+                self.tbl_products.selectRow(0)
+            self.tbl_products.setFocus()
+            return
+        QMessageBox.information(self, "资产中心", "这个视频还没有成品")
+
+    def on_only_json(self) -> None:
+        """只看这个视频的高光：搜索框锁到它，JSON 筛选切「有 JSON」。"""
+        row = self._row_of(self.current_video_id())
+        if row is None:
+            return
+        self.cmb_json.setCurrentIndex(max(0, self.cmb_json.findData("has")))
+        self.cmb_product.setCurrentIndex(max(0, self.cmb_product.findData("any")))
+        self.edit_search.setText(str(row["file_name"]))
+        self.reload()
+
+    def on_only_products(self) -> None:
+        """只看这个视频的成品：搜索框锁到它，成品筛选切「有成品」。"""
+        row = self._row_of(self.current_video_id())
+        if row is None:
+            return
+        self.cmb_product.setCurrentIndex(max(0, self.cmb_product.findData("has")))
+        self.cmb_json.setCurrentIndex(max(0, self.cmb_json.findData("any")))
+        self.edit_search.setText(str(row["file_name"]))
+        self.reload()
+
+    def on_copy_video_path(self) -> None:
+        row = self._row_of(self.current_video_id())
+        if row is None or not row["file_path"]:
+            return
+        QApplication.clipboard().setText(str(row["file_path"]))
+        self._note(f"[资产中心] 视频路径已复制：{row['file_path']}", "✓ 已复制视频路径")
+
+    def on_reanalyse(self) -> None:
+        """重新分析：把视频交给主界面现有的分析链路，资产中心自己不碰分析逻辑。"""
+        row = self._row_of(self.current_video_id())
+        load = getattr(self._window, "load_video", None)
+        run = getattr(self._window, "on_analyze", None)
+        if row is None or not callable(load) or not callable(run):
+            QMessageBox.information(self, "资产中心",
+                                    "这里不执行分析，请到主界面或「AI 自动剪辑」面板发起")
+            return
+        path = Path(str(row["file_path"]))
+        if not path.is_file():
+            QMessageBox.information(self, "资产中心", f"文件已经不在盘上：\n{path}")
+            return
+        if QMessageBox.question(
+                self, "重新分析",
+                f"把 {path.name} 交给主界面重新分析？\n"
+                "分析在主界面跑（进度和日志都在那边），已有的高光 JSON 和成品都不会动。",
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        load(path)
+        run(True)
+        self._note(f"[资产中心] 已把 {path.name} 交给主界面重新分析",
+                   f"已把 {path.name} 交给主界面重新分析")
+
+    # ------------------------------------------------------------ 右键：高光 JSON
+    def on_asset_menu(self, pos) -> None:
+        """右键高光 JSON：菜单按这一行的状态给动作（当前 / 已删除 各不一样）。"""
+        line = self.tbl_assets.rowAt(pos.y())
+        if line >= 0:
+            self.tbl_assets.selectRow(line)
+        asset_id = self.selected_asset()
+        if asset_id is None:
+            return
+        row = next((r for r in self._asset_rows if int(r["id"]) == int(asset_id)), None)
+        deleted = bool(row is not None and row["deleted_at"])
+        current = db_assets.current_asset(self._handle(), self.current_video_id() or 0) \
+            if self._handle() is not None else None
+        is_current = current is not None and int(current["id"]) == int(asset_id)
+
+        menu = QMenu(self)
+        menu.addAction("查看", self.on_view)
+        menu.addAction("编辑（保存会新建一份）", self.on_edit_json)
+        menu.addAction("直接剪辑", self.on_render)
+        menu.addSeparator()
+        if is_current:
+            star = menu.addAction("★ 当前 JSON")
+            star.setEnabled(False)
+        else:
+            menu.addAction("设为当前", self.on_set_current)
+        menu.addAction("复制 JSON", self.on_copy)
+        menu.addSeparator()
+        menu.addAction("导入 JSON…", self.on_import)
+        raw = menu.addAction("显示原文", self.on_menu_raw)
+        raw.setCheckable(True)
+        raw.setChecked(self.json_panel.raw_visible())
+        menu.addAction("复制原文", self.on_copy_text)
+        menu.addSeparator()
+        if deleted:
+            menu.addAction("恢复", self.on_restore)
+        else:
+            menu.addAction("删除", self.on_delete)
+        menu.exec_(self.tbl_assets.viewport().mapToGlobal(pos))
+
+    def on_menu_raw(self) -> None:
+        """右键里的「显示原文」：和「更多 ▾」里的那个勾选保持一致。"""
+        shown = not self.json_panel.raw_visible()
+        self.act_raw.setChecked(shown)
+        self.json_panel.set_raw_visible(shown)
+
+    # ------------------------------------------------------------ 右键：成品
+    def _product_info(self, artifact_id: int | None) -> dict[str, Any] | None:
+        if artifact_id is None or not self._product_rows:
+            return None
+        return next((i for i in self._product_rows
+                     if int(i["artifact_id"]) == int(artifact_id)), None)
+
+    def on_product_menu(self, pos) -> None:
+        """右键成品：打开 / 定位文件 / 追溯来源 JSON、PRM、完整血缘 / 复制路径。"""
+        line = self.tbl_products.rowAt(pos.y())
+        if line >= 0:
+            self.tbl_products.selectRow(line)
+        info = self._product_info(self.selected_product())
+        if info is None:
+            return
+        menu = QMenu(self)
+        menu.addAction("打开成品", self.on_open_product)
+        menu.addAction("打开所在文件夹", self.on_reveal)
+        menu.addSeparator()
+        source = menu.addAction("查看来源 JSON", self.on_show_source_json)
+        source.setEnabled(info["asset_id"] is not None)
+        prm = menu.addAction("查看 PRM", self.on_show_prm)
+        prm.setEnabled(info["prm_id"] is not None)
+        menu.addAction("查看完整血缘", self.on_show_lineage)
+        menu.addAction("复制血缘", self.on_copy_lineage)
+        menu.addSeparator()
+        menu.addAction("复制文件路径", self.on_copy_product_path)
+        menu.exec_(self.tbl_products.viewport().mapToGlobal(pos))
+
+    def on_open_product(self) -> None:
+        """打开成品文件本身（双击成品走的也是这条）。"""
+        info = self._product_info(self.selected_product())
+        if info is None:
+            QMessageBox.information(self, "资产中心", "先在「成品」里选一个")
+            return
+        path = Path(str(info["path"]))
+        if not path.is_file():
+            QMessageBox.information(self, "资产中心", f"文件已经不在盘上：\n{path}")
+            return
+        if os.name == "nt":
+            os.startfile(str(path))  # noqa: S606 - 打开用户自己的成品
+            return
+        QMessageBox.information(self, "资产中心", str(path))
+
+    def on_show_source_json(self) -> None:
+        """成品 → 来源 JSON：选中那一行、滚过去、面板跟着刷新。"""
+        info = self._product_info(self.selected_product())
+        if info is None or info["asset_id"] is None:
+            QMessageBox.information(self, "资产中心", "这个成品没记来源 JSON")
+            return
+        self.focus_asset(int(info["asset_id"]))
+
+    def focus_asset(self, asset_id: int) -> None:
+        """把 JSON 表停在这一份上（找不到就展开已删除再找一次）。"""
+        self.select_asset(int(asset_id))
+        if self.selected_asset() != int(asset_id) and not self.chk_deleted.isChecked():
+            self.act_deleted.setChecked(True)
+            self.chk_deleted.setChecked(True)     # 来源 JSON 被软删了也要能跳过去
+            self.select_asset(int(asset_id))
+        line = self.tbl_assets.currentRow()
+        if line >= 0 and self.tbl_assets.item(line, 1) is not None:
+            self.tbl_assets.scrollToItem(self.tbl_assets.item(line, 1))
+        self.tbl_assets.setFocus()
+
+    def on_show_prm(self) -> None:
+        """成品 → PRM：切到 PRM 页并选中那一份。"""
+        info = self._product_info(self.selected_product())
+        if info is None or info["prm_id"] is None:
+            QMessageBox.information(self, "资产中心", "这个成品没记 PRM")
+            return
+        self.show_prm(int(info["prm_id"]))
+
+    def show_prm(self, prm_id: int) -> None:
+        center = self._center()
+        if center is None:
+            QMessageBox.information(self, "资产中心", "这个窗口没挂在资产中心里，切不过去")
+            return
+        center.show_prm(int(prm_id))
+
+    def on_show_lineage(self) -> None:
+        """查看完整血缘：展开技术细节并把血缘树重画一遍。"""
+        self.chk_details.setChecked(True)
+        self.refresh_lineage()
+        self.tree_lineage.setFocus()
+
+    def on_copy_product_path(self) -> None:
+        info = self._product_info(self.selected_product())
+        if info is None:
+            return
+        QApplication.clipboard().setText(str(info["path"]))
+        self._note(f"[资产中心] 成品路径已复制：{info['path']}", "✓ 已复制成品路径")
+
 
     # ------------------------------------------------------------ JSON
     def refresh_assets(self) -> None:
@@ -1371,7 +1788,7 @@ class VideoAssetsPage(QWidget):
             rows = [r for r in rows if int(r["id"]) == int(current["id"])]
         self._asset_rows = list(rows)        # 详情面板直接用这些行，不再逐行回查
         if not rows:
-            self.lbl_current.setText("这个视频还没有高光 JSON —— 让 AI 分析一次，"
+            self.lbl_current.setText("当前视频暂无高光 JSON —— 让 AI 分析一次，"
                                      "或者用「更多 → 导入现成 JSON」")
         else:
             self.lbl_current.setText(
@@ -1382,29 +1799,46 @@ class VideoAssetsPage(QWidget):
             line = self.tbl_assets.rowCount()
             self.tbl_assets.insertRow(line)
             is_current = current is not None and int(row["id"]) == int(current["id"])
+            made = counts.get(int(row["id"]), 0)
+            clips = _highlight_rows(db_assets.loads(row["current_json"]))
+            span, length = "—", None
+            if clips:
+                try:
+                    first, last = clips[0], clips[-1]
+                    span = _span(first.get("start"), last.get("end"))
+                    length = sum(float(c.get("end") or 0.0) - float(c.get("start") or 0.0)
+                                 for c in clips)
+                except (TypeError, ValueError):
+                    span, length = "—", None
             self.tbl_assets.setItem(line, 0, _cell("★ 当前" if is_current else "○ 历史",
                                                    center=True))
             self.tbl_assets.setItem(line, 1, _id_item(_json_title(row), int(row["id"]),
                                                       bold=is_current))
-            self.tbl_assets.setItem(line, 2, _cell(_ai_label(row), center=True))
-            self.tbl_assets.setItem(line, 3, _num(int(row["clip_count"] or 0)))
-            self.tbl_assets.setItem(line, 4, _cell(_score(row["best_score"]), center=True))
-            self.tbl_assets.setItem(line, 5, _num(counts.get(int(row["id"]), 0)))
-            self.tbl_assets.setItem(line, 6, _cell(_short_time(row["created_at"]), center=True))
-            self.tbl_assets.setItem(line, 7, _cell("已删除" if row["deleted_at"] else "在用",
-                                                   center=True))
+            self.tbl_assets.setItem(line, 2, _cell(str(row["name"] or "—")))
+            self.tbl_assets.setItem(line, 3, _cell(span, center=True))
+            self.tbl_assets.setItem(line, 4, _duration_cell(length))
+            self.tbl_assets.setItem(line, 5, _num(int(row["clip_count"] or 0)))
+            self.tbl_assets.setItem(line, 6, _cell(_score(row["best_score"]), center=True))
+            self.tbl_assets.setItem(line, 7, _cell(str(row["provider"] or "—"), center=True))
+            self.tbl_assets.setItem(line, 8, _cell(str(row["model"] or "—"), center=True))
+            self.tbl_assets.setItem(line, 9, _SortItem(f"✓ 已生成 {made} 个成品" if made
+                                                       else "○ 未剪辑", made))
+            self.tbl_assets.setItem(line, 10, _cell(_short_time(row["created_at"]),
+                                                    center=True))
+            self.tbl_assets.setItem(line, 11, _cell("已删除" if row["deleted_at"] else "在用",
+                                                    center=True))
         self.tbl_assets.resizeColumnsToContents()
         self.tbl_assets.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.tbl_assets.blockSignals(False)
         if not rows:
-            self.json_panel.clear("这个视频还没有高光 JSON")
+            self.json_panel.clear("当前视频暂无高光 JSON")
             return
         self.select_asset(keep if keep is not None
                           else (int(current["id"]) if current is not None else None))
 
     def select_asset(self, asset_id: int | None) -> None:
         if not self.tbl_assets.rowCount():
-            self.json_panel.clear("这个视频还没有高光 JSON")
+            self.json_panel.clear("当前视频暂无高光 JSON")
             return
         target = 0
         if asset_id is not None:
@@ -1425,6 +1859,7 @@ class VideoAssetsPage(QWidget):
         self.json_panel.show_asset(asset_id, row=row,
                                    products=self._products_of(asset_id))
         self.refresh_products(reload=False)   # 成品区跟着标出「这份 JSON 剪出来的」
+        self._emit_focus()
 
     def _products_of(self, asset_id: int | None) -> list[dict[str, Any]] | None:
         """从成品全景缓存里挑出这份 JSON 剪出的成品（旧的在前，和以前的顺序一致）。
@@ -1443,6 +1878,7 @@ class VideoAssetsPage(QWidget):
         self.chk_current_only.setChecked(False)     # 新方案在历史里，展开才看得见
         self.refresh_assets()
         self.select_asset(int(new_id))
+        self.notice.emit(f"✓ 已保存为 高光 JSON #{new_id}（原件没动）")
         self.changed.emit()
 
     def _need_asset(self) -> tuple[Any, int] | None:
@@ -1455,10 +1891,33 @@ class VideoAssetsPage(QWidget):
             return None
         return db, asset_id
 
-    def _note(self, text: str) -> None:
+    def _note(self, text: str, flash: str | None = None) -> None:
         if self._log:
             self._log(text)
+        if flash:
+            self.notice.emit(flash)      # 顶部直接给一句反馈，不用去翻日志
         self.changed.emit()
+
+    def _emit_focus(self) -> None:
+        """把「当前：视频 X · 高光 JSON #Y · N 个成品」推给窗口顶部（纯内存，不查库）。"""
+        self.focus_changed.emit(self.focus_text())
+
+    def focus_text(self) -> str:
+        """一行话说清现在选中的是什么，没选就直说该干什么。"""
+        vid = self.current_video_id()
+        if vid is None:
+            return "当前：请选择一个视频"
+        row = self._row_of(vid)
+        name = str(row["file_name"]) if row else f"视频 #{vid}"
+        asset_id = self.selected_asset()
+        if asset_id is None:
+            return f"当前：{name} · 暂无高光 JSON"
+        made = 0
+        if self._product_rows is not None:
+            made = sum(1 for info in self._product_rows
+                       if info["asset_id"] is not None
+                       and int(info["asset_id"]) == int(asset_id))
+        return f"当前：{name} · 高光 JSON #{asset_id} · {made} 个成品"
 
     def on_view(self) -> None:
         """查看：右边面板直接显示这份 JSON 的区间（不弹窗）。"""
@@ -1499,7 +1958,7 @@ class VideoAssetsPage(QWidget):
         if new_id is None:
             QMessageBox.information(self, "资产中心", "复制不了（这份 JSON 不存在）")
             return
-        self._note(f"[高光 JSON] #{asset_id} 已复制成 #{new_id}（原件没动）")
+        self._note(f"[高光 JSON] #{asset_id} 已复制成 #{new_id}（原件没动）", "✓ 已复制 JSON")
         self.chk_current_only.setChecked(False)
         self.refresh_assets()
         self.select_asset(int(new_id))
@@ -1525,7 +1984,8 @@ class VideoAssetsPage(QWidget):
             return
         asset_id = db_assets.create_asset(db, vid, payload, source_type="imported",
                                           note=f"从 {Path(path).name} 导入")
-        self._note(f"[高光 JSON] 已登记 #{asset_id}（{count} 个高光，来自 {Path(path).name}）")
+        self._note(f"[高光 JSON] 已登记 #{asset_id}（{count} 个高光，来自 {Path(path).name}）",
+                   f"✓ 已导入 {Path(path).name}")
         self.reload()
         self.select_asset(int(asset_id))
 
@@ -1535,7 +1995,8 @@ class VideoAssetsPage(QWidget):
             return
         db, asset_id = got
         if db_assets.set_current_asset(db, asset_id):
-            self._note(f"[高光 JSON] #{asset_id} 已设为当前 JSON（其他 JSON 一份都没删）")
+            self._note(f"[高光 JSON] #{asset_id} 已设为当前 JSON（其他 JSON 一份都没删）",
+                       "✓ 已设为当前 JSON")
         else:
             QMessageBox.information(self, "资产中心", "已删除的 JSON 不能设为当前")
 
@@ -1556,7 +2017,7 @@ class VideoAssetsPage(QWidget):
                 QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
             return
         if db_assets.delete_asset(db, asset_id):
-            self._note(f"[高光 JSON] #{asset_id} 已软删（成品未动）")
+            self._note(f"[高光 JSON] #{asset_id} 已软删（成品未动）", "✓ 已移入回收状态")
         self.refresh_assets()
 
     def on_restore(self) -> None:
@@ -1565,7 +2026,7 @@ class VideoAssetsPage(QWidget):
             return
         db, asset_id = got
         if db_assets.restore_asset(db, asset_id):
-            self._note(f"[高光 JSON] #{asset_id} 已恢复")
+            self._note(f"[高光 JSON] #{asset_id} 已恢复", "✓ 已恢复")
         else:
             QMessageBox.information(self, "资产中心", "这一份本来就没删")
         self.refresh_assets()
@@ -1591,8 +2052,10 @@ class VideoAssetsPage(QWidget):
                                     "命令行可以用：run.py assets --render <JSON ID> --prm <PRM>")
             return
         dialog = RenderDialog(self.cfg, row, window, self, log=self._log)
+        self.notice.emit("开始剪辑…（选好 PRM 点「开始剪辑」，进度在主界面）")
         if dialog.exec_() == QDialog.Accepted:
-            self._note(f"[高光 JSON] #{asset_id} 已交给主界面渲染（进度和日志在主界面）")
+            self._note(f"[高光 JSON] #{asset_id} 已交给主界面渲染（进度和日志在主界面）",
+                       "✓ 成品已生成（详见主界面日志）")
 
     # ------------------------------------------------------------ 成品
     def refresh_products(self, *, reload: bool = True) -> None:
@@ -1649,9 +2112,13 @@ class VideoAssetsPage(QWidget):
             self.tbl_products.blockSignals(False)
             self.tree_lineage.clear()
             self._lineage_for = None
-            self.lbl_product_head.setText("这个视频还没有成品 —— 上面选一份高光 JSON，"
+            self.lbl_product_head.setText("当前视频还没有成品 —— 上面选一份高光 JSON，"
                                           "点「直接剪辑」就能出成品")
-            self.lbl_product.setText("选一个成品，这里显示它的血缘")
+            self.lbl_product.setText("当前视频还没有成品，选一份 JSON 剪一次就有了")
+            self.tree_lineage.clear()
+            self.tree_lineage.addTopLevelItem(QTreeWidgetItem(
+                ["血缘", "剪出成品之后，这里显示 视频 → JSON → Engine → PRM → 成品"]))
+            self._emit_focus()
             return
         head = f"共 {len(rows)} 个成品"
         if picked is not None:
@@ -1684,11 +2151,15 @@ class VideoAssetsPage(QWidget):
         self.tree_lineage.clear()
         self._lineage_for = artifact_id
         if db is None or artifact_id is None:
-            self.lbl_product.setText("选一个成品")
+            self.lbl_product.setText("选一个成品，这里显示它是怎么来的")
+            self.tree_lineage.addTopLevelItem(
+                QTreeWidgetItem(["血缘", "上面选一个成品，这里显示 视频 → JSON → Engine → PRM → 成品"]))
             return
         info = db_assets.artifact_lineage(db, artifact_id)
         if info is None:
-            self.lbl_product.setText("查不到这个成品的记录")
+            self.lbl_product.setText("该成品暂无完整血缘记录")
+            self.tree_lineage.addTopLevelItem(
+                QTreeWidgetItem(["血缘", "该成品暂无完整血缘记录（库里查不到这条 artifact）"]))
             return
         video = info.get("video") or {}
         asset = info.get("asset")
@@ -1704,19 +2175,23 @@ class VideoAssetsPage(QWidget):
             f"　｜　状态：{'✓ 完成' if info['exists_on_disk'] else '⚠ 文件不在盘上'}")
 
 
-        def node(parent, title, value="", *, asset_id=None, artifact_id=None):
+        def node(parent, title, value="", *, asset_id=None, artifact_id=None, prm_id=None):
             item = QTreeWidgetItem([str(title), str(value)])
             if asset_id is not None:
                 item.setData(0, Qt.UserRole, ("asset", int(asset_id)))
             if artifact_id is not None:
                 item.setData(0, Qt.UserRole, ("product", int(artifact_id)))
+            if prm_id is not None:
+                item.setData(0, Qt.UserRole, ("prm", int(prm_id)))
             (parent.addChild(item) if isinstance(parent, QTreeWidgetItem)
              else self.tree_lineage.addTopLevelItem(item))
             return item
 
+        deep = self.chk_details.isChecked()      # 技术细节默认收起，勾「详细信息」才展开
         root = node(None, "视频", video.get("file_name", "—"))
-        node(root, "路径", video.get("file_path", "—"))
-        node(root, "分析批次", info.get("analysis_id") or "—")
+        if deep:
+            node(root, "路径", video.get("file_path", "—"))
+            node(root, "分析批次", info.get("analysis_id") or "—")
         json_node = node(root, "高光 JSON",
                          "—" if asset is None else f"{_json_title(asset)}（{asset['name']}）"
                          + ("（已删除）" if info.get("asset_deleted") else ""),
@@ -1724,7 +2199,8 @@ class VideoAssetsPage(QWidget):
 
         node(json_node, "AI", info.get("provider") or "—")
         node(json_node, "模型", info.get("model") or "—")
-        node(json_node, "AI 任务", info.get("task_id") or "—")
+        if deep:
+            node(json_node, "AI 任务", info.get("task_id") or "—")
         for index, clip in enumerate(spans["ai"], start=1):
             node(json_node, f"原始区间 {index}",
                  f"{_span(clip.get('start'), clip.get('end'))}"
@@ -1734,12 +2210,14 @@ class VideoAssetsPage(QWidget):
             one = node(engine_node, f"修正区间 {index}",
                        f"{_span(plan['start'], plan['end'])}（{_score(plan['duration'])}s）")
             node(one, "15 秒上限", "触发" if plan["capped"] else "未触发")
+            # 「为什么最后是这个区间」属于用户必须能直接看到的答案，不藏进「详细信息」
             for note in plan["notes"]:
                 node(one, "原因", note)
             if not plan["notes"]:
                 node(one, "原因", "未调整（AI 区间本身就落在语义边界上）")
         node(root, "PRM", "—" if prm is None else f"{prm['name']}（{prm['filename']}）"
-             + ("（已删除）" if info.get("prm_deleted") else ""))
+             + ("（已删除）" if info.get("prm_deleted") else ""),
+             prm_id=None if prm is None else int(prm["id"]))
         final = node(root, "实际成品", path.name, artifact_id=artifact_id)
         for index, clip in enumerate(spans["actual"], start=1):
             node(final, f"实际区间 {index}",
@@ -1755,14 +2233,16 @@ class VideoAssetsPage(QWidget):
         self.tree_lineage.expandAll()
 
     def on_lineage_clicked(self, item: QTreeWidgetItem, _column: int = 0) -> None:
-        """点血缘节点就定位到对应那一行（不弹窗、不改数据）。"""
+        """点血缘节点就定位到对应那一行 / 那一页（不弹窗、不改数据）。"""
         marker = item.data(0, Qt.UserRole)
         if not marker:
             return
         kind, ident = marker
         if kind == "asset":
-            self.select_asset(int(ident))
-            self.tbl_assets.setFocus()
+            self.focus_asset(int(ident))
+            return
+        if kind == "prm":
+            self.show_prm(int(ident))
             return
         if kind == "product":
             for line in range(self.tbl_products.rowCount()):
@@ -1783,6 +2263,7 @@ class VideoAssetsPage(QWidget):
     def on_copy_text(self) -> None:
         """更多 ▾ → 复制 JSON 原文。"""
         self.json_panel.on_copy_text()
+        self.notice.emit("✓ 已复制 JSON 原文")
 
     def on_reveal(self) -> None:
         db = self._handle()
@@ -1806,7 +2287,7 @@ class VideoAssetsPage(QWidget):
             walk(self.tree_lineage.topLevelItem(index), 0)
         if lines:
             QApplication.clipboard().setText("\n".join(lines))
-            self._note("[资产中心] 血缘已复制到剪贴板")
+            self._note("[资产中心] 血缘已复制到剪贴板", "✓ 已复制血缘")
 
 
 # ================================================================ 资产中心
@@ -1822,12 +2303,18 @@ class AssetCenter(QWidget):
         self._window = parent
         self.setWindowFlags(Qt.Window)            # 有 parent 也要当独立窗口
         self.setWindowTitle("视频资产中心")
-        self.setMinimumSize(1180, 760)
+        # 最小尺寸压到 960×600：1000×620、1024×680、1152×720 这些小屏也能完整显示，
+        # 不靠「把 minimumHeight 调大」来掩盖布局问题（Phase 16 §14）
+        self.setMinimumSize(960, 600)
+        self.resize(1240, 800)
 
         self.videos = VideoAssetsPage(cfg, window=parent, parent=self, log=log)
         self.prm_panel = PrmPanel(cfg, self, log=log)
         self.videos.changed.connect(self._on_changed)
         self.prm_panel.changed.connect(self._on_changed)
+        self.videos.notice.connect(self.flash)
+        self.prm_panel.notice.connect(self.flash)
+        self.videos.focus_changed.connect(self.set_focus_text)
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self.videos, "视频资产")
@@ -1836,23 +2323,63 @@ class AssetCenter(QWidget):
         self.btn_reload = QPushButton("🔄 刷新")
         self.btn_reload.setToolTip("重新查一次库（视频 / 高光 JSON / 成品 / PRM 一起刷）")
         self.btn_reload.clicked.connect(self.reload)
+        subtitle = QLabel("管理视频 → 高光 JSON → 成品的完整资产关系")
+        subtitle.setWordWrap(True)
         head = QHBoxLayout()
         head.addWidget(_title("视频资产中心"))
-        head.addWidget(QLabel("视频 → 高光 JSON → Clip Engine → PRM → 成品"), 1)
+        head.addWidget(subtitle, 1)
         head.addWidget(self.btn_reload)
+
+        # 顶部一行工作流：第一次用的人照着 ①②③④ 点就能出成品（不做教程弹窗）
+        self.lbl_steps = QLabel("① 选视频　→　② 选高光 JSON　→　③ 直接剪辑　→　④ 查看成品")
+        steps = self.lbl_steps.font()
+        steps.setBold(True)
+        self.lbl_steps.setFont(steps)
+        self.lbl_steps.setWordWrap(True)
+        self.lbl_tip = QLabel("双击查看 · 右键更多操作")
+        self.lbl_tip.setWordWrap(True)
+        self.lbl_tip.setToolTip("视频 / 高光 JSON / 成品 / PRM 都有右键菜单")
+        hint = QHBoxLayout()
+        hint.addWidget(self.lbl_steps)
+        hint.addStretch(1)
+        hint.addWidget(self.lbl_tip)
+
+        # 现在选中的是什么 + 上一步操作的结果，都在同一行，谁都不用去翻日志
+        self.lbl_now = QLabel("当前：请选择一个视频")
+        self.lbl_now.setWordWrap(True)
+        self.lbl_flash = QLabel("")
+        self.lbl_flash.setWordWrap(True)
+        state = QHBoxLayout()
+        state.addWidget(self.lbl_now, 1)
+        state.addWidget(self.lbl_flash)
 
         close = QPushButton("关闭")
         close.clicked.connect(self.close)
+        note = QLabel("全部可搜、可筛、可追溯：选视频看它的高光 JSON，选 JSON 看区间和成品")
+        note.setWordWrap(True)
         foot = QHBoxLayout()
-        foot.addWidget(QLabel("全部可搜、可筛、可追溯：选视频看它的高光 JSON，选 JSON 看区间和成品"))
+        foot.addWidget(note)
         foot.addStretch(1)
         foot.addWidget(close)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(4)
         outer.addLayout(head)
+        outer.addLayout(hint)
+        outer.addLayout(state)
         outer.addWidget(self.tabs, 1)
         outer.addLayout(foot)
+        self.set_focus_text(self.videos.focus_text())
+
+    # ------------------------------------------------------------ 顶部状态
+    def set_focus_text(self, text: str) -> None:
+        """「当前：视频 X · 高光 JSON #Y · N 个成品」。"""
+        self.lbl_now.setText(text)
+
+    def flash(self, text: str) -> None:
+        """操作结果就写在顶部，用户不用去日志窗口找（下一次操作会覆盖它）。"""
+        self.lbl_flash.setText(text)
 
 
     # ------------------------------------------------------------ 转发
@@ -1865,6 +2392,15 @@ class AssetCenter(QWidget):
 
     def show_prm_page(self) -> None:
         self.tabs.setCurrentIndex(1)
+
+    def show_prm(self, prm_id: int | None = None) -> None:
+        """切到 PRM 页，并且尽量停在指定那一份上（成品 / 血缘里点 PRM 走这里）。"""
+        self.show_prm_page()
+        if prm_id is None:
+            return
+        self.prm_panel.chk_all.setChecked(True)   # 软删的 PRM 也要能被追溯到
+        self.prm_panel.select(int(prm_id))
+        self.prm_panel.table.setFocus()
 
     # 老代码（AI 面板、验证脚本）习惯直接摸这些名字，保持能用
     @property

@@ -673,6 +673,18 @@ def product_counts_for_assets(db: Database, video_id: int,
     return {int(row["asset_id"]): int(row["n"]) for row in rows}
 
 
+def product_counts_for_prms(db: Database, kind: str = "final_video") -> dict[int, int]:
+    """一次查完：每一版 PRM 各剪出了几个成品（`prm_id → 个数`）。
+
+    PRM 管理页那一列以前是逐行 `products_for_prm()`，几十份 PRM 就是几十次查询；
+    这里一条 GROUP BY 解决（Phase 16 收 N+1）。
+    """
+    rows = db.all(
+        "SELECT prm_id, COUNT(*) AS n FROM artifacts "
+        "WHERE type = ? AND prm_id IS NOT NULL GROUP BY prm_id", (kind,))
+    return {int(row["prm_id"]): int(row["n"]) for row in rows}
+
+
 def products_overview(db: Database, video_id: int,
                       kind: str = "final_video") -> list[dict[str, Any]]:
     """当前视频的成品全景：**两条 SQL** 就带出成品表要显示的一切。
