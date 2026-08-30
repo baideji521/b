@@ -563,6 +563,8 @@ class MainWindow(QMainWindow):
         self._auto_total = 0
         self._auto_video: Path | None = None
         self._auto_job = ""
+        # 点了「停止」：不再领新任务，手上这条走完当前这一步就退回等待（下次接着跑）
+        self._auto_stop = False
         # 状态都从数据库读，句柄按需打开；打不开就退回「什么都没有」，界面照样能用
         self._db_handle = None
         self._db_failed = False
@@ -1944,15 +1946,18 @@ class MainWindow(QMainWindow):
         return merged_path, count
 
     def send_file_to_ai(self, text_path: Path) -> bool:
-        """把一份现成的 txt 直接发给 AI，不重新导出（「有同名 .txt 就不再分析」那条路）。"""
+        """把一份现成的 txt 直接发给 AI，不重新导出（「有同名 .txt 就不再分析」那条路）。
+
+        上传的仍旧只有 PRM + 这份 TXT；视频本体不上传，只在任务里标明是哪个 MP4 的。
+        """
         prompt_path = self.resolve_prompt_file()
         if prompt_path is None:
             self.append_log("[AI 对接] 找不到高光筛选提示词（prm_en.txt），发不出去")
             return False
         self._bridge_temp_files = []  # 是用户自己的文件，别删
         self.append_log(f"[AI 对接] 用现成的 {text_path.name}，不再重新导出")
-        self.dispatch_ai(prompt_path, text_path, 0)
-        return True
+        return self.dispatch_ai(prompt_path, text_path, 0,
+                                video=self._auto_video or self.video_path)
 
     def _note_prompt_use(self, prompt_path: Path) -> None:
         """记下这一次真正要发出去的提示词是哪一版（只写库，不动上传内容）。
@@ -1985,19 +1990,36 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 任务 #{self._auto_task_id} 的提示词指纹写不进去：{exc}")
 
-    def dispatch_ai(self, prompt_path: Path, merged_path: Path, count: int) -> None:
-        """两个附件都齐了，按 bridge.mode 决定走接口还是走扩展。"""
+    def dispatch_ai(self, prompt_path: Path, merged_path: Path, count: int,
+                    video: Path | None = None) -> bool:
+        """两个附件都齐了，按 bridge.mode 决定走接口还是走扩展。发出去了返回 True。
+
+        **上传的只有两份文本**：PRM 提示词 + 这个视频分析出来的合并 TXT（剧本素材）。
+        视频本体不上传——AI 要的是文字，MP4 又大又慢。`video` / `text` 两个键只是**标明
+        这份 TXT 是哪个 MP4 的**，扩展和日志靠它对得上号。
+
+        配对仍然是硬规则：MP4 得在盘上（不在就说明这条任务的对象没了，不发），
+        TXT 得在盘上（缺就先在 `_auto_step` 那边分析生成，绝不因为缺 TXT 跳过这个 MP4）。
+        """
         self._note_prompt_use(prompt_path)   # 只记账：发什么、怎么发都没变
         cfg = self.cfg.bridge
         if str(cfg.get("mode") or "api") == "api":
             self.send_via_api(prompt_path, merged_path, count)
-            return
+            return True
 
         if self.bridge is None:
             QMessageBox.warning(self, "AI 对接", "Bridge 没有启动")
-            return
+            return False
         from ..bridge import providers  # noqa: PLC0415
 
+        mp4 = video if video is not None else self._auto_video or self.video_path
+        if mp4 is None or not mp4.is_file():
+            self.append_log("[AI 对接] 这条任务的 MP4 不在盘上，按规矩不发"
+                            "（任务必须说清是哪个 MP4 的 TXT）")
+            return False
+        if not merged_path.is_file():
+            self.append_log(f"[AI 对接] {mp4.name} 的 TXT 不在盘上，不发（先分析生成 TXT 再发）")
+            return False
         # 网页版开哪家由 bridge.provider 定：gemini -> gemini.google.com，
         # deepseek -> chat.deepseek.com；扩展也按网址挑对应的页面选择器
         spec = providers.settings(cfg)
@@ -2006,7 +2028,10 @@ class MainWindow(QMainWindow):
             str(cfg.get("task_type") or "gemini_json"),
             {"url": spec["ai_url"],
              "provider": spec["provider"],
-             "video": self.video_path.name if self.video_path else merged_path.stem,
+             # video = 这份 TXT 是哪个视频的（只是名字，不上传视频本体）
+             # text  = 真正要上传的那份合并 TXT
+             "video": mp4.name,
+             "text": merged_path.name,
 
              "message": str(cfg.get("message") or ""),
              "upload_mode": str(cfg.get("upload_mode") or "manual"),
@@ -2020,7 +2045,8 @@ class MainWindow(QMainWindow):
             files=[prompt_path, merged_path])
         state = self.bridge.state()
         self.append_log(f"[AI 对接] 已入队 {task_id}（{spec['label']} 网页版）：上传 "
-                        f"{prompt_path.name} + {merged_path.name}（时间线 {count} 条）"
+                        f"{prompt_path.name} + {merged_path.name}"
+                        f"（{mp4.name} 的时间线 {count} 条）"
                         + ("，等扩展领取" if state["extension_online"]
                            else "；扩展当前离线，先确认扩展已装好并配对"))
         mode = str(cfg.get("upload_mode") or "manual")
@@ -2037,6 +2063,7 @@ class MainWindow(QMainWindow):
             self.append_log(f"[AI 对接] 文件 1：{prompt_path}")
             self.append_log(f"[AI 对接] 文件 2：{merged_path}")
         self.refresh_bridge_label()
+        return True
 
     def api_key(self) -> str:
         """当前提供方的 API key：先看配置里写死的，为空就读环境变量。
@@ -2152,8 +2179,15 @@ class MainWindow(QMainWindow):
         return None
 
     def on_bridge_stop(self) -> None:
+        """「停止」：不再领新任务，手上这条退回等待，下次点「自动剪辑」接着跑。
+
+        故意不把排着的任务标 cancelled——那等于把这一批作废，用户按的是"先停一下"。
+        当前这条走完手上的这一步（回调里已经在跑的分析/渲染不硬杀）就退回 pending，
+        队列状态留在库里，重开程序也还在。
+        """
         if self.auto_running():
-            self._auto_finish("已中止，剩下的不跑了", cancel=True)
+            self._auto_stop = True
+            self._auto_finish("已停下，剩下的留在队列里，下次接着跑", release=True)
         if self.bridge is None:
             return
 
@@ -2221,6 +2255,7 @@ class MainWindow(QMainWindow):
         job = str(self.cfg.bridge.get("ai_job") or "full")
         labels = {"full": "剪辑成片", "collect": "收取脚本", "script": "脚本剪辑"}
         self._auto_job = job
+        self._auto_stop = False      # 上一轮点过「停止」，这次是重新开工
         self._set_auto_state(False)
         self._set_auto_step("", "")
         self._set_auto_progress(0)
@@ -2309,7 +2344,14 @@ class MainWindow(QMainWindow):
         return has if source == "existing" else not has
 
     def _auto_step(self) -> None:
-        """从数据库队列里领下一条任务。后面几步靠各自的完成回调推进，这儿只负责起头。"""
+        """从数据库队列里领下一条任务。后面几步靠各自的完成回调推进，这儿只负责起头。
+
+        点过「停止」就不再领新的：手上这条已经在 `_auto_finish(release=True)` 里退回等待了，
+        这里只是把还在排队的信号挡住，别又领一条出来。
+        """
+        if self._auto_stop:
+            self.append_log("[自动剪辑] 已停止，不再领新任务")
+            return
         db = self._db()
         if db is None:
             self._auto_finish("数据库不可用，队列停下")
@@ -2957,8 +2999,10 @@ class MainWindow(QMainWindow):
             self._auto_finish("缺提示词，已停", cancel=True)
             return
         merged_path, count = self.write_ai_text()
-        self._set_auto_step(self._auto_video.stem, "发送")
-        self.dispatch_ai(prompt_path, merged_path, count)
+        video = self._auto_video
+        self._set_auto_step(video.stem, "发送")
+        if not self.dispatch_ai(prompt_path, merged_path, count, video=video):
+            self._auto_advance("failed", "PRM + TXT 没凑齐，这条没发给 AI")
 
     def _auto_save_script(self) -> bool:
 
@@ -3004,9 +3048,24 @@ class MainWindow(QMainWindow):
         self._set_auto_progress(self._auto_done)
         QTimer.singleShot(0, self._auto_step)  # 让当前回调先返回，别在信号里套信号
 
-    def _auto_finish(self, why: str, *, cancel: bool = False) -> None:
-        """整批收工。cancel=True（人工停 / 缺提示词停）时把没跑完的标 cancelled。"""
-        if cancel:
+    def _auto_finish(self, why: str, *, cancel: bool = False,
+                     release: bool = False) -> None:
+        """整批收工。
+
+        cancel=True（缺提示词这种"这一批没法跑"）把没跑完的标 cancelled；
+        release=True（点了「停止」）只把手上这条退回 pending，排着的一条都不动——
+        队列原样留在库里，下次点「自动剪辑」或者重开程序都接着跑。
+        """
+        if release:
+            task_id = self._auto_task_id
+            db = self._db()
+            if task_id is not None and db is not None:
+                try:
+                    if db_repo.release_ai_task(db, task_id, why):
+                        self.append_log(f"[自动剪辑] 任务 #{task_id} 已退回等待，下次接着跑")
+                except Exception as exc:  # noqa: BLE001 - 停止流程不能被这一步打断
+                    self.append_log(f"[自动剪辑] 任务 #{task_id} 退不回来：{exc}")
+        elif cancel:
             self._settle_auto_task("cancelled", why)
             db = self._db()
             if db is not None:

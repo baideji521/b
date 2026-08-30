@@ -146,6 +146,7 @@ class Win:
         self._auto_video = None
         self.video_path = None
         self._auto_active = False
+        self._auto_stop = False   # 点过「停止」没有：跟 MainWindow 的字段对齐
         self._auto_done = 0
         self._auto_total = 0
         self._last_highlight_json = ""
