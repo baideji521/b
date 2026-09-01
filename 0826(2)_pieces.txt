@@ -1,0 +1,365 @@
+Video: 0826(2).mp4
+Duration: 46.56s
+5 source pieces (the 1-second pure red frames between neighbouring pieces are boundaries only and belong to no piece)
+  Piece 1: 0.00 - 9.20 (9.20s)
+  Piece 2: 10.20 - 18.70 (8.50s)
+  Piece 3: 19.70 - 27.10 (7.40s)
+  Piece 4: 28.10 - 37.50 (9.40s)
+  Piece 5: 38.50 - 45.60 (7.10s)
+The data below is grouped per piece; each block is a complete merged export (4 sections). Timestamps stay absolute seconds of the merged video - copy them verbatim; a piece-relative second = absolute second - that piece's start.
+
+############################################################
+Piece 1 / 5    0.00 - 9.20 (9.20s, 0.00 of this piece = 0.00 of the merged video)
+############################################################
+
+Video: 0826(2).mp4
+2 visual events, 7 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[0.00 - 7.30] Visual (happy 0.92) [low]: man and woman in room with green gem filter
+    On-screen text: When will I die.. 2032
+[0.02 - 0.50] Speech (speaker 1): Okay.
+[0.82 - 2.16] Speech (speaker 1) (happy 1.00): Okay, I like this.
+[2.87 - 4.95] Speech (speaker 1) (happy 0.52): Looks like I'm going to live a long life.
+[5.09 - 5.67] Speech (speaker 1): I have to.
+[5.69 - 6.61] Speech (speaker 1) (angry 1.00): You're going to die in two years.
+[6.69 - 7.63] Speech (speaker 1) (neutral 0.66): I have to find a new girl.
+[7.30 - 12.60] Visual (fearful 0.61) [high]: man holds green ball near face, text changes from 2039 to 2027
+    On-screen text: When will I die.. 2039
+[7.83 - 8.41] Speech (speaker 2) (surprised 0.93): Oh, really?
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[0.00 - 7.30]: standing @ indoor_room
+[7.30 - 12.60]: holding @ indoor_room
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[0.50 - 5.00]: happy 0.92
+[6.00 - 6.50]: angry 0.39
+[7.00 - 8.00]: sad 0.47
+[8.50 - 9.00]: happy 0.90
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 33
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[0.02 - 0.50] Okay.
+[0.82 - 1.26] Okay,
+[1.44 - 1.56] I
+[1.56 - 1.78] like
+[1.78 - 2.16] this.
+[2.87 - 3.31] Looks
+[3.31 - 3.67] like
+[3.67 - 3.85] I'm
+[3.85 - 3.91] going
+[3.91 - 4.03] to
+[4.03 - 4.25] live
+[4.25 - 4.27] a
+[4.27 - 4.53] long
+[4.53 - 4.95] life.
+[5.09 - 5.15] I
+[5.15 - 5.43] have
+[5.43 - 5.67] to.
+[5.69 - 5.87] You're
+[5.87 - 5.87] going
+[5.87 - 5.99] to
+[5.99 - 6.13] die
+[6.13 - 6.25] in
+[6.25 - 6.37] two
+[6.37 - 6.61] years.
+[6.69 - 6.79] I
+[6.79 - 6.87] have
+[6.87 - 6.99] to
+[6.99 - 7.17] find
+[7.17 - 7.27] a
+[7.27 - 7.37] new
+[7.37 - 7.63] girl.
+[7.83 - 8.17] Oh,
+[8.17 - 8.41] really?
+
+############################################################
+Piece 2 / 5    10.20 - 18.70 (8.50s, 0.00 of this piece = 10.20 of the merged video)
+############################################################
+
+Video: 0826(2).mp4
+2 visual events, 8 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[7.30 - 12.60] Visual (fearful 0.61) [high]: man holds green ball near face, text changes from 2039 to 2027
+    On-screen text: When will I die.. 2039
+[9.97 - 11.53] Speech (speaker 1) (angry 0.70): No, no, no, no. Touch it.
+[11.61 - 11.99] Speech (speaker 1) (happy 0.73): Good.
+[12.13 - 12.55] Speech (speaker 1) (neutral 0.41): Touch.
+[12.71 - 13.13] Speech (speaker 3) (neutral 0.48): Bad.
+[13.41 - 13.83] Speech (speaker 3) (angry 0.99): No!
+[14.07 - 14.41] Speech (speaker 1) (angry 0.99): No!
+[14.51 - 14.95] Speech (speaker 1) (happy 0.83): Oh!
+[16.12 - 17.84] Speech (speaker 3) (angry 0.80): I'm literally going to die.
+[16.67 - 20.00] Visual (fearful 0.50) [high]: man and woman appear with green ball on nose
+    On-screen text: When will I die.. 2075
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[7.30 - 12.60]: holding @ indoor_room
+[16.67 - 20.00]: appear @ indoor
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[10.50 - 11.00]: fearful 0.53
+[12.00 - 14.50]: fearful 0.67
+[15.50 - 16.00]: surprised 0.71
+[16.50 - 18.00]: fearful 0.52
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 17
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[9.97 - 10.41] No,
+[10.53 - 10.85] no,
+[10.91 - 11.03] no,
+[11.03 - 11.15] no.
+[11.15 - 11.39] Touch
+[11.39 - 11.53] it.
+[11.61 - 11.99] Good.
+[12.13 - 12.55] Touch.
+[12.71 - 13.13] Bad.
+[13.41 - 13.83] No!
+[14.07 - 14.41] No!
+[14.51 - 14.95] Oh!
+[16.12 - 16.56] I'm
+[16.56 - 16.94] literally
+[16.94 - 17.26] going
+[17.26 - 17.50] to
+[17.50 - 17.84] die.
+
+############################################################
+Piece 3 / 5    19.70 - 27.10 (7.40s, 0.00 of this piece = 19.70 of the merged video)
+############################################################
+
+Video: 0826(2).mp4
+3 visual events, 5 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[16.67 - 20.00] Visual (fearful 0.50) [high]: man and woman appear with green ball on nose
+    On-screen text: When will I die.. 2075
+[20.00 - 25.30] Visual (sad 0.43) [high]: green ball moves from nose to head
+    On-screen text: When will I die.. 2075
+[23.06 - 23.96] Speech (surprised 0.96): I'm nearly there.
+[24.12 - 24.94] Speech (happy 0.75): I'm nearly there.
+[25.16 - 25.56] Speech (disgusted 0.90): Yes!
+[25.30 - 35.67] Visual (happy 0.77) [high]: two people appear with green gem and countdown text
+    On-screen text: When will I die.. 2079
+[25.58 - 26.52] Speech (angry 0.99): I made it to 100!
+[26.94 - 27.38] Speech (disgusted 1.00): Okay,
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[16.67 - 20.00]: appear @ indoor
+[20.00 - 25.30]: move @ indoor
+[25.30 - 35.67]: appear @ indoor
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[22.00 - 24.00]: sad 0.43
+--- 2.00s with no face detected (this is NOT neutral) ---
+[26.00 - 30.50]: happy 0.77
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 13
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[23.06 - 23.50] I'm
+[23.50 - 23.50] nearly
+[23.50 - 23.96] there.
+[24.12 - 24.56] I'm
+[24.56 - 24.68] nearly
+[24.68 - 24.94] there.
+[25.16 - 25.56] Yes!
+[25.58 - 25.80] I
+[25.80 - 25.96] made
+[25.96 - 26.12] it
+[26.12 - 26.22] to
+[26.22 - 26.52] 100!
+[26.94 - 27.38] Okay,
+
+############################################################
+Piece 4 / 5    28.10 - 37.50 (9.40s, 0.00 of this piece = 28.10 of the merged video)
+############################################################
+
+Video: 0826(2).mp4
+2 visual events, 2 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[25.30 - 35.67] Visual (happy 0.77) [high]: two people appear with green gem and countdown text
+    On-screen text: When will I die.. 2079
+[28.21 - 30.13] Speech (speaker 1) (happy 0.75): let's see when will I die.
+[35.67 - 38.77] Visual (sad 0.52) [high]: man with skull graphic looks at camera with gold arrow frames
+    On-screen text: When will I die.. 2025
+[35.76 - 36.86] Speech (speaker 2) (angry 1.00): Oh, what the fuck?
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[25.30 - 35.67]: appear @ indoor
+[35.67 - 38.77]: looking @ indoor
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[26.00 - 30.50]: happy 0.77
+--- 1.50s with no face detected (this is NOT neutral) ---
+[32.00 - 36.00]: neutral 0.52
+[36.50 - 37.00]: sad 0.52
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 10
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[28.21 - 28.65] let's
+[28.65 - 28.75] see
+[28.75 - 29.01] when
+[29.01 - 29.23] will
+[29.23 - 29.49] I
+[29.49 - 30.13] die.
+--- 5.63s with no speech ---
+[35.76 - 36.18] Oh,
+[36.18 - 36.40] what
+[36.40 - 36.54] the
+[36.54 - 36.86] fuck?
+
+############################################################
+Piece 5 / 5    38.50 - 45.60 (7.10s, 0.00 of this piece = 38.50 of the merged video)
+############################################################
+
+Video: 0826(2).mp4
+2 visual events, 6 speech segments
+This file has 4 sections: 1 interleaved timeline | 2 action track | 3 expression track | 4 word-by-word timeline
+Timing authority = SECTION 4. Emotion authority = SECTION 3 (face model). The emotion on Speech lines is audio-based: reference only.
+All timestamps are absolute seconds from the start of the video (decimal seconds, NOT mm:ss), between 0 and the Duration above. Copy them verbatim; never convert them.
+
+============================================================
+SECTION 1 - Interleaved timeline (visual events + speech, sorted by time)
+Row: [start - end] Visual (expression score) [importance]: description
+Row:     On-screen text: ... (indented, belongs to the Visual row above)
+Row: [start - end] Speech (speaker N) (audio emotion score, reference only; omitted when the score is below 0.30): text
+============================================================
+
+[35.67 - 38.77] Visual (sad 0.52) [high]: man with skull graphic looks at camera with gold arrow frames
+    On-screen text: When will I die.. 2025
+[38.46 - 39.48] Speech (happy 1.00): Okay, let's see guys.
+[38.77 - 44.97] Visual (happy 0.82) [high]: man smiles with green balls floating near him, text changes to 2023
+    On-screen text: When will I die.. 2023
+[39.60 - 40.36] Speech (happy 0.66): When will I die?
+[41.22 - 41.58] Speech (happy 0.99): 2027.
+[42.20 - 42.92] Speech (angry 0.84): Iron Bull.
+[43.94 - 44.46] Speech (happy 0.94): Same thing.
+[44.54 - 45.48] Speech (happy 0.96): I still want to achieve a lot.
+
+============================================================
+SECTION 2 - Action track (one timestamp per action, event granularity)
+Row: [start - end]: action @ scene
+============================================================
+
+[35.67 - 38.77]: looking @ indoor
+[38.77 - 44.97]: smiling @ indoor
+
+============================================================
+SECTION 3 - Expression track (one timestamp per expression, face model @2fps)
+Row: [start - end]: expression intensity(0-1) - decisive emotional evidence; largest face on screen only
+============================================================
+
+[38.50 - 45.50]: happy 0.81
+
+============================================================
+SECTION 4 - Word-by-word timeline (one timestamp per word, source language)
+Words: 20
+Row: [start - end] word - clip.start / clip.end must come from here
+============================================================
+
+[38.46 - 38.82] Okay,
+[39.02 - 39.24] let's
+[39.24 - 39.34] see
+[39.34 - 39.48] guys.
+[39.60 - 39.82] When
+[39.82 - 40.00] will
+[40.00 - 40.12] I
+[40.12 - 40.36] die?
+[41.22 - 41.58] 2027.
+[42.20 - 42.56] Iron
+[42.56 - 42.92] Bull.
+[43.94 - 44.30] Same
+[44.30 - 44.46] thing.
+[44.54 - 44.58] I
+[44.58 - 44.70] still
+[44.70 - 44.88] want
+[44.88 - 44.94] to
+[44.94 - 45.22] achieve
+[45.22 - 45.32] a
+[45.32 - 45.48] lot.
