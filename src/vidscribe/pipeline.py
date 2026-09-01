@@ -33,7 +33,7 @@ from .progress import report as report_progress
 from .speech.emotion import EmotionRecognizer, emotion_peaks, relabel
 from .speech.sentences import split_sentences
 from .speech.speakers import SpeakerTagger
-from .speech.whisper_asr import WhisperASR
+from .speech.whisper_asr import LanguageNotAllowed, WhisperASR
 
 from .timeline.engine import action_track, build_timeline, filter_timeline
 from .timeline.exporters import write_json, write_srt, write_timeline_txt
@@ -194,6 +194,32 @@ class DbRun:
             return 0
         return db_repo.save_visual_events(self.db, self.analysis_id, events)
 
+    def save_expression(self, spans: list[dict[str, Any]]) -> int:
+        """人脸表情轨写库（剧本 SECTION 3 的唯一权威来源）。
+
+        空列表也要落：`face_available` 记 0、表里 0 段，才能把"全片没检到脸"和
+        "这条分析根本没存过表情轨"区分开——后者只能重新分析，不能当成没有表情。
+        """
+        if not self.active:
+            return 0
+        return db_repo.save_expression_spans(self.db, self.analysis_id, spans)
+
+    def note_render(self, *, output_language: str | None,
+                    render_config: dict[str, Any] | None,
+                    face_available: bool | None) -> None:
+        """把这次分析当时的渲染事实记下来：输出语言 + timeline 三个过滤参数 + 有没有脸。
+
+        用户之后改了 GUI 配置，从库里重建这个视频的剧本也必须和当初逐行一致。
+        """
+        if not self.active:
+            return
+        try:
+            db_repo.note_render(self.db, self.analysis_id, output_language=output_language,
+                                render_config=render_config, face_available=face_available)
+        except Exception as exc:
+            logger.warning("渲染参数写库失败：%s", exc)
+
+
     def finish(self, *, visual_count: int, speech_count: int, out_dir: Path,
                artifacts: list[tuple[str, Path]] | None = None) -> None:
         """标 completed。**只在这里标**，而且必须是所有数据都写完之后。"""
@@ -207,6 +233,22 @@ class DbRun:
                                     speech_count=speech_count, output_dir=out_dir)
         except Exception as exc:  # 库写不进去不代表分析没跑成，但状态得是真的
             logger.warning("分析状态写库失败（这条记录仍是 running）：%s", exc)
+
+    def block_language(self, language: str) -> None:
+        """语言不在允许范围：把这个语言码记到视频上，自动剪辑以后不再排它。
+
+        只要 video_id 在就能写（不需要 analysis_id）——库开不起来时只终止本次分析，
+        标记这次就落不下，下次还会再判一遍。
+        """
+        if self.db is None or self.video_id is None:
+            logger.warning("语言拦截标记写不进库（库用不了），这次只终止本次分析")
+            return
+        try:
+            db_repo.set_blocked_language(self.db, self.video_id, language)
+            logger.warning("已标记 %s：语言 %s 不在允许范围，以后自动剪辑不再跑它",
+                           self.video_path.name, language)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("语言拦截标记写库失败：%s", exc)
 
     def fail(self, exc: BaseException) -> None:
         """记失败。绝不把已经 completed 的老记录抹成失败，但这次失败也一定留痕。"""
@@ -257,6 +299,11 @@ class Pipeline:
             return self._run_video(video_path, run, force=force, skip_visual=skip_visual,
                                    skip_speech=skip_speech, force_speech=force_speech,
                                    translate=translate)
+        except LanguageNotAllowed as exc:
+            # 语言不对：先把标记落到视频上，再照常记一条 failed 往外抛
+            run.block_language(exc.language)
+            run.fail(exc)
+            raise
         except BaseException as exc:
             run.fail(exc)
             raise
@@ -339,6 +386,8 @@ class Pipeline:
                 try:
                     report_progress("speech", 0.01, "加载语音模型 / 解码音频", video=info.name)
                     speech_payload = self.asr.transcribe(info)
+                except LanguageNotAllowed:
+                    raise      # 语言不对是"这条别跑"，不是识别失败，不许被下面咽掉
                 except Exception as exc:
                     logger.error("语音识别失败：%s", exc)
                     logger.debug(traceback.format_exc())
@@ -433,14 +482,21 @@ class Pipeline:
         # 5) Timeline 合并 + 导出
         with timer.stage("timeline_seconds"):
             report_progress("timeline", 0.2, "合并画面事件与语音", video=info.name)
+            # 这三个参数决定 SECTION 1 出哪些行：跟分析记录一起落库（下面的 note_render），
+            # 以后从库里重建剧本用的是「当时这一套」，不是「现在的 GUI 配置」
+            render_cfg = {
+                "min_overlap_seconds": float(self.cfg.timeline.get("min_overlap_seconds", 0.2)),
+                "importance_filter": str(self.cfg.timeline.get("importance_filter", "low")),
+                "confidence_filter": float(self.cfg.timeline.get("confidence_filter", 0.0)),
+            }
             entries = build_timeline(
                 visual_events, speech_events,
-                min_overlap=float(self.cfg.timeline.get("min_overlap_seconds", 0.2)),
+                min_overlap=render_cfg["min_overlap_seconds"],
             )
             filtered = filter_timeline(
                 entries,
-                importance=str(self.cfg.timeline.get("importance_filter", "low")),
-                min_confidence=float(self.cfg.timeline.get("confidence_filter", 0.0)),
+                importance=render_cfg["importance_filter"],
+                min_confidence=render_cfg["confidence_filter"],
             )
             language = speech_payload.get("language")
             # 两条独立时间戳轨：动作按事件归并，表情来自人脸模型的 2fps 采样。
@@ -547,12 +603,22 @@ class Pipeline:
         write_json(out_dir / "benchmark.json", benchmark)
 
         # 数据库：所有 JSON 都写完了，这时候才把结果写进库并标 completed。
-        # 顺序很关键——先写数据（事件、语音段、逐词），最后一步才改状态，
+        # 顺序很关键——先写数据（事件、语音段、逐词、表情轨、渲染参数），最后一步才改状态，
         # 中间任何一步炸了，这条记录就停在 running / failed，不会出现"库里说成了、盘上没跑完"。
+        # 表情轨必须在 finish() 之前落库：不允许出现 completed 但库里没有 SECTION 3 数据。
         from .audio import wav_path  # noqa: PLC0415
 
         segments_saved, words_saved = run.save_speech(speech_payload)
         events_saved = run.save_visual([e.to_dict() for e in visual_events])
+        spans_saved = run.save_expression(face_spans)
+        face_meta = visual_meta.get("face")
+        run.note_render(
+            output_language=decision.output_language,
+            render_config=render_cfg,
+            # 跑过人脸模型才有 available；skip_visual 之类没跑的情况留 NULL，别谎报"没脸"
+            face_available=(bool(face_meta.get("available"))
+                            if isinstance(face_meta, dict) else None),
+        )
         run.finish(visual_count=len(visual_events), speech_count=len(speech_events),
                    out_dir=out_dir,
                    artifacts=[("source_video", video_path),
@@ -560,9 +626,9 @@ class Pipeline:
                               ("preview_audio",
                                wav_path(self.cfg.path("cache_dir"), video_path))])
         if run.active:
-            logger.info("数据库已记：分析 #%s（%s），视觉事件 %d / 语音段 %d / 逐词 %d",
+            logger.info("数据库已记：分析 #%s（%s），视觉事件 %d / 语音段 %d / 逐词 %d / 表情段 %d",
                         run.analysis_id, "接上已有记录" if run.reused else "新记录",
-                        events_saved, segments_saved, words_saved)
+                        events_saved, segments_saved, words_saved, spans_saved)
 
 
         logger.info(

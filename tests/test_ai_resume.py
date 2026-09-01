@@ -222,31 +222,35 @@ def _calls(node: ast.AST) -> list[str]:
     return [name for _, name in sorted(out)]
 
 
-def _full_branch() -> ast.If:
-    """`_auto_step` 里那个 `if self._auto_job == "full":` 分支。"""
+def _reusable_branch() -> ast.If:
+    """`_auto_step` 里那个 `if reusable is not None:` 分支（库里已有可复用高光 JSON）。"""
     for node in ast.walk(_function("_auto_step")):
         if not isinstance(node, ast.If) or not isinstance(node.test, ast.Compare):
             continue
-        left, cmps = node.test.left, node.test.comparators
-        if (isinstance(left, ast.Attribute) and left.attr == "_auto_job"
-                and cmps and isinstance(cmps[0], ast.Constant) and cmps[0].value == "full"):
+        left = node.test.left
+        if isinstance(left, ast.Name) and left.id == "reusable":
             return node
-    raise AssertionError("_auto_step 里没有 `self._auto_job == \"full\"` 这个分支")
+    raise AssertionError("_auto_step 里没有「库里已有可复用高光 JSON」这个分支")
 
 
 # ------------------------------------------------------------------ T8
 def test_collect_and_script_untouched(tmp_path: Path) -> None:
-    branch = _full_branch()
-    assert "_resume_existing_ai_json" in _calls(branch), "恢复逻辑必须只在 full 分支里"
-    step_calls = _calls(_function("_auto_step"))
-    assert step_calls.count("_resume_existing_ai_json") == 1, "整个 _auto_step 只该有一处恢复"
+    """恢复/复用只有一个入口，三种模式的完成判定全在库里。"""
+    inner = _calls(_function("_reusable_highlight_json"))
+    assert "_resume_existing_ai_json" in inner, "本任务自己的 AI 结果必须查"
+    step = _calls(_function("_auto_step"))
+    assert step.count("_resume_existing_ai_json") == 0, "_auto_step 不许自己再恢复一遍"
+    assert step.count("_reusable_highlight_json") == 1, "「库里有没有可复用 JSON」只问一次"
 
-    # collect 的完成判定还是老样子（_auto_done_file 里按 ai_script + 输出目录判断）
-    done = _calls(_function("_auto_done_file"))
-    assert "artifact_path" in done
+    # 完成判定全查库：collect 看可复用高光 JSON，其余看还在盘上的 final_video
+    done = _calls(_function("_auto_chain_done"))
+    assert "reusable_json_videos" in done and "artifact_path" in done
     assert "_resume_existing_ai_json" not in done
-    # script 那一串还是走现成脚本，没被塞进 AI 恢复
-    assert "_resume_existing_ai_json" not in _calls(_function("_auto_clip_from_script"))
+    # _auto_done_file 只拿路径给日志用，不参与判定
+    assert "artifact_path" in _calls(_function("_auto_done_file"))
+    # 脚本剪辑那一串已经并回 _auto_step，不许再有第二个入口
+    assert "_auto_clip_from_script" not in MAIN_WINDOW_SRC.read_text(encoding="utf-8"), \
+        "旧的 _auto_clip_from_script 必须删干净，别留第二条剪辑路径"
 
     # collect 模式下这个 helper 根本不会被调到；就算被调，也只认 task_id，不看 mode
     cfg, db = make_project(tmp_path)
@@ -259,17 +263,18 @@ def test_collect_and_script_untouched(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------ T9
 def test_resume_path_goes_straight_to_render() -> None:
-    branch = _calls(_full_branch())
-    assert "run_highlight" in branch, "复用结果之后必须直接开剪"
+    branch = _calls(_reusable_branch())
+    assert "run_highlight" in branch, "库里有可复用高光 JSON 之后必须直接开剪"
     for banned in ("dispatch_ai", "send_file_to_ai", "_save_ai_result", "create_clip",
                    "_auto_after_analyze", "on_analyze"):
-        assert banned not in branch, "恢复分支里不该出现 %s" % banned
-    assert "_auto_save_script" in branch, "恢复时补一份脚本留档（按设计）"
+        assert banned not in branch, "复用分支里不该出现 %s" % banned
+    assert "_auto_save_script" in branch, "复用时补一份高光 JSON 留档（按设计）"
 
-    # 恢复分支必须排在"去问 AI"之前，否则照样会先发一遍
+    # 复用分支必须排在"去问 AI"和"重跑分析"之前，否则照样会先发一遍
     step = _calls(_function("_auto_step"))
-    assert step.index("_resume_existing_ai_json") < step.index("_auto_text_file")
-    assert step.index("_resume_existing_ai_json") < step.index("send_file_to_ai")
+    assert step.index("_reusable_highlight_json") < step.index("_auto_text_file")
+    assert step.index("_reusable_highlight_json") < step.index("send_file_to_ai")
+    assert step.index("_reusable_highlight_json") < step.index("on_analyze")
 
     # _auto_save_script 只许写文件 + 登记产物，不许有别的副作用
     saver = _calls(_function("_auto_save_script"))

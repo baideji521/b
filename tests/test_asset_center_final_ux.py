@@ -33,6 +33,14 @@ Phase 16 收的是「一眼看懂 + 操作找得到 + 小窗口不遮挡 + 不�
   T27  空状态都有人话（视频 / JSON / 成品 / 血缘 / PRM）
   T28  操作结果有顶部反馈，不只写日志
   T29  PRM 列表不逐行查成品（Phase 16 新收的 N+1）
+  T30  勾选框在缩略图左边，勾的是视频 id（刷新 / 筛选之后勾还在）
+  T31  底部 全选 / 编辑 / 复制 / 删除 / 反选 跟着勾选数灰或亮
+  T32  编辑 = 重命名：磁盘文件名和库里的路径一起改
+  T33  复制 = 只拷文件到指定目录（原文件留着，库里不加登记）
+  T34  删除（底部）= 只删库里的登记，文件一个不动
+  T35  右键「删除该视频（包含本地文件）」真删文件，成品 mp4 保留
+  T36  三层区间纵向占面板一半
+  T37  PRM「使用中」列 + 启用 / 停用（发 AI 带哪几份就看它）
 
 可以直接 `python tests/test_asset_center_final_ux.py`。
 """
@@ -96,6 +104,35 @@ def quiet() -> None:
     ad.QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     QMenu.exec_ = lambda self, *a, **k: MENUS.append(self)
     ad.RenderDialog.exec_ = lambda self: (self.on_start(), QDialog.Accepted)[1]
+    # PRM 的「新增 / 修改」也是模态的：offscreen 下不许真弹，默认按「取消」返回
+    ad.PrmEditDialog.exec_ = lambda self: QDialog.Rejected
+
+
+def scripted_prm(prm, *, name=None, source=None, text=None, accepted: bool = True) -> None:
+    """让下一次「新增 / 修改」弹窗按脚本填好并点保存（只换 exec_，其余全走真代码）。"""
+    original = prm._dialog
+
+    def build(row=None):
+        dlg = original(row)
+        if name is not None:
+            dlg.edit_name.setText(name)
+        if source is not None:
+            dlg.edit_file.setText(source)
+        if text is not None:
+            dlg.view_text.setPlainText(text)
+        dlg.exec_ = lambda: (QDialog.Accepted if accepted and _accepts(dlg)
+                             else QDialog.Rejected)
+        prm._dialog = original           # 一次性脚本，用完还原
+        return dlg
+
+    prm._dialog = build
+
+
+def _accepts(dlg) -> bool:
+    """跟弹窗 accept() 一样的门槛：名称、正文都不能空。"""
+    got_name, _source, text = dlg.payload()
+    return bool(got_name and text.strip())
+
 
 
 class FakeWindow(QWidget):
@@ -245,13 +282,20 @@ def test_layout_fits_six_window_sizes(tmp_path: Path) -> None:
     page.select_asset(made[0][2][-1])
     application = app()
     application.processEvents()
-    watched = (("视频表", page.tbl_videos), ("JSON 表", page.tbl_assets),
-               ("三层区间", view.json_panel.tbl_layers),
-               ("结论条", view.json_panel.box_engine),
-               ("成品表", page.tbl_products), ("血缘树", page.tree_lineage),
-               ("当前视频", page.lbl_video), ("直接剪辑", page.btn_render),
-               ("查看", page.btn_view), ("更多", page.btn_more),
+    watched = (("视频表", page.tbl_videos),
                ("工作流提示", view.lbl_steps), ("当前状态", view.lbl_now))
+    # ③④ 那些控件搬进弹窗了，按弹窗自己量
+    page.on_open_video()
+    page.on_focus_products()
+    application.processEvents()
+    popups = ((page.dlg_json, (("JSON 表", page.tbl_assets),
+                               ("三层区间", view.json_panel.tbl_layers),
+                               ("结论条", view.json_panel.box_engine),
+                               ("当前视频", page.lbl_video),
+                               ("直接剪辑", page.btn_render), ("查看", page.btn_view),
+                               ("更多", page.btn_more))),
+              (page.dlg_products, (("成品表", page.tbl_products),
+                                   ("血缘树", page.tree_lineage))))
     hint = view.minimumSizeHint()
     assert hint.width() <= 1000 and hint.height() <= 620, \
         f"布局下限放不进最小的一档 1000×620：{hint.width()}×{hint.height()}"
@@ -271,8 +315,25 @@ def test_layout_fits_six_window_sizes(tmp_path: Path) -> None:
                     f"{shown}：{name} 跑出窗口 {rect} 不在 {view.rect()} 里"
                 assert widget.height() > 8 and widget.width() > 8, \
                     f"{shown}：{name} 被压成一条线"
+            for dlg, items in popups:
+                need = dlg.minimumSizeHint()
+                assert need.width() <= width and need.height() <= height, \
+                    f"{width}×{height}：弹窗「{dlg.windowTitle()}」下限 " \
+                    f"{need.width()}×{need.height()} 放不进去"
+                dlg.resize(max(width - 100, need.width()), max(height - 100, need.height()))
+                application.processEvents()
+                seen = f"{dlg.width()}×{dlg.height()}"
+                for name, widget in items:
+                    rect = QRect(widget.mapTo(dlg, QPoint(0, 0)), widget.size())
+                    assert widget.isVisibleTo(dlg), f"{seen}：{name} 看不见了"
+                    assert dlg.rect().contains(rect), \
+                        f"{seen}：{name} 跑出弹窗 {rect} 不在 {dlg.rect()} 里"
+                    assert widget.height() > 8 and widget.width() > 8, \
+                        f"{seen}：{name} 被压成一条线"
     finally:
         view.resize(1240, 800)
+        page.dlg_json.close()
+        page.dlg_products.close()
         view.close()
 
 
@@ -304,7 +365,11 @@ def test_only_one_primary(tmp_path: Path) -> None:
 def test_json_area_has_three_buttons(tmp_path: Path) -> None:
     _cfg, _db, _made, _prm, _win, view = center(tmp_path)
     page = view.videos
-    shown = [b.text() for b in page.findChildren(QPushButton) if b.isVisibleTo(view)]
+    # 视频页自己不摆按钮：一级按钮全在「③ 高光 JSON」弹窗里
+    assert not [b for b in page.findChildren(QPushButton) if b.window() is view], \
+        "视频页上不许再摆按钮，全部收进右键菜单和弹窗"
+    shown = [b.text() for b in page.findChildren(QPushButton)
+             if b.window() is page.dlg_json and b.isVisibleTo(page.dlg_json)]
     assert set(shown) == {"直接剪辑", "查看", "更多 ▾"}, f"一级按钮没收干净：{shown}"
     assert len(shown) <= 3, f"一级按钮不许超过三个：{shown}"
     for name in ("直接剪辑", "查看", "更多 ▾"):
@@ -321,9 +386,12 @@ def test_video_menu_is_complete(tmp_path: Path) -> None:
     page.on_video_menu(right_click(page.tbl_videos, 0))
     assert MENUS, "右键视频没弹菜单"
     items = " ｜ ".join(texts(MENUS[-1]))
-    for needed in ("打开视频", "查看高光 JSON", "查看成品", "只看这个视频的高光",
-                   "只看这个视频的成品", "重新分析", "打开所在文件夹", "复制视频路径"):
+    for needed in ("播放视频", "只看这个视频的高光",
+                   "只看这个视频的成品", "打开所在文件夹", "复制视频路径",
+                   "从库里删除", "删除该视频（包含本地文件）"):
         assert needed in items, f"视频右键少了「{needed}」：{items}"
+    for gone in ("查看高光 JSON", "查看成品与血缘"):
+        assert gone not in items, f"「{gone}」已经改成点那一列的格子了，右键里不该再有：{items}"
 
 
 # ------------------------------------------------------------------ T6
@@ -383,8 +451,8 @@ def test_prm_menu_is_complete(tmp_path: Path) -> None:
     MENUS.clear()
     prm.on_menu(right_click(prm.table, prm.table.currentRow()))
     items = " ｜ ".join(texts(MENUS[-1]))
-    for needed in ("查看 / 编辑", "复制", "设为默认", "删除",
-                   "复制提示词正文", "打开提示词文件"):
+    for needed in ("修改", "新增", "复制", "设为默认", "删除",
+                   "复制提示词正文", "打开提示词文件", "停用（不发给 AI）"):
         assert needed in items, f"PRM 右键少了「{needed}」：{items}"
     prm.select(prm_id)
     MENUS.clear()
@@ -398,23 +466,37 @@ def test_prm_menu_is_complete(tmp_path: Path) -> None:
 def test_double_click_semantics(tmp_path: Path) -> None:
     _cfg, _db, made, _prm, _win, view = center(tmp_path, assets=2)
     page = view.videos
-    # 视频：进入 / 刷新当前视频工作区（焦点落到它的 JSON 表）
-    assert "self.tbl_videos.doubleClicked.connect(lambda _=None: self.on_open_video())" \
-        in PANEL, "双击视频要进当前视频工作区"
+    # 视频：双击 = 播放视频（详情走右键弹窗，双击不再改界面状态）
+    assert "self.tbl_videos.doubleClicked.connect(lambda _=None: self.on_play_video())" \
+        in PANEL, "双击视频要直接播放"
     page.on_open_video()
-    assert page.selected_asset() is not None, "双击视频后应当停在它的高光 JSON 上"
+    assert page.dlg_json.isVisible(), "右键「查看高光 JSON」要开出③弹窗"
+    assert page.selected_asset() is not None, "开了详情弹窗就该停在它的高光 JSON 上"
+    page.dlg_json.close()
     # JSON：查看
     assert "self.tbl_assets.doubleClicked.connect(lambda _=None: self.on_view())" in PANEL, \
         "双击 JSON 必须是「查看」"
     # 成品：打开成品
     assert "self.tbl_products.doubleClicked.connect(lambda _=None: self.on_open_product())" \
         in PANEL, "双击成品必须是「打开成品」"
-    # PRM：编辑
+    # PRM：编辑（双击 = 打开「修改」弹窗）
     assert "self.table.doubleClicked.connect(lambda _=None: self.on_double_click())" in PANEL, \
         "双击 PRM 必须进编辑"
-    view.prm_panel.on_double_click()
-    assert view.prm_panel.edit_name.hasFocus() or view.prm_panel.edit_name.text(), \
-        "双击 PRM 要能直接改档案"
+    opened: list[str] = []
+    original = view.prm_panel._dialog
+
+    def spy(row=None):
+        dlg = original(row)
+        opened.append(str(dlg.windowTitle()))
+        return dlg
+
+    view.prm_panel._dialog = spy
+    try:
+        view.prm_panel.on_double_click()
+    finally:
+        view.prm_panel._dialog = original
+    assert opened and "修改 PRM" in opened[0], f"双击 PRM 要开「修改」弹窗：{opened}"
+
     # 双击不许触发危险动作
     assert "doubleClicked.connect(lambda _=None: self.on_delete" not in PANEL, \
         "双击绝不能删东西"
@@ -459,7 +541,7 @@ def test_filters_combine_json_and_product(tmp_path: Path) -> None:
     page.cmb_json.setCurrentIndex(page.cmb_json.findData("has"))
     page.cmb_product.setCurrentIndex(page.cmb_product.findData("none"))
     page.reload()
-    names = [col(page.tbl_videos, line, 1) for line in range(page.tbl_videos.rowCount())]
+    names = [col(page.tbl_videos, line, 2) for line in range(page.tbl_videos.rowCount())]
     assert names == [waiting.name], f"「有 JSON + 无成品」筛出来的不对：{names}"
     assert plain.name not in names, "没有 JSON 的视频不该出现"
     assert made[0][0].name not in names, "已经剪出成品的视频不该出现"
@@ -498,9 +580,10 @@ def test_asset_center_never_calls_ai(tmp_path: Path) -> None:
     page.chk_deleted.setChecked(True)
     page.refresh_assets()
     page.on_restore()
-    view.prm_panel.edit_name.setText("PRM V3")
-    view.prm_panel.edit_file.setText("prm/rules.txt")
-    view.prm_panel.on_add()
+    scripted_prm(view.prm_panel, name="PRM V3", source="prm/rules.txt", text="切副歌前 0.3 秒")
+    view.prm_panel.on_new()
+    scripted_prm(view.prm_panel, name="PRM V3 改", text="改一版：切副歌前 0.5 秒")
+    view.prm_panel.on_modify()
     view.prm_panel.on_copy()
     view.prm_panel.on_default()
     view.prm_panel.on_delete()
@@ -591,14 +674,14 @@ def test_prm_default_state(tmp_path: Path) -> None:
     prm.reload()
     marks = {}
     for line in range(prm.table.rowCount()):
-        marks[int(col(prm.table, line, 0))] = col(prm.table, line, 5)
-    assert marks[prm_id] == "★", f"默认 PRM 要打星：{marks}"
-    assert marks[other] == "", f"非默认那份不该有星：{marks}"
+        marks[int(col(prm.table, line, 0))] = col(prm.table, line, 4)
+    assert "★" in marks[prm_id], f"默认 PRM 要打星：{marks}"
+    assert "★" not in marks[other], f"非默认那份不该有星：{marks}"
     db_assets.set_default_prm(db, other)
     prm.reload()
-    again = {int(col(prm.table, line, 0)): col(prm.table, line, 5)
+    again = {int(col(prm.table, line, 0)): col(prm.table, line, 4)
              for line in range(prm.table.rowCount())}
-    assert again[other] == "★" and again[prm_id] == "", f"换默认之后星没跟着走：{again}"
+    assert "★" in again[other] and "★" not in again[prm_id], f"换默认之后星没跟着走：{again}"
 
 
 # ------------------------------------------------------------------ T23
@@ -736,6 +819,226 @@ def test_prm_list_is_not_n_plus_one(tmp_path: Path) -> None:
     assert count < 10, f"PRM 列表退化成 N+1：{count} 条 SQL"
 
 
+# ------------------------------------------------------------------ T30
+def test_checkboxes_track_ids_not_rows(tmp_path: Path) -> None:
+    """勾选框在缩略图左边那一列；勾的是视频 id，刷新 / 筛选之后勾还在。"""
+    _cfg, _db, made, _prm, _win, view = center(tmp_path, videos=3, assets=1)
+    page = view.videos
+    assert page.CHECK_COLUMN == 1 and page.NAME_COLUMN == 2, \
+        "勾选列必须在视频名（缩略图）左边"
+    assert page.VIDEO_HEADERS[page.CHECK_COLUMN] == "✓"
+    box = page.tbl_videos.item(0, page.CHECK_COLUMN)
+    assert box is not None and box.checkState() == Qt.Unchecked, "默认一个都不勾"
+    first = int(col(page.tbl_videos, 0, 0))
+    page._toggle_check(box)
+    assert page.checked_ids() == [first], f"点一下要勾上这一行：{page.checked_ids()}"
+    assert box.checkState() == Qt.Checked
+    page._toggle_check(box)
+    assert page.checked_ids() == [], "再点一下要取消"
+    # 勾一个 → 刷新 / 搜索都不许把勾弄丢
+    page._toggle_check(page.tbl_videos.item(0, page.CHECK_COLUMN))
+    page.reload()
+    assert page.checked_ids() == [first], "刷新之后勾丢了"
+    assert page.tbl_videos.item(0, page.CHECK_COLUMN).checkState() == Qt.Checked, \
+        "刷新之后勾没画回来"
+    # 点视频名那一列不算勾选
+    page._toggle_check(page.tbl_videos.item(0, page.CHECK_COLUMN))
+    assert page.checked_ids() == [], "先取消勾选"
+    page._toggle_check(page.tbl_videos.item(0, page.NAME_COLUMN))
+    assert page.checked_ids() == [], "点视频名不该勾上"
+
+
+# ------------------------------------------------------------------ T31
+def test_batch_bar_follows_the_checks(tmp_path: Path) -> None:
+    """底部 全选 / 编辑 / 复制 / 删除 / 反选：按勾了几个灰或亮。"""
+    _cfg, _db, made, _prm, _win, view = center(tmp_path, videos=3, assets=1)
+    page = view.videos
+    labels = [b.text() for b in (view.btn_check_all, view.btn_rename, view.btn_copy_files,
+                                 view.btn_forget, view.btn_invert_checks)]
+    assert labels == ["全选", "编辑", "复制", "删除", "反选"], f"底部按钮不对：{labels}"
+    assert view.lbl_checked.text() == "勾选 0 个", f"计数不对：{view.lbl_checked.text()}"
+    for button in (view.btn_rename, view.btn_copy_files, view.btn_forget):
+        assert not button.isEnabled(), f"没勾东西时「{button.text()}」不该能点"
+    assert view.btn_invert_checks.isEnabled(), "反选一直能点（没勾时等于全选）"
+    page.on_check_all()
+    assert len(page.checked_ids()) == 3, f"全选要勾满当前列表：{page.checked_ids()}"
+    assert view.lbl_checked.text() == "勾选 3 个", f"计数不对：{view.lbl_checked.text()}"
+    assert not view.btn_rename.isEnabled(), "勾了 3 个不许重命名"
+    for button in (view.btn_copy_files, view.btn_forget):
+        assert button.isEnabled(), f"勾了东西「{button.text()}」要能点"
+    # 反选：全勾着按一下等于清空，行数一个都不许少
+    page.on_invert_checks()
+    assert page.checked_ids() == [], "全勾着反选要变成一个都不勾"
+    assert view.lbl_checked.text() == "勾选 0 个"
+    assert page.tbl_videos.rowCount() == 3, "反选只动勾选，一行都不许少"
+    # 一个都没勾时反选 = 全选
+    page.on_invert_checks()
+    assert len(page.checked_ids()) == 3, "一个都没勾时反选要全勾上"
+    # 勾着 1 个反选：剩下那两个被勾上，原来那个取消
+    page.on_invert_checks()
+    first = int(col(page.tbl_videos, 0, 0))
+    page._toggle_check(page.tbl_videos.item(0, page.CHECK_COLUMN))
+    assert view.btn_rename.isEnabled(), "只勾 1 个时才给重命名"
+    page.on_invert_checks()
+    left = page.checked_ids()
+    assert first not in left and len(left) == 2, f"反选没把勾反过来：{left}"
+
+
+
+# ------------------------------------------------------------------ T32
+def test_rename_checked_moves_file_and_row(tmp_path: Path) -> None:
+    """编辑 = 重命名：磁盘文件名变了，库里的路径 / 文件名跟着变。"""
+    _cfg, db, made, _prm, _win, view = center(tmp_path, videos=1, assets=1)
+    page = view.videos
+    video, vid, _ids = made[0]
+    page._toggle_check(page.tbl_videos.item(0, page.CHECK_COLUMN))
+    ad.QInputDialog.getText = staticmethod(lambda *a, **k: ("renamed.mp4", True))
+    page.on_rename_checked()
+    target = video.with_name("renamed.mp4")
+    assert target.is_file() and not video.exists(), "磁盘上的文件名没改"
+    row = db_repo.get_video(db, vid)
+    assert row["file_name"] == "renamed.mp4", f"库里的文件名没跟着改：{row['file_name']}"
+    assert Path(str(row["file_path"])).name == "renamed.mp4" \
+        and os.path.samefile(str(row["file_path"]), target), \
+        f"库里的路径没跟着改：{row['file_path']}"
+    assert col(page.tbl_videos, 0, 2) == "renamed.mp4", "列表里还写着旧名字"
+
+
+# ------------------------------------------------------------------ T33
+def test_copy_checked_copies_files_only(tmp_path: Path) -> None:
+    """复制 = 把勾上的视频文件拷到指定目录：原文件留着，库里不多一条登记。"""
+    _cfg, db, made, _prm, _win, view = center(tmp_path, videos=2, assets=1)
+    page = view.videos
+    folder = tmp_path / "拷出去"
+    folder.mkdir(parents=True, exist_ok=True)
+    ad.QFileDialog.getExistingDirectory = staticmethod(lambda *a, **k: str(folder))
+    page.on_check_all()
+    before = page.tbl_videos.rowCount()
+    page.on_copy_checked()
+    for video, _vid, _ids in made:
+        assert (folder / video.name).is_file(), f"{video.name} 没拷过去"
+        assert video.is_file(), f"{video.name} 原文件不许动"
+    page.reload()
+    assert page.tbl_videos.rowCount() == before, "复制文件不许往库里加登记"
+
+
+# ------------------------------------------------------------------ T34
+def test_forget_checked_keeps_the_files(tmp_path: Path) -> None:
+    """删除（底部）= 只删库里的登记，磁盘文件一个都不动。"""
+    _cfg, db, made, _prm, _win, view = center(tmp_path, videos=2, assets=2, products=1)
+    page = view.videos
+    keep_video, keep_id, _keep_ids = made[1]
+    doomed, doomed_id, _ids = made[0]
+    page._toggle_check(right_click_row_box(page, doomed_id))
+    assert page.checked_ids() == [doomed_id]
+    ok = ad.QMessageBox.exec_
+    ad.QMessageBox.exec_ = lambda self: QMessageBox.Yes
+    try:
+        page.on_forget_checked()
+    finally:
+        ad.QMessageBox.exec_ = ok
+    assert doomed.is_file(), "只删登记的时候磁盘文件不许动"
+    assert db_repo.get_video(db, doomed_id) is None, "库里的登记没删掉"
+    assert db_repo.get_video(db, keep_id) is not None, "没勾的视频不许受影响"
+    assert page.checked_ids() == [], "删完之后勾要清掉"
+    names = [col(page.tbl_videos, line, 2) for line in range(page.tbl_videos.rowCount())]
+    assert names == [keep_video.name], f"列表里应该只剩没删的那个：{names}"
+
+
+# ------------------------------------------------------------------ T35
+def test_delete_video_with_file_removes_the_file(tmp_path: Path) -> None:
+    """右键「删除该视频（包含本地文件）」：文件真删，成品 mp4 保留。"""
+    _cfg, db, made, _prm, _win, view = center(tmp_path, videos=2, assets=1, products=1)
+    page = view.videos
+    doomed, doomed_id, _ids = made[0]
+    keep_video, keep_id, _keep = made[1]
+    product = Path(str(db_assets.list_products(db, doomed_id)[0]["path"]))
+    assert product.is_file(), "先得有一个成品文件"
+    page.select_video(doomed_id)
+    ok = ad.QMessageBox.exec_
+    ad.QMessageBox.exec_ = lambda self: QMessageBox.Yes
+    try:
+        page.on_delete_video_file()
+    finally:
+        ad.QMessageBox.exec_ = ok
+    assert not doomed.exists(), "视频文件没删掉"
+    assert db_repo.get_video(db, doomed_id) is None, "库里的登记没删掉"
+    assert product.is_file(), "成品 mp4 要留着（它不是这个视频本体）"
+    assert keep_video.is_file() and db_repo.get_video(db, keep_id) is not None, \
+        "别的视频不许受影响"
+    # 这一条必须有默认「否」的强确认，不许一点就删
+    assert "setDefaultButton(QMessageBox.No)" in PANEL, "含文件删除要默认选「否」"
+
+
+# ------------------------------------------------------------------ T36
+def test_layer_grid_takes_half_the_panel(tmp_path: Path) -> None:
+    """三层区间纵向占面板的一半：和上面的段列表平分，不再被写死的高度截掉。"""
+    _cfg, _db, made, _prm, _win, view = center(tmp_path, assets=1, products=1)
+    page = view.videos
+    panel = view.json_panel
+    page.select_asset(made[0][2][0])
+    page.on_open_video()
+    page.dlg_json.resize(1000, 620)
+    app().processEvents()
+    try:
+        grid = panel.tbl_layers.height()
+        rows = panel.table.height()
+        assert grid > 60, f"三层区间被压扁了：{grid}px"
+        assert abs(grid - rows) <= max(24, rows * 0.25), \
+            f"三层区间要和段列表各占一半：段列表 {rows}px / 三层 {grid}px"
+        assert panel.tbl_layers.maximumHeight() > 620, \
+            f"三层区间不许再写死最大高度：{panel.tbl_layers.maximumHeight()}"
+    finally:
+        page.dlg_json.close()
+
+
+# ------------------------------------------------------------------ T37
+def test_prm_usage_column_and_toggle(tmp_path: Path) -> None:
+    """PRM 管理页的「状态」列 + 启用 / 停用：发 AI 带哪几份就看这里。"""
+    _cfg, db, _made, prm_id, _win, view = center(tmp_path)
+    prm = view.prm_panel
+    assert prm.HEADERS[4] == "状态", f"PRM 表要有「状态」这一列：{prm.HEADERS}"
+    other = db_assets.create_prm(db, "PRM V2", "prm/rules.txt")
+    prm.reload()
+    usage = {int(col(prm.table, line, 0)): col(prm.table, line, 4)
+             for line in range(prm.table.rowCount())}
+    assert all("✓ 使用中" in text for text in usage.values()), \
+        f"新登记的默认就在用：{usage}"
+    assert {int(row["id"]) for row in db_assets.enabled_prms(db)} == {prm_id, other}
+    # 底部那个按钮的字跟着选中项变：在用的给「停用」，停用的给「启用」
+    prm.select(prm_id)
+    assert prm.btn_toggle.text() == "停用", f"选中在用的那份要给「停用」：{prm.btn_toggle.text()}"
+    # 停用一份：表里改口，库里也不再算它
+    prm.select(other)
+    prm.on_toggle_enabled()
+    line = [i for i in range(prm.table.rowCount()) if col(prm.table, i, 0) == str(other)][0]
+    assert "停用" in col(prm.table, line, 4), \
+        f"停用之后状态列要写「停用」：{col(prm.table, line, 4)}"
+    assert prm.btn_toggle.text() == "启用", f"停用之后按钮要变「启用」：{prm.btn_toggle.text()}"
+    # 状态列写的是发不发 AI，不是「登记还在不在」——软删的那份才写「已删除」
+    assert "已删除" not in col(prm.table, line, 4), \
+        f"只是停用，不该写成已删除：{col(prm.table, line, 4)}"
+    assert [int(row["id"]) for row in db_assets.enabled_prms(db)] == [prm_id], \
+        "停用的那一份不许再出现在「使用中」里"
+
+    # 再点一下回到使用中
+    prm.on_toggle_enabled()
+    assert {int(row["id"]) for row in db_assets.enabled_prms(db)} == {prm_id, other}
+    # 全停用：库里一份都不剩，AI 面板那一行也要说清不会发
+    prm.on_toggle_enabled()
+    prm.select(prm_id)
+    prm.on_toggle_enabled()
+    assert db_assets.enabled_prms(db) == [], "两份都停用就该一份都不剩"
+
+
+def right_click_row_box(page, video_id: int):
+    """找到某个视频在列表里的勾选框格子。"""
+    for line in range(page.tbl_videos.rowCount()):
+        if col(page.tbl_videos, line, 0) == str(video_id):
+            return page.tbl_videos.item(line, page.CHECK_COLUMN)
+    raise AssertionError(f"列表里找不到视频 {video_id}")
+
+
 # ------------------------------------------------------------------ 直接跑
 def main() -> int:
     tests = dict((name, obj) for name, obj in globals().items()
@@ -754,6 +1057,12 @@ def main() -> int:
         "test_layer_conclusion_is_correct", "test_workflow_hint_and_focus_line",
         "test_empty_states_speak_chinese", "test_actions_report_back",
         "test_prm_list_is_not_n_plus_one",
+        "test_checkboxes_track_ids_not_rows", "test_batch_bar_follows_the_checks",
+        "test_rename_checked_moves_file_and_row", "test_copy_checked_copies_files_only",
+        "test_forget_checked_keeps_the_files",
+        "test_delete_video_with_file_removes_the_file",
+        "test_layer_grid_takes_half_the_panel",
+        "test_prm_usage_column_and_toggle",
     ]
     ordered = [(name, tests[name]) for name in order if name in tests]
     ordered += [(name, func) for name, func in sorted(tests.items()) if name not in order]

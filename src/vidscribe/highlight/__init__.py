@@ -1,14 +1,16 @@
-"""高光剪辑：按 AI 给出的 JSON 把原视频剪成「正常播放 + 冻帧特效 + 逐字字幕」的短片。"""
+"""高光剪辑：按 AI 给出的 JSON 把原视频剪成一段短片。
+
+成品只有两段：原速播放段（带原声）+ 1 秒纯红背景（静音）。
+没有冻帧、没有字幕、没有转场特效，也不混任何音效。
+"""
 
 from .clip import (
     HighlightSpec,
-    Overlay,
     default_target,
     parse_spec,
     render_highlight,
     resolve_video,
 )
-from .sfx import SfxPlan, library, plan
 
-__all__ = ["HighlightSpec", "Overlay", "SfxPlan", "default_target", "library", "parse_spec",
-           "plan", "render_highlight", "resolve_video"]
+__all__ = ["HighlightSpec", "default_target", "parse_spec",
+           "render_highlight", "resolve_video"]

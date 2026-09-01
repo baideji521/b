@@ -1,14 +1,16 @@
 """建表语句与表结构版本。
 
-分层就一句话：**文件是文件，数据库是状态。**
-分析结果、AI 回复、剪辑片段照旧落盘（output/、cache/、AI_输出目录），
-这里只记录"有什么、属于哪个视频、现在是什么状态"，让别处不用再扫目录猜。
+分层就一句话：**数据库是分析结果的唯一权威来源，文件只是导出/临时/兼容。**
+本地分析产生的一切（语音段、逐词、画面事件、表情轨、当次渲染参数）都必须进库，
+删掉 output/ 与 cache/ 之后仍要能从库里重建出完整剧本；
+落盘的 JSON/TXT 只是给人看、给扩展 AI 传输、给老版本兼容用的派生物。
 
 一个视频（videos）下面挂：
   analysis_runs   每跑一次分析一条，模型/配置换了就是新的一条，不覆盖历史
-    visual_events   视觉事件（Qwen 只负责"发生了什么"）
-    speech_segments 语音段
-      speech_words  逐词时间戳（精确剪辑靠它，不能退化成只存句子）
+    visual_events     视觉事件（Qwen 只负责"发生了什么"）
+    speech_segments   语音段
+      speech_words    逐词时间戳（精确剪辑靠它，不能退化成只存句子）
+    expression_spans  人脸表情轨（剧本 SECTION 3 的唯一权威来源）
   ai_tasks        一次 AI 请求，状态机 pending -> ... -> completed/failed
     ai_results    AI 原文（raw_response）+ 解析后的 JSON
       clips       AI 选中的片段，start/end/score/type/reason 原样存
@@ -18,7 +20,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 8
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
 TASK_STATES = ("pending", "uploading", "waiting", "processing",
@@ -32,6 +34,16 @@ AUTO_TASK_TYPE = "auto_clip"
 MANUAL_TASK_TYPE = "manual"
 
 ANALYSIS_STATES = ("running", "completed", "failed")
+
+# 表情轨（剧本 SECTION 3）的三种状态，靠 analysis_runs.face_available + 表内行数区分：
+#   ok             这次分析检到了人脸，expression_spans 里有段
+#   no_face        这次分析跑过人脸模型，但全片没有有效人脸（合法的空）
+#   legacy_missing 这条分析在表情落库之前完成，库里根本没有这份数据 -> 只能重新分析
+# 三者必须严格区分：不能拿 no_face 冒充 ok，也不能把 legacy_missing 当成"没有表情"。
+EXPRESSION_OK = "ok"
+EXPRESSION_NO_FACE = "no_face"
+EXPRESSION_LEGACY_MISSING = "legacy_missing"
+EXPRESSION_STATES = (EXPRESSION_OK, EXPRESSION_NO_FACE, EXPRESSION_LEGACY_MISSING)
 
 ARTIFACT_TYPES = ("source_video", "merged_txt", "words_srt", "translated_txt",
                   "preview_audio", "final_video", "thumbnail", "ai_script")
@@ -60,6 +72,9 @@ TABLES: tuple[str, ...] = (
         exists_on_disk INTEGER NOT NULL DEFAULT 1,
         in_library     INTEGER,
         status         TEXT    NOT NULL DEFAULT 'new',
+        -- 语言预检判出来、又不在 speech.allowed_languages 里的那个语言码（比如 'id'）。
+        -- 非空 = 这条视频以后不再自动跑（手动点分析仍会重新预检并当场终止）
+        blocked_language TEXT,
         created_at     TEXT    NOT NULL,
         updated_at     TEXT    NOT NULL
     )
@@ -88,7 +103,13 @@ TABLES: tuple[str, ...] = (
         output_dir         TEXT,
         source             TEXT    NOT NULL DEFAULT 'pipeline',
         error              TEXT,
-        created_at         TEXT    NOT NULL
+        created_at         TEXT    NOT NULL,
+        -- 当次分析的渲染事实：换了 GUI 配置也不该让同一个视频重新生成出不一样的剧本。
+        -- output_language 决定表头与情绪显示名，render_config 是 timeline 的三个过滤参数。
+        output_language    TEXT,
+        render_config      TEXT,
+        -- 1 = 跑过人脸模型且检到脸，0 = 跑过但全片无脸，NULL = 这条分析没存过表情轨
+        face_available     INTEGER
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_runs_video ON analysis_runs(video_id, status)",
@@ -145,6 +166,27 @@ TABLES: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_words_segment ON speech_words(segment_id, word_index)",
     "CREATE INDEX IF NOT EXISTS idx_words_analysis ON speech_words(analysis_id, start_time)",
+
+    # --- 人脸表情轨 -------------------------------------------------------
+    # 剧本 SECTION 3 的唯一权威来源。视觉事件上的 emotion_* 是"事件粒度的覆盖值"，
+    # 这里是人脸模型 2fps 采样归并出的独立时间轴，两者粒度和语义都不同，不能互相推算。
+    # raw_json 存整段原始 span：以后 face 模型多给字段，不用再动 schema。
+    """
+    CREATE TABLE IF NOT EXISTS expression_spans (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        analysis_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+        sequence    INTEGER,
+        start_time  REAL,
+        end_time    REAL,
+        emotion_en  TEXT,
+        intensity   REAL,
+        samples     INTEGER,
+        raw_json    TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_expression_analysis "
+    "ON expression_spans(analysis_id, sequence)",
+
 
     # --- AI 任务 / 结果 / 片段 --------------------------------------------
     # 队列落库，关掉程序再开还在；processing 卡死靠 heartbeat_at 超时捞回来。
@@ -224,8 +266,9 @@ TABLES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_clips_video ON clips(video_id, status)",
 
     # --- PRM（提示词档案）-------------------------------------------------
-    # 只登记"有哪一份提示词、叫什么、在哪个文件"，**内容仍然只存在文件里**。
-    # 成品记 prm_id 而不是文件名：以后文件改名/换目录，历史依然查得到。
+    # **提示词正文存在库里（content）**，库就是唯一权威；filename 只记"当初从哪个
+    # 文件导进来的"，发 AI 时不再读它。成品记 prm_id 而不是文件名：以后改名/换目录，
+    # 历史依然查得到。enabled 是「使用状况」：发 AI 时启用的每一份都当附件带上。
     """
     CREATE TABLE IF NOT EXISTS prm_profiles (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -234,7 +277,9 @@ TABLES: tuple[str, ...] = (
         description TEXT,
         language    TEXT,
         version     TEXT,
+        content     TEXT,
         is_default  INTEGER NOT NULL DEFAULT 0,
+        enabled     INTEGER NOT NULL DEFAULT 1,
         created_at  TEXT    NOT NULL,
         updated_at  TEXT    NOT NULL,
         deleted_at  TEXT

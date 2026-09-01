@@ -503,8 +503,13 @@ function pageCloseOverlays() {
  * 后缀是单独的 TXT 角标），名字太长还会截断，所以按「全名 → 去后缀 → 名字前缀」
  * 三级放宽去数，哪一级数到就用哪一级。复用的窗口里可能有上一轮的同名附件，
  * 所以只看「有没有」会误判，必须比塞之前后的次数。
+ *
+ * siblings 是这一轮同批的其它文件名。一次可能发好几份 PRM，名字常常同前缀
+ * （都以同一串时间戳开头），这时候「前缀」这级会把别人的卡片也数进来，
+ * 一份挂上就显得全挂上了。所以凡是别的文件也命中的前缀一律不用，宁可数不出来
+ * 走角标兜底，也不能把没挂上的算成挂上了。
  */
-function pageCountAttachment(name) {
+function pageCountAttachment(name, siblings) {
   // 后台标签页可能不做布局，innerText 会是空的，退回 textContent
   const body = document.body;
   const text = body ? body.innerText || body.textContent || "" : "";
@@ -517,10 +522,14 @@ function pageCountAttachment(name) {
   };
   const stem = name.replace(/\.[^.]+$/, "");
   // 卡片上的名字会被截断成「2026082619....」，所以前缀要短一点才认得出
+  const others = (Array.isArray(siblings) ? siblings : []).filter((other) => other && other !== name);
+  const ambiguous = (needle) => others.some((other) => other.includes(needle));
   const needles = [name, stem, stem.slice(0, 10), stem.slice(0, 8)];
   let matched = 0;
   let used = "";
   for (const needle of needles) {
+    // 同批别的文件也含这段的话，数出来的次数分不清是谁，跳过这一级
+    if (ambiguous(needle)) continue;
     matched = count(needle);
     if (matched > 0) {
       used = needle;
@@ -1236,16 +1245,19 @@ async function handleAiTask(task) {
     }
 
     // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
-    // 两个文件是一起拖进去的，所以只要认出 prm_en 那个就说明都进去了，
-    // 第二个名字太长会被截断成「2026082619....」，本来就认不准，不拿它当门槛。
+    // 一次可能发好几份 PRM 加一份字幕（PRM 按「使用状况」来，启用几份就发几份），
+    // 所以每一份都要单独数，不能只认第一份就当全挂上了：少挂一份 AI 就按残缺的
+    // 提示词答，回来的 JSON 是错的。名字被截断认不出的那份靠类型角标兜底。
     const names = (payloads.length ? payloads : fileList).map((f) => f.name);
-    const probe = names.slice(0, 1);
+    // 文件越多，页面画卡片、传完的时间越长，等的上限跟着放宽
+    const verifyMs = ATTACH_VERIFY_MS + Math.max(0, names.length - 2) * 2000;
 
     const baselines = {};
     let chipsBase = 0;
     for (const name of names) {
-      const seen = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+      const seen = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
       baselines[name] = Number(seen?.count || 0);
+      // 角标数是整页统计的，每次调都一样，取 max 只是防某次取不到值
       chipsBase = Math.max(chipsBase, Number(seen?.chips || 0));
     }
 
@@ -1261,7 +1273,7 @@ async function handleAiTask(task) {
           const still = [];
           let chipsNow = 0;
           for (const name of left) {
-            const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+            const check = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
             if (check?.failed) throw new Error(`页面提示上传失败（${name}）`);
             chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
             if (Number(check?.count || 0) > baselines[name]) log("已挂上", name, `匹配=${check?.used || ""}`);
@@ -1269,9 +1281,10 @@ async function handleAiTask(task) {
           }
           left = still;
           if (!left.length) return true;
-          // 名字被截断得认不出时，用类型角标数兜底：多出来的角标数够了就算挂上
-          if (chipsNow - chipsBase >= wanted.length) {
-            log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`);
+          // 名字被截断得认不出时，用类型角标数兜底：门槛按这一轮的文件总数来，
+          // 多出来的角标够全部文件才算数，够一个就认账等于放过「只挂上一份」
+          if (chipsNow - chipsBase >= names.length) {
+            log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`, `要 ${names.length} 个`);
             return true;
           }
           await sleep(300);
@@ -1279,6 +1292,7 @@ async function handleAiTask(task) {
         log("还没出卡片", left.join("、"));
         return false;
       };
+
 
 
       // 顺序按实测来：Gemini 页面上压根没有 input[type=file]（日志里 inputs:0），
@@ -1305,7 +1319,7 @@ async function handleAiTask(task) {
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
         // 卡片可能晚一点才冒出来，换下一种方式之前先复查一遍，别白塞第二遍
-        if (p > 0 && await waitCards(probe, 900)) {
+        if (p > 0 && await waitCards(names, 900)) {
           autoDone = true;
           break;
         }
@@ -1332,7 +1346,7 @@ async function handleAiTask(task) {
             if (plan.mode === "drop") log("拖了一次", `目标${attached.target}=${attached.where}`);
             if (plan.mode === "zone") log("砸在拖放覆盖层上", `${attached.where}`);
             if (plan.mode === "input") log("走正常上传", `控件=有 点了+=${attached.plus || "不用"}`);
-            autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
+            autoDone = await waitCards(names, verifyMs);
           } else {
             autoDone = true;
             for (const item of payloads) {
@@ -1346,7 +1360,7 @@ async function handleAiTask(task) {
               }
               await sleep(1200);
             }
-            if (autoDone) autoDone = await waitCards(probe, ATTACH_VERIFY_MS);
+            if (autoDone) autoDone = await waitCards(names, verifyMs);
           }
 
         } catch (error) {
@@ -1384,9 +1398,9 @@ async function handleAiTask(task) {
       for (;;) {
         const missing = [];
         let chipsNow = 0;
-        // 一起选的，认出第一个就够；第二个名字会被截断，认不准
-        for (const name of probe) {
-          const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+        // 每一份都要数：发几份 PRM 就得几份都在，少一份 AI 就按残缺的提示词答
+        for (const name of names) {
+          const check = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
           chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
           if (Number(check?.count || 0) <= baselines[name]) missing.push(name);
         }
@@ -1446,17 +1460,17 @@ async function handleAiTask(task) {
     // 空着附件发出去等于白跑一趟
     if (uploadMode === "auto") {
       let onPage = 0;
-      for (const name of probe) {
-        const check = await runInTab(tabId, pageCountAttachment, [name]).catch(() => null);
+      for (const name of names) {
+        const check = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
         if (Number(check?.count || 0) > baselines[name]
-            || Number(check?.chips || 0) > chipsBase) onPage += 1;
+            || Number(check?.chips || 0) - chipsBase >= names.length) onPage += 1;
       }
       if (!onPage) {
         // 只是提个醒：Gemini 的卡片会把文件名截断，按名字数不一定数得出来，
         // 拿这个当失败条件会误杀。真门槛是后面的「提示语在不在」和「发送键亮不亮」。
         log("发送前复查：按文件名没数出来（卡片名会截断），继续");
       } else {
-        log("发送前复查：附件还在", `命中 ${onPage}/${probe.length}`);
+        log("发送前复查：附件还在", `命中 ${onPage}/${names.length}`);
       }
     }
 

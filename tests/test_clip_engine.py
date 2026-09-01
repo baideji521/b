@@ -6,8 +6,8 @@
   T2  AI 起点落在句中 -> 回到整句起点
   T3  AI 结束落在句中 -> 补到整句说完
   T4  AI 结束越进下一句 -> 提前到下一句开口之前
-  T5  AI 给 18 秒的普通片段 -> 收进 15 秒，且落在语义边界
-  T6  AI 明确标了收尾 -> 允许超过 15 秒
+  T5  AI 给 18 秒的普通片段 -> 不砍时长，按语义边界收（时长要求写在 PRM 里）
+  T6  收尾片段和普通片段一个待遇 -> 都不按时长砍
   T7  多个高光重叠 / 完全重复 -> 不重复出片，留分高的
   T8  没有可剪片段 -> 不启动渲染
   T9  start/end 非法（文本、缺失、NaN、布尔）-> 安全拒绝
@@ -69,7 +69,6 @@ def test_normal_eight_second_clip_passes_through(tmp_path: Path) -> None:
                segments)
     assert (plan.start, plan.end) == (10.0, 18.0)
     assert plan.duration == 8.0
-    assert plan.capped is False and plan.is_ending is False
     assert plan.source_video == "a.mp4" and plan.score == 90
     assert len(plan.words) == 8, plan.words
 
@@ -107,37 +106,34 @@ def test_end_never_crosses_into_next_speech(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ T5
-def test_eighteen_second_clip_is_trimmed_to_fifteen(tmp_path: Path) -> None:
+def test_long_clip_is_not_cut_by_any_duration_rule(tmp_path: Path) -> None:
+    """18 秒的普通片段不许被砍：多长是 PRM 里对 AI 提的要求，代码不再插手。"""
     segments = [spoken(0.0, 5.0, 4), spoken(5.0, 10.0, 4),
                 spoken(10.0, 14.0, 4), spoken(14.0, 19.0, 4)]
     plan = one({"clip": {"start": 0.0, "end": 18.0, "type": "challenge"}}, segments)
-    assert plan.duration <= 15.0, plan
-    assert plan.end == 14.0, "要收在 15 秒内最后一个整句结束点，而不是硬切 15.00"
-    assert plan.capped is True
-    assert any("整句结束点" in note for note in plan.notes), plan.notes
+    assert plan.duration > 15.0, f"不许再按 15 秒砍：{plan}"
+    assert plan.end == 19.0, "AI 的 18.00 落在最后一句里，补到整句说完 19.00"
+    assert not any("上限" in note for note in plan.notes), plan.notes
 
 
-def test_hard_cap_only_when_no_boundary_exists(tmp_path: Path) -> None:
-    """限额内一个语义边界都没有时才允许硬截断，而且要说明白。"""
+def test_one_long_sentence_keeps_its_own_boundary(tmp_path: Path) -> None:
+    """一整句 40 秒也不硬切：只按语义边界收，不再有「找不到边界就截断」这条路。"""
     segments = [seg(0.0, 40.0)]          # 一整句 40 秒，中间没有词边界
     plan = one({"clip": {"start": 0.0, "end": 30.0}}, segments)
-    assert plan.duration == 15.0 and plan.capped is True
-    assert any("硬上限截断" in note for note in plan.notes), plan.notes
+    assert plan.duration == 40.0, f"这一句说完是 40.00：{plan}"
+    assert any("整句说完" in note for note in plan.notes), plan.notes
 
 
 # ------------------------------------------------------------------ T6
-def test_ending_clip_may_exceed_fifteen(tmp_path: Path) -> None:
+def test_ending_clip_is_treated_like_any_other(tmp_path: Path) -> None:
+    """收尾片段不再需要特殊照顾：没有上限，谁都不砍，待遇一模一样。"""
     segments = [spoken(0.0, 5.0, 4), spoken(5.0, 10.0, 4),
                 spoken(10.0, 14.0, 4), spoken(14.0, 19.0, 4)]
-    plan = one({"clip": {"start": 0.0, "end": 18.0, "type": "ending",
-                         "reason": "收尾，把结论说完"}}, segments)
-    assert plan.is_ending is True and plan.capped is False
-    assert plan.duration > 15.0, "收尾片段不许被 15 秒规则砍掉"
-    assert plan.end == 19.0, "收尾也要说完整句"
-
-    # 光是"时长超了"不算收尾
+    ending = one({"clip": {"start": 0.0, "end": 18.0, "type": "ending",
+                           "reason": "收尾，把结论说完"}}, segments)
     plain = one({"clip": {"start": 0.0, "end": 18.0, "reason": "很精彩"}}, segments)
-    assert plain.is_ending is False and plain.duration <= 15.0
+    assert ending.end == plain.end == 19.0, (ending, plain)
+    assert ending.duration == plain.duration, "标不标收尾都是同一个区间"
 
 
 # ------------------------------------------------------------------ T7
@@ -394,9 +390,9 @@ TESTS = (
     test_start_inside_a_sentence_backs_off_to_sentence_start,
     test_end_inside_a_sentence_extends_to_sentence_end,
     test_end_never_crosses_into_next_speech,
-    test_eighteen_second_clip_is_trimmed_to_fifteen,
-    test_hard_cap_only_when_no_boundary_exists,
-    test_ending_clip_may_exceed_fifteen,
+    test_long_clip_is_not_cut_by_any_duration_rule,
+    test_one_long_sentence_keeps_its_own_boundary,
+    test_ending_clip_is_treated_like_any_other,
     test_overlapping_and_duplicate_clips_are_not_rendered_twice,
     test_no_clip_means_no_render,
     test_invalid_times_are_rejected,

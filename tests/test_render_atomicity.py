@@ -132,8 +132,7 @@ def fake_video(cfg, name: str) -> Path:
 
 def spec_for(video: Path) -> clip_mod.HighlightSpec:
     return clip_mod.HighlightSpec(
-        video_name=video.name, clip_start=0.0, clip_end=0.32, freeze_time=0.2,
-        freeze_text="测试", freeze_overlays=[], other_overlays=[], raw={})
+        video_name=video.name, clip_start=0.0, clip_end=0.32, raw={})
 
 
 def orphan_task(cfg, db, video: Path, mode: str = "full", *, merged_txt: bool = False):
@@ -169,6 +168,12 @@ class Win:
     _auto_text_file = mw.MainWindow._auto_text_file
     _auto_script_file = mw.MainWindow._auto_script_file
     _auto_done_file = mw.MainWindow._auto_done_file
+    _auto_chain_done = mw.MainWindow._auto_chain_done
+    _skip_because_done = mw.MainWindow._skip_because_done
+    skip_done_products = mw.MainWindow.skip_done_products
+    _language_blocked = mw.MainWindow._language_blocked
+    _reusable_highlight_json = mw.MainWindow._reusable_highlight_json
+    script_payload = mw.MainWindow.script_payload
     _auto_product_ready = mw.MainWindow._auto_product_ready
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
@@ -481,6 +486,37 @@ def test_complete_product_short_circuits(tmp_path: Path) -> None:
     db.close()
 
 
+# ------------------------------------------------------------------ T11
+def test_render_appends_a_red_tail(tmp_path: Path) -> None:
+    """成品 = 播放段 + 1 秒纯红背景；红屏之前那一帧还不是红的；没有冻帧、字幕、音效。"""
+    cfg, db = make_project(tmp_path)
+    video = source_video(cfg)
+    target = clip_mod.default_target(Path(str(cfg.bridge["ai_output_dir"])), video)
+    result = clip_mod.render_highlight(video, spec_for(video), target)
+
+    tail = int(result["red_tail_frames"])
+    assert abs(float(result["red_tail_seconds"]) - 1.0) < 1e-6, "片尾就该是 1 秒"
+    assert tail == max(1, int(round(result["fps"]))), f"1 秒该是 {result['fps']} 帧：{tail}"
+    for gone in ("sfx", "freeze_frames", "freeze_time", "text"):
+        assert gone not in result, f"{gone} 已经删掉了，统计里不该再有它"
+
+    frames = []
+    with av.open(str(target)) as container:
+        for frame in container.decode(video=0):
+            frames.append(frame.to_ndarray(format="rgb24"))
+    assert len(frames) == result["play_frames"] + tail, f"帧数不对：{len(frames)} vs {result}"
+
+    def is_red(rgb) -> bool:
+        # yuv420p 往返会有几个数值的偏差，给宽一点的容差
+        return bool(rgb[..., 0].min() > 200 and rgb[..., 1].max() < 80
+                    and rgb[..., 2].max() < 80)
+
+    for index, rgb in enumerate(frames[-tail:]):
+        assert is_red(rgb), f"片尾第 {index} 帧不是纯红"
+    assert not is_red(frames[-tail - 1]), "红屏之前那一帧不该已经是红的"
+    db.close()
+
+
 # ------------------------------------------------------------------ 直接跑
 TESTS = (
     test_half_baked_mp4_is_not_a_product,
@@ -493,6 +529,7 @@ TESTS = (
     test_orphan_with_part_leftover_is_re_rendered,
     test_orphan_with_part_and_ai_result_renders_without_ai,
     test_complete_product_short_circuits,
+    test_render_appends_a_red_tail,
 )
 
 

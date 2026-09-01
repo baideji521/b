@@ -188,6 +188,8 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
     _apply_emotion_override(cfg, args)
     _apply_speaker_override(cfg, args)
     from vidscribe.pipeline import Pipeline  # noqa: PLC0415
+    from vidscribe.speech.whisper_asr import LanguageNotAllowed  # noqa: PLC0415
+
 
     videos: list[Path] = []
     for item in args.videos:
@@ -228,6 +230,17 @@ def cmd_run(cfg: Config, args: argparse.Namespace) -> int:
                     force_speech=getattr(args, "force_speech", False),
                     translate=getattr(args, "translate", False),
                 ))
+            except LanguageNotAllowed as exc:
+                # 语言不在允许范围：不是失败，是"这条别跑"。打一行机器可读的标记，
+                # GUI 就靠它判断该弹窗（手动）还是跳过（自动）；库里的标记已经在
+                # pipeline.run_video 里落好了
+                print(f"[语言拦截] language={exc.language} video={video}", flush=True)
+                logger.error("跳过 %s：音频语言 %s 不在 speech.allowed_languages 里",
+                             video.name, exc.language)
+                results.append({
+                    "video": video.name, "video_path": str(video), "status": "SKIP_LANGUAGE",
+                    "error": f"语言 {exc.language} 不在允许范围",
+                })
             except Exception as exc:  # 单个视频失败不影响其它视频
                 logger.error("处理 %s 失败: %s", video.name, exc)
                 logger.debug(traceback.format_exc())
@@ -546,7 +559,7 @@ def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------ 高光剪辑
 def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
-    """按 AI JSON 剪高光：clip.start 起剪，clip.end 冻帧，片尾由 --text-offset 决定。"""
+    """按 AI JSON 剪高光：从 clip.start 剪到 clip.end 原速播放，片尾接 1 秒纯红背景。"""
 
     from vidscribe.highlight import default_target, parse_spec, render_highlight, resolve_video  # noqa: PLC0415
     from vidscribe.highlight import clip_engine  # noqa: PLC0415
@@ -611,13 +624,13 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
     jobs: list[tuple[Any, Path]] = []
     if args.no_engine:
         try:
-            jobs.append((spec.shifted(args.start_offset, args.end_offset, args.text_offset),
+            jobs.append((spec.shifted(args.start_offset, args.end_offset),
                          target))
         except ValueError as exc:
             logger.error("加减秒数不合规: %s", exc)
             return 2
     else:
-        result = _clip_plans(cfg, video, payload, args.max_seconds)
+        result = _clip_plans(cfg, video, payload)
         for line in clip_engine.describe_result(result):
             print(line, flush=True)
         if not result.plans:
@@ -629,7 +642,7 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
         for index, plan in enumerate(result.plans, start=1):
             try:
                 one = parse_spec(clip_engine.payload_for(plan))
-                one = one.shifted(args.start_offset, args.end_offset, args.text_offset)
+                one = one.shifted(args.start_offset, args.end_offset)
             except ValueError as exc:
                 logger.error("第 %d 段修正后的区间不能渲染: %s", index, exc)
                 return 2
@@ -650,8 +663,7 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
         print("[剪辑引擎] 成片验证通过", flush=True)
         write_json(out_path.with_suffix(".json"),
                    {"spec": job.raw,
-                    "offsets": {"start": args.start_offset, "end": args.end_offset,
-                                "text": args.text_offset},
+                    "offsets": {"start": args.start_offset, "end": args.end_offset},
                     "result": result_info})
         logger.info("高光片段已生成: %s", out_path)
     return 0
@@ -664,8 +676,7 @@ def _numbered_target(target: Path, index: int) -> Path:
     return target.with_name(f"{target.stem}_{index}{target.suffix}")
 
 
-def _clip_plans(cfg: Config, video: Path, payload: Any,
-                max_seconds: float | None) -> Any:
+def _clip_plans(cfg: Config, video: Path, payload: Any) -> Any:
     """跑剪辑引擎：逐词时间戳从库里取，视频时长现探；取不到就退化成只做合法性校验。"""
     from vidscribe.highlight import clip_engine  # noqa: PLC0415
     from vidscribe.video_io import probe_video  # noqa: PLC0415
@@ -687,7 +698,7 @@ def _clip_plans(cfg: Config, video: Path, payload: Any,
     except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
         logger.warning("取不到逐词时间戳（%s），本次不修正边界", exc)
     if not segments:
-        logger.warning("库里没有这个视频的逐词时间戳，AI 区间将原样使用（只受 15 秒上限约束）")
+        logger.warning("库里没有这个视频的逐词时间戳，AI 区间将原样使用（只按视频时长收尾）")
     else:
         logger.info("逐词时间戳：%d 句", len(segments))
     if duration is None:
@@ -696,7 +707,6 @@ def _clip_plans(cfg: Config, video: Path, payload: Any,
         except Exception as exc:  # noqa: BLE001
             logger.warning("探不到视频时长（%s），不按时长收尾", exc)
     return clip_engine.plan_clips(payload, segments, video_duration=duration,
-                                  max_seconds=max_seconds or clip_engine.MAX_SECONDS,
                                   source_video=str(video))
 
 
@@ -890,7 +900,7 @@ def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) 
         target = default_target(_export_dir(cfg, video), video)
         target = target.with_name(f"{stem}{target.suffix}")
 
-    result = _clip_plans(cfg, video, payload, args.max_seconds)
+    result = _clip_plans(cfg, video, payload)
     for line in clip_engine.describe_result(result):
         print(line, flush=True)
     if not result.plans:
@@ -922,13 +932,13 @@ def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) 
         # 成品记账走数据层的同一个入口：写实际剪辑区间 → 登记成品 → 挂方案 / PRM
         info = assets.record_product(
             db, int(video_row["id"]), out_path,
-            specs=[assets.clip_spec_for(plan, job.clip_start, job.freeze_time)],
+            specs=[assets.clip_spec_for(plan, job.clip_start, job.clip_end)],
             asset_id=int(asset["id"]),
             prm_id=int(prm_row["id"]) if prm_row is not None else None)
         made.append(out_path)
         logger.info("成品已生成并记账：%s（方案 #%s%s，实际区间 %.2f → %.2f）", out_path,
                     asset["id"], f"，PRM #{prm_row['id']}" if prm_row is not None else "",
-                    job.clip_start, job.freeze_time)
+                    job.clip_start, job.clip_end)
         logger.debug("artifact #%s / clips %s", info["artifact_id"], info["clip_ids"])
     print(f"[高光方案] 本次共产出 {len(made)} 个成品，全部挂在方案 #{asset['id']} 名下")
     return 0
@@ -1387,15 +1397,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_hl.add_argument("--start-offset", type=float, default=0.0,
                       help="起剪点 = clip.start + 本值，秒；负数提前起剪")
     p_hl.add_argument("--end-offset", type=float, default=0.0,
-                      help="冻帧点 = clip.end + 本值，秒；正数晚一点冻结")
-    p_hl.add_argument("--text-offset", type=float, default=0.0,
-                      help="冻帧+字幕这段的时长，秒；0 只留一帧，不能为负")
+                      help="结束点 = clip.end + 本值，秒；正数多留一点")
     p_hl.add_argument("--dry-run", action="store_true",
                       help="只跑剪辑引擎算区间并打印中文报告，不渲染、不写文件")
     p_hl.add_argument("--no-engine", action="store_true",
                       help="不修正边界，clip.start / clip.end 原样照剪（老行为）")
-    p_hl.add_argument("--max-seconds", type=float, default=None,
-                      help="普通片段时长上限，秒；默认 15，收尾片段不受限")
 
 
     p_hl.set_defaults(func=cmd_highlight)
@@ -1430,8 +1436,6 @@ def build_parser() -> argparse.ArgumentParser:
                       help="只用这份 JSON 剪成片，**不调用 AI**；可配 --prm 记这次用的是哪版 PRM")
     p_as.add_argument("--prm", default=None, metavar="PRM_ID", help="配合 --render：成品记这版 PRM")
     p_as.add_argument("--out", default=None, help="配合 --render：输出 MP4 路径")
-    p_as.add_argument("--max-seconds", dest="max_seconds", type=float, default=None,
-                      help="配合 --render：普通片段时长上限，默认 15")
     p_as.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="配合 --render：只算区间不渲染")
     p_as.set_defaults(func=cmd_assets)

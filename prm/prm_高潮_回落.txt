@@ -89,7 +89,7 @@ The final output MUST use EXACTLY this structure:
 },
 "comment": {
 "time": 0.00,
-"text": "English comment",
+"text": "",
 "kind": "comment"
 },
 "evaluation": "中文评价"
@@ -2128,7 +2128,7 @@ Return exactly ONE JSON object using this structure:
 },
 "comment": {
 "time": 0.00,
-"text": "English comment",
+"text": "",
 "kind": "comment"
 },
 "evaluation": "中文评价"

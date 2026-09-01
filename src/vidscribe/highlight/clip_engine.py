@@ -12,12 +12,13 @@
         ↓
     highlight/clip.py 的 parse_spec + render_highlight（既有 PyAV 渲染，原样复用）
 
-三条硬规则（都是之前踩过的坑）：
+两条硬规则（都是之前踩过的坑）：
 
   1. 不从一句话中间开始——落在句中就回溯到整句起点（太远则退到词边界）。
   2. 结束必须在**下一次说话之前**——AI 给的 end 越到下一句里，就提前到上一句说完那一刻。
-  3. 普通片段 <= 15 秒，而且要在 15 秒内**最近的语义边界**上收，不做粗暴的 start+15 截断；
-     只有明确是收尾（type/reason 说了 ending/结尾/总结…）才允许超。
+
+片段多长不由这一层管：时长是 PRM（提示词）里对 AI 提的要求，AI 给多长就剪多长。
+以前这里写死「普通片段 ≤ 15 秒」，那是把提示词里的口径搬进了代码，PRM 一改就打架。
 
 时间一律按毫秒（3 位小数）取整，避免浮点尾差让"同样的输入"算出不同结果。
 """
@@ -28,8 +29,6 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
-# 默认上限：普通高光片段最长 15 秒
-MAX_SECONDS = 15.0
 # 结束点与下一句开口之间至少留这么多，免得把下一句的第一个音带进来
 SPEECH_GUARD = 0.08
 # 判断"已经在整句起点/整句收尾"的容差
@@ -43,9 +42,6 @@ MERGE_GAP = 0.60
 MIN_COVER_RATIO = 0.5
 MIN_COVER_SECONDS = 0.8
 
-# 收尾关键词：只看 AI 自己给的 type / reason，不靠"时长超了"来猜
-ENDING_WORDS = ("ending", "end_card", "conclusion", "outro", "closing", "wrap",
-                "final", "结尾", "收尾", "总结", "结语", "片尾", "最后")
 
 
 # ============================================================== 输入数据结构
@@ -84,8 +80,6 @@ class ClipPlan:
     type: str = ""
     words: tuple[Word, ...] = ()
     next_speech_start: float | None = None
-    is_ending: bool = False
-    capped: bool = False
     notes: tuple[str, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -225,13 +219,6 @@ def clips_in_payload(payload: Any) -> list[dict[str, Any]]:
     return out
 
 
-def is_ending_clip(clip: dict[str, Any]) -> bool:
-    """这条是不是收尾片段。只认 AI 自己说的 type / reason / evaluation，不按时长猜。"""
-    blob = " ".join(str(clip.get(key) or "") for key in ("type", "kind", "reason", "evaluation"))
-    low = blob.lower()
-    return any(word in low for word in ENDING_WORDS)
-
-
 # ============================================================== 边界算法
 def _segment_at(segments: Sequence[Segment], moment: float) -> Segment | None:
     """哪一句正好覆盖这个时刻（含端点）。没有就是 None（此刻没人说话）。"""
@@ -308,21 +295,12 @@ def _clip_sentences(segments: Sequence[Segment], start: float,
     return chain
 
 
-def _boundaries(segments: Sequence[Segment], start: float,
-
-                horizon: float) -> tuple[list[float], list[float]]:
-    """[start, horizon] 内可用的收尾点：整句收尾点 + 词收尾点，都已排序去重。"""
-    sentence_ends = sorted({round(seg.end, 3) for seg in segments
-                            if start + EPS < seg.end <= horizon + EPS})
-    word_ends = sorted({round(word.end, 3) for seg in segments for word in seg.words
-                        if start + EPS < word.end <= horizon + EPS})
-    return sentence_ends, word_ends
-
-
 def _snap_end(start: float, ai_end: float, segments: Sequence[Segment], *,
-              limit: float, is_ending: bool,
-              video_duration: float | None) -> tuple[float, float | None, list[str], bool]:
-    """结束点：先别越到下一句里，再收进 15 秒。返回 (end, 下一句起点, 说明, 是否触发上限)。"""
+              video_duration: float | None) -> tuple[float, float | None, list[str]]:
+    """结束点：别越到下一句里，也别越出视频。返回 (end, 下一句起点, 说明)。
+
+    多长不管——时长的要求写在 PRM 里，由 AI 决定，这一层只修边界。
+    """
     notes: list[str] = []
     end = round(ai_end, 3)
     inside = _clip_sentences(segments, start, ai_end)
@@ -337,38 +315,20 @@ def _snap_end(start: float, ai_end: float, segments: Sequence[Segment], *,
             notes.append(f"结束提前到下一段说话之前（{ai_end:.2f} → {end:.2f}，"
                          f"下一句 {next_start:.2f} 开口）")
         elif last.start - EPS <= end <= last.end - EPS and end < last.end:
-            # AI 把这句话切了一半：能在限额内就补到整句说完
-            if last.end - start <= limit or is_ending:
-                notes.append(f"结束延到整句说完（{ai_end:.2f} → {last.end:.2f}）")
-                end = round(last.end, 3)
+            # AI 把这句话切了一半：补到整句说完
+            notes.append(f"结束延到整句说完（{ai_end:.2f} → {last.end:.2f}）")
+            end = round(last.end, 3)
     elif segments:
         next_start = _next_speech_start(segments, start)
         if next_start is not None and end > next_start - SPEECH_GUARD:
             end = round(next_start - SPEECH_GUARD, 3)
             notes.append(f"结束提前到下一段说话之前（{ai_end:.2f} → {end:.2f}）")
 
-    # --- 规则二：15 秒硬上限（收尾片段例外）---
-    capped = False
-    if not is_ending and end - start > limit:
-        horizon = start + limit
-        sentence_ends, word_ends = _boundaries(segments, start, horizon)
-        if sentence_ends:
-            picked = sentence_ends[-1]
-            notes.append(f"超过 {limit:g}s：收在限额内最后一个整句结束点 {picked:.2f}")
-        elif word_ends:
-            picked = word_ends[-1]
-            notes.append(f"超过 {limit:g}s：限额内没有整句收尾，收在词边界 {picked:.2f}")
-        else:
-            picked = round(horizon, 3)
-            notes.append(f"超过 {limit:g}s：这段里找不到任何语义边界，按硬上限截断 {picked:.2f}")
-        end = round(picked, 3)
-        capped = True
-
-    # --- 规则三：不许超出视频本身 ---
+    # --- 规则二：不许超出视频本身 ---
     if video_duration is not None and end > video_duration:
         end = round(video_duration, 3)
         notes.append(f"结束点超出视频时长，收到 {end:.2f}")
-    return end, next_start, notes, capped
+    return end, next_start, notes
 
 
 def _words_between(segments: Sequence[Segment], start: float, end: float) -> tuple[Word, ...]:
@@ -382,14 +342,12 @@ def _words_between(segments: Sequence[Segment], start: float, end: float) -> tup
 # ============================================================== 主入口
 def plan_clips(payload: Any, segments: Sequence[Segment] | None = None, *,
                video_duration: float | None = None,
-               max_seconds: float = MAX_SECONDS,
                source_video: str = "") -> PlanResult:
     """把 AI JSON 变成一组 ClipPlan。纯函数：不看时间、不读盘、不问 AI、不随机。
 
     `segments` 为空（没跑过分析 / 没有逐词）时不瞎猜：保持 AI 原区间，只做
-    合法性校验 + 15 秒上限，并在 notes 里写明"没有逐词数据"。
+    合法性校验和"不超出视频时长"，并在 notes 里写明"没有逐词数据"。
     """
-    limit = float(max_seconds) if max_seconds and max_seconds > 0 else MAX_SECONDS
     segs = tuple(segments or ())
     plans: list[ClipPlan] = []
     rejected: list[tuple[dict[str, Any], str]] = []
@@ -409,7 +367,6 @@ def plan_clips(payload: Any, segments: Sequence[Segment] | None = None, *,
             rejected.append((clip, f"起点 {ai_start} 已经超出视频时长 {video_duration}"))
             continue
 
-        ending = is_ending_clip(clip)
         notes: list[str] = []
         if segs:
             start, start_notes = _snap_start(ai_start, segs)
@@ -417,14 +374,11 @@ def plan_clips(payload: Any, segments: Sequence[Segment] | None = None, *,
         else:
             start = round(ai_start, 3)
             notes.append("没有逐词数据，起点保持 AI 原值")
-        end, next_start, end_notes, capped = _snap_end(
-            start, ai_end, segs, limit=limit, is_ending=ending,
-            video_duration=video_duration)
+        end, next_start, end_notes = _snap_end(
+            start, ai_end, segs, video_duration=video_duration)
         notes += end_notes
         if not segs:
-            notes.append("没有逐词数据，结束点只受 15 秒上限和视频时长约束")
-        if ending:
-            notes.append("AI 标了收尾，允许超过 15 秒")
+            notes.append("没有逐词数据，结束点只受视频时长约束")
         if end - start <= 0:
             rejected.append((clip, f"修正后区间不成立（{start} → {end}）"))
             continue
@@ -438,15 +392,13 @@ def plan_clips(payload: Any, segments: Sequence[Segment] | None = None, *,
             type=str(clip.get("type") or ""),
             words=_words_between(segs, start, end),
             next_speech_start=next_start,
-            is_ending=ending, capped=capped,
             notes=tuple(notes), raw=dict(clip),
         ))
 
-    return PlanResult(plans=_dedupe(plans, segs, limit), rejected=tuple(rejected))
+    return PlanResult(plans=_dedupe(plans, segs), rejected=tuple(rejected))
 
 
-def _dedupe(plans: list[ClipPlan], segments: Sequence[Segment],
-            limit: float) -> tuple[ClipPlan, ...]:
+def _dedupe(plans: list[ClipPlan], segments: Sequence[Segment]) -> tuple[ClipPlan, ...]:
     """多高光整理：排序 -> 去完全重复 -> 重叠留高分 -> 同句相邻才合并。
 
     排序键写全（start, end, -score, type, reason），所以顺序不依赖输入顺序，
@@ -465,7 +417,7 @@ def _dedupe(plans: list[ClipPlan], segments: Sequence[Segment],
                 if _score(plan) > _score(prev):
                     kept[-1] = plan
                 continue
-            merged = _merge(prev, plan, segments, limit)
+            merged = _merge(prev, plan, segments)
             if merged is not None:
                 kept[-1] = merged
                 continue
@@ -477,13 +429,11 @@ def _score(plan: ClipPlan) -> float:
     return plan.score if plan.score is not None else -1.0
 
 
-def _merge(first: ClipPlan, second: ClipPlan, segments: Sequence[Segment],
-           limit: float) -> ClipPlan | None:
-    """相邻两段能不能并成一段：空隙很小、中间没有别人开口、并完还在限额内。"""
+def _merge(first: ClipPlan, second: ClipPlan,
+           segments: Sequence[Segment]) -> ClipPlan | None:
+    """相邻两段能不能并成一段：空隙很小、中间没有别人开口。"""
     gap = second.start - first.end
     if gap < 0 or gap > MERGE_GAP:
-        return None
-    if not first.is_ending and not second.is_ending and second.end - first.start > limit:
         return None
     between = [seg for seg in segments if first.end + EPS < seg.start < second.start - EPS]
     if between:
@@ -500,8 +450,6 @@ def _merge(first: ClipPlan, second: ClipPlan, segments: Sequence[Segment],
         reason=winner.reason, score=winner.score, type=winner.type,
         words=_words_between(segments, first.start, second.end),
         next_speech_start=second.next_speech_start,
-        is_ending=first.is_ending or second.is_ending,
-        capped=first.capped or second.capped,
         notes=notes, raw=dict(winner.raw),
     )
 
@@ -515,9 +463,7 @@ def describe(plan: ClipPlan, index: int = 1, total: int = 1) -> list[str]:
         f"[剪辑引擎] AI区间：{plan.ai_start:.2f} → {plan.ai_end:.2f}"
         f"（{plan.ai_end - plan.ai_start:.2f} 秒）",
         f"[剪辑引擎] 修正后：{plan.start:.2f} → {plan.end:.2f}",
-        f"[剪辑引擎] 时长：{plan.duration:.2f} 秒"
-        + ("（收尾片段，允许超 15 秒）" if plan.is_ending else "")
-        + ("（触发 15 秒上限）" if plan.capped else ""),
+        f"[剪辑引擎] 时长：{plan.duration:.2f} 秒",
         f"[剪辑引擎] 下一段说话起点："
         + (f"{plan.next_speech_start:.2f}" if plan.next_speech_start is not None else "没有下一段"),
         f"[剪辑引擎] 用到 {len(plan.words)} 个词"

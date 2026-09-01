@@ -92,7 +92,7 @@ class FakeWorker:
 
 
 def one_plan(payload: dict, start: float, end: float):
-    """拿真引擎算一条计划（没有逐词数据时就是 AI 原区间 + 15 秒上限）。"""
+    """拿真引擎算一条计划（没有逐词数据时就是 AI 原区间，只按视频时长收尾）。"""
     result = clip_engine.plan_clips(payload, ())
     assert result.plans, "引擎至少要给出一条计划"
     return result.plans[0], start, end

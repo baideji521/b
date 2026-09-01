@@ -44,7 +44,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QPoint, QRect, Qt  # noqa: E402
 from PyQt5.QtGui import QFontMetrics  # noqa: E402
-from PyQt5.QtWidgets import (QApplication, QGroupBox, QMenu,  # noqa: E402
+from PyQt5.QtWidgets import (QApplication, QDialog, QGroupBox, QMenu,  # noqa: E402
                              QMessageBox, QPushButton, QWidget)
 
 from vidscribe.db import assets as db_assets  # noqa: E402
@@ -72,6 +72,9 @@ def quiet() -> None:
     ad.QMessageBox.warning = staticmethod(lambda *a, **k: None)
     ad.QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
     QMenu.exec_ = lambda self, *a, **k: MENUS.append(self)
+    # PRM 的「新增 / 修改」弹窗是模态的：offscreen 下默认按「取消」，不许阻塞
+    ad.PrmEditDialog.exec_ = lambda self: QDialog.Rejected
+
 
 
 def payload(start: float = 8.23, end: float = 23.49, score: float = 0.91,
@@ -212,10 +215,18 @@ def test_product_area_exists(tmp_path: Path) -> None:
 # ------------------------------------------------------------------ T7
 def test_only_one_primary(tmp_path: Path) -> None:
     _cfg, _db, _made, _prm, _win, view = center(tmp_path)
-    bold = [b.text() for b in view.videos.findChildren(QPushButton) if b.font().bold()]
+    page = view.videos
+    bold = [b.text() for b in page.findChildren(QPushButton) if b.font().bold()]
     assert bold == ["直接剪辑"], f"唯一 Primary 必须是「直接剪辑」：{bold}"
-    shown = {b.text() for b in view.videos.findChildren(QPushButton) if b.isVisibleTo(view)}
+    # 一级按钮全在「③ 高光 JSON」弹窗里（视频页自己一个按钮都不摆）
+    page.on_open_video()
+    app().processEvents()
+    shown = {b.text() for b in page.findChildren(QPushButton)
+             if b.window() is page.dlg_json and b.isVisibleTo(page.dlg_json)}
     assert shown == {"直接剪辑", "查看", "更多 ▾"}, f"一级操作最多三个：{shown}"
+    assert not [b.text() for b in page.findChildren(QPushButton) if b.window() is view], \
+        "视频页上不该再摆按钮，全部收进右键菜单和弹窗"
+    page.dlg_json.close()
 
 
 # ------------------------------------------------------------------ T8
@@ -224,13 +235,15 @@ def test_video_context_menu(tmp_path: Path) -> None:
     MENUS.clear()
     view.videos.on_video_menu(QPoint(5, 5))
     assert MENUS, "右键视频必须弹菜单"
-    items = texts(MENUS[-1])
-    for needed in ("打开视频", "查看高光 JSON", "查看成品", "只看这个视频的高光",
-                   "只看这个视频的成品", "打开所在文件夹", "复制视频路径"):
+    items = " ｜ ".join(texts(MENUS[-1]))
+    for needed in ("播放视频",
+                   "只看这个视频的高光", "只看这个视频的成品", "看全部视频",
+                   "打开所在文件夹", "复制视频路径", "从库里删除",
+                   "删除该视频（包含本地文件）"):
         assert needed in items, f"右键视频缺 {needed}：{items}"
-    assert any("重新分析" in t for t in items), f"右键视频要有重新分析入口：{items}"
-    again = [a for a in MENUS[-1].actions() if "重新分析" in a.text()][0]
-    assert not again.isEnabled(), "替身主界面没有分析入口时，重新分析必须灰着（不许自己造）"
+    # 「查看高光 JSON」「查看成品与血缘」改成点那一行的 JSON / 成品格子，不再进菜单
+    for gone in ("重新分析", "直接剪辑", "查看高光 JSON", "查看成品与血缘"):
+        assert gone not in items, f"右键视频不该还有「{gone}」：{items}"
 
 
 # ------------------------------------------------------------------ T9
@@ -308,7 +321,7 @@ def test_prm_context_menu(tmp_path: Path) -> None:
     prm.on_menu(QPoint(5, 5))
     assert MENUS, "右键 PRM 必须弹菜单"
     items = texts(MENUS[-1])
-    for needed in ("查看 / 编辑", "复制", "删除", "复制提示词正文", "打开提示词文件"):
+    for needed in ("修改", "新增", "复制", "删除", "复制提示词正文", "打开提示词文件"):
         assert needed in items, f"右键 PRM 缺 {needed}：{items}"
     assert "★ 默认 PRM" in items and "设为默认" not in items, \
         f"默认那份不该再显示「设为默认」：{items}"
@@ -417,11 +430,17 @@ def test_nothing_overflows_small_windows(tmp_path: Path) -> None:
     application = app()
     view.show()
     application.processEvents()
-    watched = (("视频表", page.tbl_videos), ("JSON 表", page.tbl_assets),
-               ("成品表", page.tbl_products), ("血缘树", page.tree_lineage),
-               ("三层区间", view.json_panel.tbl_layers),
-               ("直接剪辑", page.btn_render), ("查看", page.btn_view),
-               ("更多", page.btn_more), ("当前视频", page.lbl_video))
+    watched = (("视频表", page.tbl_videos),)
+    # 详情控件现在住在两个弹窗里，单独按弹窗量（主窗口只管视频列表）
+    page.on_open_video()
+    page.on_focus_products()
+    application.processEvents()
+    popups = ((page.dlg_json, (("JSON 表", page.tbl_assets),
+                               ("三层区间", view.json_panel.tbl_layers),
+                               ("直接剪辑", page.btn_render), ("查看", page.btn_view),
+                               ("更多", page.btn_more), ("当前视频", page.lbl_video))),
+              (page.dlg_products, (("成品表", page.tbl_products),
+                                   ("血缘树", page.tree_lineage))))
     base = application.font()
     try:
         for scale in (1.0, 1.25, 1.5):          # 125% / 150% DPI 的代理：字体放大
@@ -443,10 +462,24 @@ def test_nothing_overflows_small_windows(tmp_path: Path) -> None:
                         f"{shown}：{name} 跑出窗口 {rect} 不在 {view.rect()} 里"
                     assert widget.height() > 8 and widget.width() > 8, \
                         f"{shown}：{name} 被压成一条线"
+                for dlg, items in popups:
+                    dlg.resize(max(900, dlg.minimumSizeHint().width()),
+                               max(560, dlg.minimumSizeHint().height()))
+                    application.processEvents()
+                    seen = f"{dlg.width()}×{dlg.height()} @{scale:g}"
+                    for name, widget in items:
+                        rect = QRect(widget.mapTo(dlg, QPoint(0, 0)), widget.size())
+                        assert widget.isVisibleTo(dlg), f"{seen}：{name} 看不见了"
+                        assert dlg.rect().contains(rect), \
+                            f"{seen}：{name} 跑出弹窗 {rect} 不在 {dlg.rect()} 里"
+                        assert widget.height() > 8 and widget.width() > 8, \
+                            f"{seen}：{name} 被压成一条线"
     finally:
         application.setFont(base)
         application.processEvents()
         view.resize(1240, 800)
+        page.dlg_json.close()
+        page.dlg_products.close()
         view.close()                    # 别把窗口留给后面的测试（单例那条会数窗口）
 
 
@@ -458,9 +491,7 @@ def test_minimum_size_fits_small_screens(tmp_path: Path) -> None:
         f"写死的最小尺寸放不进 1280×720：{view.minimumWidth()}×{view.minimumHeight()}"
     assert hint.width() <= 1280 and hint.height() <= 720, \
         f"布局自身的下限放不进 1280×720：{hint.width()}×{hint.height()}"
-    for split, name in ((view.videos.split_main, "主分栏"),
-                        (view.videos.split_detail, "JSON / 成品"),
-                        (view.videos.split_assets, "JSON 表 / 详情"),
+    for split, name in ((view.videos.split_assets, "JSON 表 / 详情"),
                         (view.videos.split_products, "成品表 / 血缘")):
         assert not split.childrenCollapsible(), f"{name} 不许被拖成 0"
 

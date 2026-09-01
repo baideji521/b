@@ -25,6 +25,20 @@ from .sentences import split_sentences
 logger = get_logger(__name__)
 
 
+class LanguageNotAllowed(RuntimeError):
+    """音频语言不在 `speech.allowed_languages` 里。
+
+    在**完整识别之前**（语言预检那一步）就抛出来：跑完 large-v3 再发现语言不对是纯浪费，
+    预检只要几秒。手动分析靠它终止并弹窗，自动剪辑靠它跳过并把视频标记成以后不再跑。
+    """
+
+    def __init__(self, language: str, probability: float | None = None):
+        self.language = str(language)
+        self.probability = probability
+        super().__init__(f"音频语言 {self.language} 不在允许范围内")
+
+
+
 def _register_cuda_dlls() -> None:
     """CTranslate2 需要 cuBLAS/cuDNN9 DLL；torch 的 wheel 里自带，把目录加入搜索路径。"""
     if os.name != "nt":
@@ -153,9 +167,41 @@ class WhisperASR:
         logger.info("已释放语音模型显存")
 
     # ------------------------------------------------------------------ 识别
+    def _allowed_languages(self) -> tuple[str, ...]:
+        """只跑这些语言（`speech.allowed_languages`，比如 ["en","zh"]）。留空 = 谁都跑。"""
+        raw = self.cfg.get("allowed_languages")
+        if not raw:
+            return ()
+        items = [raw] if isinstance(raw, str) else list(raw)
+        return tuple(str(x).strip().lower().split("-")[0] for x in items if str(x).strip())
+
+    def _detect_language(self, info: VideoInfo) -> tuple[str | None, float | None]:
+        """预检音频语言。检测不出来就返回 (None, None)：那时既不拦语言也不喂 prompt。"""
+        try:
+            from faster_whisper.audio import decode_audio  # noqa: PLC0415
+
+            audio = decode_audio(info.path, sampling_rate=16000)
+            detected, prob, _ = self.model.detect_language(audio=audio)
+            logger.info("语言预检：%s(%.2f)", str(detected), prob or 0.0)
+            return str(detected), float(prob or 0.0)
+        except Exception as exc:  # noqa: BLE001 - 检测失败就不赌语言
+            logger.warning("语言预检失败，这次不拦语言、也不喂 initial_prompt：%s", str(exc)[:160])
+            return None, None
+
+    def _gate_language(self, language: str | None, probability: float | None,
+                       allowed: tuple[str, ...]) -> None:
+        """语言不在允许范围就当场停下（`LanguageNotAllowed`），不跑完整识别。"""
+        if not allowed or not language:
+            return
+        code = str(language).lower().split("-")[0]
+        if code in allowed:
+            return
+        logger.error("音频语言 %s 不在允许范围 %s，这一条不识别", code, "/".join(allowed))
+        raise LanguageNotAllowed(code, probability)
+
     def _language_and_prompt(self, info: VideoInfo,
                             vad_filter: bool) -> tuple[str | None, str]:
-        """定下解码语言，并挑同一语言的示范 prompt。
+        """定下解码语言，并挑同一语言的示范 prompt；顺手拦掉不跑的语言。
 
         `initial_prompt` 支持两种写法：一个字符串（不管什么语言都用它），或者
         `{"en": "...", "zh": "..."}` 按语言挑。**强烈建议用后者**：prompt 里混进
@@ -164,26 +210,24 @@ class WhisperASR:
 
         用字典时先跑一次 `detect_language` 拿到语言，再把这个语言显式传给 transcribe，
         保证"prompt 的语言 == 解码的语言"，不给模型留切语言的口子。
+        `speech.allowed_languages` 非空时也要预检：语言不对就在这儿抛
+        `LanguageNotAllowed`，省下完整识别那几分钟。
         """
         raw = self.cfg.get("initial_prompt")
         language = self.cfg.get("language") or None
+        allowed = self._allowed_languages()
+        by_language = isinstance(raw, dict) and bool(raw)
+        probability: float | None = None
+        if not language and (allowed or by_language):
+            language, probability = self._detect_language(info)
+        self._gate_language(language, probability, allowed)
+
         if isinstance(raw, str):
             return language, raw.strip()
-        if not isinstance(raw, dict) or not raw:
+        if not by_language:
             return language, ""
-
         if not language:
-            try:
-                from faster_whisper.audio import decode_audio  # noqa: PLC0415
-
-                audio = decode_audio(info.path, sampling_rate=16000)
-                detected, prob, _ = self.model.detect_language(audio=audio)
-                language = str(detected)
-                logger.info("语言预检：%s(%.2f)，据此挑 initial_prompt", language, prob or 0.0)
-            except Exception as exc:  # noqa: BLE001 - 检测失败就不给 prompt，别赌语言
-                logger.warning("语言预检失败，本次不喂 initial_prompt：%s", str(exc)[:160])
-                return None, ""
-
+            return None, ""
         code = str(language).lower().split("-")[0]
         prompt = str(raw.get(code) or raw.get("default") or "").strip()
         if not prompt:

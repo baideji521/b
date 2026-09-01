@@ -25,10 +25,11 @@
   T18 一份 JSON + 两版 PRM = 两个成品并存，各自记得用的是哪一版
   T19 PRM 增删改 + 设默认 + ensure_prm 幂等
   T20 软删 PRM 之后，历史成品照旧查得到用的是它（prm_deleted 标记）
-  T21 发 AI 时优先用选中的 PRM 档案（不再硬编码 prm_en.txt）
-  T22 选中的 PRM 被软删 -> 退回默认 PRM，不炸
+  T21 发 AI 按 PRM 使用状况：启用几份就发几份，停用的一份都不发
+  T22 一份档案都没登记过时才退回老的 prm_en.txt 候选（和「全停用」不是一回事）
   T23 schema v4：老库升上来和新建库的表/索引完全一致
   T24 升级只加不改：老数据一行不动，artifacts 的新列是 NULL
+  T25 PRM 正文存在库里：新建带正文、老库按 filename 自愈导入一次、改名改正文、副本独立
 
 功能测试直接调 `MainWindow` 上的真方法（绑到轻量替身上，不建窗口），
 渲染 / 发 AI 这些叶子调用换成计数替身。全部用临时目录里的临时库，
@@ -85,6 +86,14 @@ def make_project(tmp_path: Path):
     data["bridge"]["ai_job"] = "full"
     data["bridge"]["highlight_source"] = "all"
     data["bridge"]["prm_id"] = 0
+    # assets.* 里放的是用户真实目录，测试必须整段换成临时目录、
+    # 并且把两个目录筛选清空，否则资产中心会把临时库里的视频全滤掉。
+    data["assets"] = {
+        "input_dir": str(tmp_path / "input"),
+        "output_dir": str(tmp_path / "ai_out"),
+        "filter_video_dir": "",
+        "filter_product_dir": "",
+    }
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     cfg = Config.load(tmp_path, cfg_file)
@@ -121,7 +130,11 @@ class Win:
     _source_allows = mw.MainWindow._source_allows
     highlight_source = mw.MainWindow.highlight_source
     selected_prm = mw.MainWindow.selected_prm
+    enabled_prms = mw.MainWindow.enabled_prms
+    has_prm_profiles = mw.MainWindow.has_prm_profiles
+    resolve_prompt_files = mw.MainWindow.resolve_prompt_files
     resolve_prompt_file = mw.MainWindow.resolve_prompt_file
+    _write_prompt_files = mw.MainWindow._write_prompt_files
     _save_ai_result = mw.MainWindow._save_ai_result
     _register_highlight_asset = mw.MainWindow._register_highlight_asset
     _register_artifact = mw.MainWindow._register_artifact
@@ -131,6 +144,12 @@ class Win:
     _auto_text_file = mw.MainWindow._auto_text_file
     _auto_script_file = mw.MainWindow._auto_script_file
     _auto_done_file = mw.MainWindow._auto_done_file
+    _auto_chain_done = mw.MainWindow._auto_chain_done
+    _skip_because_done = mw.MainWindow._skip_because_done
+    skip_done_products = mw.MainWindow.skip_done_products
+    _language_blocked = mw.MainWindow._language_blocked
+    _reusable_highlight_json = mw.MainWindow._reusable_highlight_json
+    script_payload = mw.MainWindow.script_payload
     _db_video_id = mw.MainWindow._db_video_id
     _settle_auto_task = mw.MainWindow._settle_auto_task
     _mark_auto_rendering = mw.MainWindow._mark_auto_rendering
@@ -585,32 +604,81 @@ def test_deleted_prm_is_still_traceable(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ T21
-def test_prompt_comes_from_the_selected_prm(tmp_path: Path) -> None:
+def test_prm_text_lives_in_the_database(tmp_path: Path) -> None:
+    """PRM 正文存在库里：能改名、能改正文、能复制；老库的文件正文会自愈导入。"""
     cfg, db = make_project(tmp_path)
-    chosen = prm_file(cfg, "prm_zh.txt", "中文规则")
+    # 新建时直接给正文：一个字节都不用落盘
+    only_db = db_assets.create_prm(db, "只在库里", "手写.txt", content="库里的规则")
+    assert db_assets.prm_text(db, only_db, cfg.root) == "库里的规则"
+
+    # 老口径：只登记了文件，第一次取正文时导进库，之后文件删了也照样取得到
+    source = prm_file(cfg, "prm_old.txt", "文件里的老规则")
+    legacy = db_assets.create_prm(db, "老档案", "prm/prm_old.txt")
+    assert db_assets.get_prm(db, legacy)["content"] is None, "登记时还没导入"
+    assert db_assets.prm_text(db, legacy, cfg.root) == "文件里的老规则"
+    assert db_assets.get_prm(db, legacy)["content"] == "文件里的老规则", "导入要落库"
+    source.unlink()
+    assert db_assets.prm_text(db, legacy, cfg.root) == "文件里的老规则", "文件没了也不影响"
+
+    # 改名 + 改正文都在库里
+    assert db_assets.update_prm(db, only_db, name="改过名字", content="改过的规则") is True
+    assert db_assets.get_prm(db, only_db)["name"] == "改过名字"
+    assert db_assets.prm_text(db, only_db, cfg.root) == "改过的规则"
+
+    # 复制出来的是独立一份：正文跟着走，改副本不动原件
+    copy = db_assets.copy_prm(db, only_db)
+    assert db_assets.prm_text(db, copy, cfg.root) == "改过的规则"
+    db_assets.update_prm(db, copy, content="副本自己的规则")
+    assert db_assets.prm_text(db, only_db, cfg.root) == "改过的规则", "原件不许被带着改"
+    db.close()
+
+
+# ------------------------------------------------------------------ T21
+def test_prompts_follow_the_prm_usage(tmp_path: Path) -> None:
+    """按 PRM 使用状况发：都启用就发两份，停用的不发，全停用就一份都不发。
+
+    发出去的是**库里的正文**写成的统一命名文件（prompt.txt / prompt_2.txt…），
+    所以这里对的是「文件名 + 正文」，不再是原来那份 PRM 文件的路径。
+    """
+    cfg, db = make_project(tmp_path)
+    prm_file(cfg, "prm_zh.txt", "中文规则")
     prm_file(cfg, "prm_en.txt", "english rules")
-    prm_id = db_assets.create_prm(db, "PRM V2", "prm/prm_zh.txt", language="zh")
-    cfg.bridge["prm_id"] = prm_id
+    zh_id = db_assets.create_prm(db, "PRM 中文", "prm/prm_zh.txt", language="zh")
+    en_id = db_assets.create_prm(db, "PRM 英文", "prm/prm_en.txt", language="en")
     cfg.bridge["prompt_file"] = "prm/prm_en.txt"
 
     win = Win(cfg, db)
-    assert win.resolve_prompt_file() == chosen, "选了 PRM 就得用它，不许写死 prm_en.txt"
+    sent = lambda: [(p.name, p.read_text(encoding="utf-8"))
+                    for p in win.resolve_prompt_files()]
+    assert sent() == [("prompt.txt", "中文规则"), ("prompt_2.txt", "english rules")], \
+        "两份都在用就两份都发，名字按顺序统一"
+    db_assets.set_prm_enabled(db, en_id, False)
+    assert sent() == [("prompt.txt", "中文规则")], "停用的那一份一次都不许发"
+    db_assets.set_prm_enabled(db, zh_id, False)
+    assert win.resolve_prompt_files() == [], "全停用就一份都不发（这一条不发 AI）"
+    db_assets.set_prm_enabled(db, en_id, True)
+    assert sent() == [("prompt.txt", "english rules")], "重新启用就该回来"
     db.close()
 
 
 # ------------------------------------------------------------------ T22
-def test_deleted_selection_falls_back_to_default(tmp_path: Path) -> None:
+def test_no_profiles_falls_back_to_the_old_path(tmp_path: Path) -> None:
+    """一份档案都没登记过 ≠ 全停用：还没建档时照旧走 prm_en.txt 那串候选。"""
     cfg, db = make_project(tmp_path)
     prm_file(cfg, "prm_en.txt", "english rules")
-    fallback = prm_file(cfg, "prm_ja.txt", "日本語")
-    gone = db_assets.create_prm(db, "PRM 旧", "prm/prm_zh.txt")
-    keep = db_assets.create_prm(db, "PRM 新", "prm/prm_ja.txt", make_default=True)
-    db_assets.delete_prm(db, gone)
-    cfg.bridge["prm_id"] = gone
+    cfg.bridge["prompt_file"] = "prm/prm_en.txt"
 
     win = Win(cfg, db)
-    assert int(win.selected_prm()["id"]) == keep, "选中的被软删就退回默认"
-    assert win.resolve_prompt_file() == fallback
+    got = win.resolve_prompt_files()
+    assert [(p.name, p.read_text(encoding="utf-8")) for p in got] \
+        == [("prompt.txt", "english rules")], "没建过档就得有兜底，不然一条都发不出去"
+    # 建了档并且启用：就只认档案里的正文，不再回头用配置里的路径
+    prm_file(cfg, "prm_zh.txt", "中文规则")
+    db_assets.create_prm(db, "PRM 中文", "prm/prm_zh.txt")
+    got = win.resolve_prompt_files()
+    assert [(p.name, p.read_text(encoding="utf-8")) for p in got] \
+        == [("prompt.txt", "中文规则")]
+    assert int(win.selected_prm()["id"]) == 1, "溯源用的主 PRM = 启用中的第一份"
     db.close()
 
 
@@ -622,14 +690,37 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         return {(t, n) for t, n in rows}
 
     def v3_statements() -> list[str]:
-        """把 schema.TABLES 退回 v4 之前的样子：去掉两张新表、成品的两个新列和相关索引。"""
+        """把 schema.TABLES 退回 v4 之前的样子：去掉后来加的表、列和相关索引。
+
+        v5 的东西（expression_spans、analysis_runs 的三个渲染列）和 v7 的
+        videos.blocked_language 也一并去掉，否则造出来的"老库"里已经有了，
+        升级脚本的 ADD COLUMN 会撞上重名。
+        """
         out: list[str] = []
         for statement in schema.TABLES:
-            if "CREATE TABLE" in statement and " artifacts" in statement:
+            if "CREATE TABLE IF NOT EXISTS videos" in statement:
+                keep = [line for line in statement.splitlines()
+                        if "blocked_language" not in line
+                        and not line.strip().startswith("--")]
+                out.append("\n".join(keep))
+                continue
+            if "CREATE TABLE IF NOT EXISTS artifacts" in statement:
                 keep = [line for line in statement.splitlines()
                         if "highlight_asset_id" not in line and "prm_id" not in line
                         and not line.strip().startswith("--")]
                 out.append("\n".join(keep))
+                continue
+            if "CREATE TABLE IF NOT EXISTS analysis_runs" in statement:
+                keep = [line for line in statement.splitlines()
+                        if "output_language" not in line and "render_config" not in line
+                        and "face_available" not in line
+                        and not line.strip().startswith("--")]
+                # 去掉三列后 created_at 那行末尾还挂着逗号，补回来
+                text = "\n".join(keep).replace("created_at         TEXT    NOT NULL,",
+                                               "created_at         TEXT    NOT NULL")
+                out.append(text)
+                continue
+            if "expression_spans" in statement:
                 continue
             if "prm_profiles" in statement or "highlight_asset" in statement:
                 continue
@@ -639,7 +730,7 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         return out
 
     fresh = sqlite3.connect(":memory:")
-    assert migrations.apply(fresh) == 4, "新建库就是 v4"
+    assert migrations.apply(fresh) == 8, "新建库就是 v8"
 
     old = sqlite3.connect(":memory:")
     old.execute("BEGIN")
@@ -648,12 +739,15 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
     old.execute("PRAGMA user_version=3")
     old.commit()
     assert ("table", "highlight_assets") not in objects(old), "造出来的老库不该有新表"
-    assert migrations.apply(old) == 4, "老库能升到 v4"
+    assert ("table", "expression_spans") not in objects(old), "造出来的老库不该有表情表"
+    assert migrations.apply(old) == 8, "老库能一路升到 v8"
 
     missing = objects(fresh) - objects(old)
     assert not missing, f"升级漏了这些对象：{sorted(missing)}"
     columns = lambda conn: [r[1] for r in conn.execute("PRAGMA table_info(artifacts)")]
     assert columns(fresh) == columns(old), "artifacts 的列必须一致"
+    runs = lambda conn: [r[1] for r in conn.execute("PRAGMA table_info(analysis_runs)")]
+    assert runs(fresh) == runs(old), "analysis_runs 的列必须一致"
     fresh.close()
     old.close()
 
@@ -669,7 +763,7 @@ def test_upgrade_only_adds(tmp_path: Path) -> None:
     row = db.one("SELECT * FROM artifacts WHERE id = ?", (artifact,))
     assert row["highlight_asset_id"] is None and row["prm_id"] is None, \
         "老成品的新列就该是 NULL，不许瞎猜来源"
-    assert int(db.value("PRAGMA user_version")) == 4
+    assert int(db.value("PRAGMA user_version")) == 8
     assert db_assets.artifact_lineage(db, artifact)["asset"] is None, "查不到来源就老实说没有"
     db.close()
 
@@ -834,18 +928,24 @@ def _call_names(func) -> list[str]:
 
 
 def test_auto_step_prefers_the_library_over_ai(tmp_path: Path) -> None:
-    """结构守卫：自动剪辑必须先问库里有没有方案，再考虑发 AI。
+    """结构守卫：自动剪辑必须先问库里有没有可复用高光 JSON，再考虑发 AI。
 
     GUI 在这台机器上建不起窗口（Qt 无头会崩），所以界面那一层用源码结构守。
+    库里那三处来源（本任务的 AI 结果 / 资产中心的当前方案 / ai_results）统一收在
+    `_reusable_highlight_json()` 里，`_auto_step` 只认这一个入口。
     """
     source = (ROOT / "src" / "vidscribe" / "gui" / "main_window.py").read_text(encoding="utf-8")
     names = _call_names(_function(source, "_auto_step"))
-    assert "_asset_json_for_render" in names, "少了「库里有方案就直接剪」这一步"
-    assert names.index("_asset_json_for_render") < names.index("send_file_to_ai"), \
-        "得先看库里有没有方案，再决定要不要发 AI"
-    assert names.index("_resume_existing_ai_json") < names.index("_asset_json_for_render"), \
-        "本任务自己的 AI 结果优先级最高"
+    assert "_reusable_highlight_json" in names, "少了「库里有高光 JSON 就直接剪」这一步"
+    assert names.index("_reusable_highlight_json") < names.index("send_file_to_ai"), \
+        "得先看库里有没有高光 JSON，再决定要不要发 AI"
     assert "_mark_auto_rendering" in names, "状态机不能丢：素材齐了要落 processing"
+
+    inner = _call_names(_function(source, "_reusable_highlight_json"))
+    assert "_resume_existing_ai_json" in inner and "_asset_json_for_render" in inner, \
+        "库里的三处来源都得查：本任务结果、资产中心当前方案、ai_results"
+    assert inner.index("_resume_existing_ai_json") < inner.index("_asset_json_for_render"), \
+        "本任务自己的 AI 结果优先级最高"
 
 
 # ------------------------------------------------------------------ S2
@@ -858,18 +958,69 @@ def test_product_registration_records_its_source(tmp_path: Path) -> None:
     linker = _call_names(_function(source, "_link_final_video"))
     assert "link_artifact" in linker
 
-    prompt = _call_names(_function(source, "resolve_prompt_file"))
-    assert prompt.index("prm_file") < len(prompt), "提示词优先取 PRM 档案"
-    assert "selected_prm" in prompt, "得先问「选的是哪一版 PRM」"
+    prompt = _call_names(_function(source, "resolve_prompt_files"))
+    assert "prm_text" in prompt, "提示词正文只认数据库里的 content"
+    assert "_write_prompt_files" in prompt, "上传前要写成统一命名的 prompt.txt"
+    assert "enabled_prms" in prompt, "发哪几份得先问「哪几份在用」"
+
+
+def test_bridge_hands_every_txt_to_the_extension(tmp_path: Path) -> None:
+    """启用几份 PRM 就发几份：任务清单里每份都有自己的下标和取文件地址。
+
+    扩展只能按下标去 /v1/ai/file 取内容，所以清单顺序、下标、越界保护都得对；
+    少一份或串一份，AI 拿到的提示词就是残缺的。
+    """
+    from vidscribe.bridge.server import BridgeServer   # noqa: PLC0415
+
+    files = []
+    for name in ("prm_en.txt", "prm_zh.txt", "merged.txt"):
+        path = tmp_path / name
+        path.write_text(name, encoding="utf-8")
+        files.append(path)
+
+    bridge = BridgeServer(token="t")
+    task_id = bridge.submit("gemini_json", {"url": "x"}, files=files)
+    listed = bridge._find(task_id).payload["files"]      # noqa: SLF001
+    assert [item["index"] for item in listed] == [0, 1, 2], "三份文件得各有下标"
+    assert [item["name"] for item in listed] == [p.name for p in files], "顺序不能串"
+    for item in listed:
+        assert f"task_id={task_id}" in item["url"] and f"index={item['index']}" in item["url"], \
+            "取文件地址要带真 task_id 和自己的下标"
+    for index, path in enumerate(files):
+        assert bridge._task_file(task_id, index) == path, f"下标 {index} 取错文件"  # noqa: SLF001
+    assert bridge._task_file(task_id, len(files)) is None, "越界得取不到"  # noqa: SLF001
+
+
+def test_extension_verifies_every_attachment(tmp_path: Path) -> None:
+    """扩展侧：几份 txt 都得单独数，不许只认第一份就当全挂上了。
+
+    以前是 `probe = names.slice(0, 1)`（按「就两个文件，一起拖进去」写的），
+    PRM 一多就会漏：只挂上一份也判成功，AI 按残缺提示词答，回来的 JSON 是错的。
+    """
+    js = (ROOT / "AI_剪辑师_好帮手" / "src" / "ai-task.js").read_text(encoding="utf-8")
+    assert "names.slice(0, 1)" not in js and "const probe" not in js, \
+        "不许再只拿第一个文件当门槛"
+    assert "function pageCountAttachment(name, siblings)" in js, \
+        "数卡片要知道同批还有哪些名字，免得同前缀互相误命中"
+    assert "if (ambiguous(needle)) continue;" in js, "别的文件也含这段前缀时不能拿来数"
+    assert js.count("pageCountAttachment, [name, names]") >= 4, \
+        "基线、等卡片、手动等待、发送前复查都要按全量文件数"
+    assert "await waitCards(names," in js and "waitCards(probe" not in js, \
+        "等卡片要等全部文件"
+    assert js.count("chipsNow - chipsBase >= names.length") == 2, \
+        "自动和手动两处的角标门槛都得是文件总数"
+
 
 
 # ------------------------------------------------------------------ S3
 def test_panel_saves_the_new_switches(tmp_path: Path) -> None:
     source = (ROOT / "src" / "vidscribe" / "gui" / "ai_options.py").read_text(encoding="utf-8")
-    assert "highlight_source" in source and "prm_id" in source, "面板得能存这两个开关"
+    assert "highlight_source" in source, "面板得能存处理范围这个开关"
+    assert "prm_id" not in source, "PRM 不再由面板选一份（改成按使用状况发），别再存 prm_id"
     saver = _function(source, "save")
     dumped = ast.dump(saver)
-    assert "highlight_source" in dumped and "prm_id" in dumped, "save() 必须把两个开关写进 config"
+    assert "highlight_source" in dumped, "save() 必须把处理范围写进 config"
+    assert "prm_id" not in dumped, "save() 不许再写 prm_id"
     panel = (ROOT / "src" / "vidscribe" / "gui" / "assets_dialog.py").read_text(encoding="utf-8")
     for needed in ("class AssetCenter", "class AssetDialog", "class VideoAssetsPage",
                    "class PrmPanel", "class JsonPanel", "class RenderDialog",
@@ -881,6 +1032,202 @@ def test_panel_saves_the_new_switches(tmp_path: Path) -> None:
     for gone in ("class JsonDialog", "class PrmDialog("):
         assert gone not in panel, f"{gone} 应该已经被页内面板取代"
 
+
+
+# ------------------------------------------------------------------ S4 资产中心界面
+def _center(cfg):
+    """真的把资产中心建出来（离屏）。返回 (app, center)。"""
+    from PyQt5.QtWidgets import QApplication          # noqa: PLC0415
+
+    from vidscribe.gui.assets_dialog import AssetCenter  # noqa: PLC0415
+    app = QApplication.instance() or QApplication([])
+    center = AssetCenter(cfg, None, log=lambda _t: None)
+    center.show()
+    center.resize(1240, 800)
+    app.processEvents()
+    return app, center
+
+
+def test_center_fits_its_own_minimum_window(tmp_path: Path) -> None:
+    """整页需要的最小宽度不能超过窗口允许的最小宽度，否则列表会被裁、看不全。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "a.mp4")
+    db_assets.create_asset(db, vid, payload(video="a.mp4"))
+    app, center = _center(cfg)
+    page = center.videos
+    page.tbl_videos.selectRow(0)
+    app.processEvents()
+    limit = center.minimumWidth()
+    need = page.minimumSizeHint().width()
+    assert need <= limit, f"整页最小宽 {need} > 窗口最小宽 {limit}：窄窗口下会裁掉内容"
+    for name in ("split_assets", "split_products"):
+        split = getattr(page, name)
+        assert split.minimumSizeHint().width() <= limit, f"{name} 自己就超了"
+    # 详情弹窗（右键「查看高光 JSON」）打开之后，视频列表还是完整的一栏
+    before = page.tbl_videos.width()
+    page.on_open_video()
+    app.processEvents()
+    assert page.dlg_json.isVisible(), "右键「查看高光 JSON」要真的把弹窗打开"
+    assert page.tbl_videos.isVisible() and page.tbl_videos.width() >= min(before, 200), \
+        "开了详情弹窗，视频列表必须还在"
+    page.dlg_json.close()
+    center.close()
+    db.close()
+
+
+def test_clear_filters_brings_the_whole_list_back(tmp_path: Path) -> None:
+    """「只看这个视频的高光」之后，得有一个入口把筛选清掉、回到全部视频。"""
+    cfg, db = make_project(tmp_path)
+    _a, a_id = video_row(cfg, db, "a.mp4")
+    db_assets.create_asset(db, a_id, payload(video="a.mp4"))
+    video_row(cfg, db, "b.mp4")
+    app, center = _center(cfg)
+    page = center.videos
+    assert page.tbl_videos.rowCount() == 2
+    page.tbl_videos.selectRow(0)
+    app.processEvents()
+    page.on_only_json()                    # 右键「只看这个视频的高光」
+    app.processEvents()
+    assert page.tbl_videos.rowCount() == 1, "筛选之后只剩这一个视频"
+    page.on_clear_filters()
+    app.processEvents()
+    assert page.tbl_videos.rowCount() == 2, "清掉筛选要回到全部视频"
+    assert page.edit_search.text() == "" and page.cmb_json.currentIndex() == 0
+    center.close()
+    db.close()
+
+
+def test_forget_video_removes_the_records_but_keeps_the_file(tmp_path: Path) -> None:
+    """从库里删除视频：库里的记录全没（不可恢复），磁盘上的文件一个都不动。"""
+    cfg, db = make_project(tmp_path)
+    video, vid = video_row(cfg, db, "a.mp4")
+    keep, keep_id = video_row(cfg, db, "b.mp4")
+    asset_id = db_assets.create_asset(db, vid, payload(video="a.mp4"))
+    product = cfg.root / "ai_out" / "a_高光时刻.mp4"
+    product.write_text("x" * 64, encoding="utf-8")
+    art_id = db_repo.register_artifact(db, vid, "final_video", product)
+    db_assets.link_artifact(db, art_id, asset_id=asset_id)
+    before = db_repo.video_footprint(db, vid)
+    assert before["assets"] >= 1 and before["artifacts"] >= 1
+
+    gone = db_repo.forget_video(db, vid)
+    assert gone == before, f"返回的账目要和删掉的一致：{gone} != {before}"
+    assert db_repo.find_video(db, video) is None, "库里不该还有这个视频"
+    assert db_repo.video_footprint(db, vid) == {k: 0 for k in before}, "关联记录必须跟着走"
+    assert video.is_file() and product.is_file(), "磁盘上的文件一个都不许动"
+    assert db_repo.find_video(db, keep) is not None, "别的视频不许受影响"
+    assert db_repo.forget_video(db, vid) is None, "删过的再删只返回 None，不炸"
+
+    # 界面上的入口：确认框点「是」之后列表少一行
+    from PyQt5.QtWidgets import QMessageBox            # noqa: PLC0415
+    app, center = _center(cfg)
+    page = center.videos
+    assert page.tbl_videos.rowCount() == 1, "刚才删掉的那个不该还在列表里"
+    page.tbl_videos.selectRow(0)
+    app.processEvents()
+    original = QMessageBox.exec_
+    QMessageBox.exec_ = lambda _self: QMessageBox.Yes      # 点「是」
+    try:
+        page.on_forget_video()
+    finally:
+        QMessageBox.exec_ = original
+    app.processEvents()
+    assert page.tbl_videos.rowCount() == 0, "界面上的删除也要真的删掉"
+    assert keep.is_file(), "界面删除同样不碰磁盘文件"
+    center.close()
+    db.close()
+
+
+def test_product_rows_show_the_video_thumbnail(tmp_path: Path) -> None:
+    """成品表每一行左边挂当前视频的缩略图；解不出画面的视频只是没图，绝不报错。"""
+    import cv2                                        # noqa: PLC0415
+    import numpy as np                                # noqa: PLC0415
+
+    cfg, db = make_project(tmp_path)
+    # 写一个真的能解码的小 mp4（假字节的视频取不出帧，测不出缩略图这条）
+    real = cfg.path("input_dir") / "real.mp4"
+    writer = cv2.VideoWriter(str(real), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (160, 90))
+    assert writer.isOpened(), "这台机器写不出 mp4，测不了缩略图"
+    for step in range(20):
+        writer.write(np.full((90, 160, 3), 10 * step + 20, dtype=np.uint8))
+    writer.release()
+    vid = db_repo.upsert_video(db, real)
+    asset_id = db_assets.create_asset(db, vid, payload(video="real.mp4"))
+    product = cfg.root / "ai_out" / "real_高光时刻.mp4"
+    product.write_text("x" * 64, encoding="utf-8")
+    db_assets.link_artifact(db, db_repo.register_artifact(db, vid, "final_video", product),
+                            asset_id=asset_id)
+    broken, broken_id = video_row(cfg, db, "broken.mp4")     # 假字节：解不出帧
+    other = cfg.root / "ai_out" / "broken_高光时刻.mp4"
+    other.write_text("y" * 64, encoding="utf-8")
+    db_repo.register_artifact(db, broken_id, "final_video", other)
+
+    app, center = _center(cfg)
+    page = center.videos
+    page.select_video(vid)
+    app.processEvents()
+    assert page.tbl_products.rowCount() == 1, "成品要列出来"
+    icon = page.tbl_products.item(0, 1).icon()
+    assert not icon.isNull(), "成品行左边要有当前视频的缩略图"
+    assert page.tbl_products.iconSize().width() == page.THUMB_SIZE.width(), \
+        "图标尺寸得和 THUMB_SIZE 一致，否则缩略图会被压扁"
+    assert page.tbl_products.verticalHeader().defaultSectionSize() \
+        > page.THUMB_SIZE.height(), "行高要放得下缩略图"
+    assert page.tbl_products.item(0, 1).text() == product.name, "文件名照旧要在"
+
+    page.select_video(broken_id)                  # 解不出帧：没图，但不许炸
+    app.processEvents()
+    assert page.tbl_products.rowCount() == 1, "解不出缩略图也要照常列成品"
+    assert page.tbl_products.item(0, 1).icon().isNull(), "解不出画面就不放图"
+    assert broken.is_file() and real.is_file(), "取缩略图不许动磁盘上的文件"
+    center.close()
+    db.close()
+
+
+def test_video_list_shows_thumbnails_lazily(tmp_path: Path) -> None:
+    """视频库列表每行左边也要有缩略图，而且一轮只解看得见的那几行（不许开着就全解）。"""
+    import cv2                                        # noqa: PLC0415
+    import numpy as np                                # noqa: PLC0415
+
+    cfg, db = make_project(tmp_path)
+    real = cfg.path("input_dir") / "list.mp4"
+    writer = cv2.VideoWriter(str(real), cv2.VideoWriter_fourcc(*"mp4v"), 10.0, (160, 90))
+    assert writer.isOpened(), "这台机器写不出 mp4，测不了缩略图"
+    for step in range(20):
+        writer.write(np.full((90, 160, 3), 10 * step + 20, dtype=np.uint8))
+    writer.release()
+    real_id = db_repo.upsert_video(db, real)
+    for index in range(12):                     # 凑够行数，才看得出「一轮只解一批」
+        video_row(cfg, db, f"bulk{index}.mp4")
+
+    app, center = _center(cfg)
+    page = center.videos
+    page.tbl_videos.resize(700, 600)            # 让 viewport 真的能放下十几行
+    app.processEvents()
+    page._thumbs.clear()
+    page.paint_visible_thumbs()                 # 一轮
+    assert len(page._thumbs) <= page.THUMB_BATCH, \
+        f"一轮最多解 {page.THUMB_BATCH} 帧，实际解了 {len(page._thumbs)}"
+
+    for _ in range(6):                          # 后续几轮把剩下的补齐
+        page.paint_visible_thumbs()
+    # 能解码的那个视频：单独筛出来（它一定在可见范围里），列表左边必须有图
+    page.edit_search.setText("list.mp4")
+    page.reload()
+    app.processEvents()
+    assert page.tbl_videos.rowCount() == 1, "搜索只该剩这一个视频"
+    assert page.tbl_videos.item(0, 0).text() == str(real_id), "筛出来的得是那个真视频"
+    page.paint_visible_thumbs()
+    line = 0
+    assert not page.tbl_videos.item(line, page.NAME_COLUMN).icon().isNull(), \
+        "能解码的视频，列表里必须看到缩略图"
+    assert page.tbl_videos.iconSize().width() == page.THUMB_SIZE.width(), \
+        "视频列表的图标尺寸也得和 THUMB_SIZE 一致"
+    assert page.tbl_videos.verticalHeader().defaultSectionSize() > page.THUMB_SIZE.height(), \
+        "视频列表的行高要放得下缩略图"
+    assert page.tbl_videos.item(line, page.NAME_COLUMN).text() == real.name, "文件名照旧要在"
+    center.close()
+    db.close()
 
 
 # ------------------------------------------------------------------ 直接跑
@@ -905,8 +1252,9 @@ TESTS = (
     test_one_json_two_prms_two_products,
     test_prm_crud_and_default,
     test_deleted_prm_is_still_traceable,
-    test_prompt_comes_from_the_selected_prm,
-    test_deleted_selection_falls_back_to_default,
+    test_prm_text_lives_in_the_database,
+    test_prompts_follow_the_prm_usage,
+    test_no_profiles_falls_back_to_the_old_path,
     test_migration_matches_a_fresh_v4_database,
     test_upgrade_only_adds,
     test_center_rows_aggregates_and_filters,
@@ -916,7 +1264,14 @@ TESTS = (
     test_batch_apis_replace_per_row_queries,
     test_auto_step_prefers_the_library_over_ai,
     test_product_registration_records_its_source,
+    test_bridge_hands_every_txt_to_the_extension,
+    test_extension_verifies_every_attachment,
     test_panel_saves_the_new_switches,
+    test_center_fits_its_own_minimum_window,
+    test_clear_filters_brings_the_whole_list_back,
+    test_forget_video_removes_the_records_but_keeps_the_file,
+    test_product_rows_show_the_video_thumbnail,
+    test_video_list_shows_thumbnails_lazily,
 )
 
 

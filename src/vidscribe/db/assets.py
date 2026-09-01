@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -298,8 +299,13 @@ def asset_payload(db: Database, asset_id: int) -> Any:
 # ============================================================== PRM 档案
 def create_prm(db: Database, name: str, filename: str | Path, *,
                description: str | None = None, language: str | None = None,
-               version: str | None = None, make_default: bool = False) -> int:
-    """登记一份 PRM。只记名字/文件名/语言，**内容仍旧只在文件里**。"""
+               version: str | None = None, make_default: bool = False,
+               enabled: bool = True, content: str | None = None) -> int:
+    """登记一份 PRM。**提示词正文存在库里**（content），filename 只记来源文件。
+
+    新登记的默认是「使用中」：发 AI 时会跟着一起发，不想发就在 PRM 管理页停用。
+    `content` 不给就先留空，第一次要用的时候 `prm_text` 会按 filename 把文件读进来补上。
+    """
     stamp = now()
     with db.tx() as conn:
         if make_default:
@@ -308,11 +314,11 @@ def create_prm(db: Database, name: str, filename: str | Path, *,
         cur = conn.execute(
             """
             INSERT INTO prm_profiles(name, filename, description, language, version,
-                                     is_default, created_at, updated_at)
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                                     content, is_default, enabled, created_at, updated_at)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (name, str(filename), description, language, version,
-             1 if make_default else 0, stamp, stamp))
+            (name, str(filename), description, language, version, content,
+             1 if make_default else 0, 1 if enabled else 0, stamp, stamp))
         return int(cur.lastrowid)
 
 
@@ -328,6 +334,26 @@ def list_prms(db: Database, *, include_deleted: bool = False) -> list[sqlite3.Ro
     return db.all(sql + " ORDER BY id", ())
 
 
+def enabled_prms(db: Database) -> list[sqlite3.Row]:
+    """当前「使用中」的 PRM（按 id 从小到大）。
+
+    发 AI 时**这里面每一份都会当附件带上**：两份都在用就发两份，
+    停用的一份都不发，一份都没启用就整条不发（由界面那边决定怎么记）。
+    """
+    return db.all("SELECT * FROM prm_profiles WHERE deleted_at IS NULL AND enabled = 1 "
+                  "ORDER BY id", ())
+
+
+def set_prm_enabled(db: Database, prm_id: int, enabled: bool) -> bool:
+    """把一份 PRM 标成使用中 / 停用。软删掉的不给改（先恢复再说）。"""
+    with db.tx() as conn:
+        cur = conn.execute("UPDATE prm_profiles SET enabled = ?, updated_at = ? "
+                           "WHERE id = ? AND deleted_at IS NULL",
+                           (1 if enabled else 0, now(), prm_id))
+        return cur.rowcount > 0
+
+
+
 def find_prm_by_file(db: Database, filename: str | Path) -> sqlite3.Row | None:
     """按文件路径找 PRM（同一份文件不重复登记）。"""
     target = str(filename)
@@ -340,13 +366,31 @@ def find_prm_by_file(db: Database, filename: str | Path) -> sqlite3.Row | None:
                   "ORDER BY id LIMIT 1", (f"%{name}",))
 
 
+def prm_name_taken(db: Database, name: str, *, except_id: int | None = None) -> bool:
+    """这个名字有没有被别的在库档案占了（名字在库里唯一：idx_prm_name_live）。
+
+    界面改名前先问一句，免得撞上唯一索引直接抛异常、看着像「改名不生效」。
+    """
+    title = str(name).strip()
+    if not title:
+        return False
+    if except_id is None:
+        row = db.one("SELECT id FROM prm_profiles WHERE name = ? AND deleted_at IS NULL",
+                     (title,))
+    else:
+        row = db.one("SELECT id FROM prm_profiles WHERE name = ? AND deleted_at IS NULL "
+                     "AND id <> ?", (title, int(except_id)))
+    return row is not None
+
+
 def update_prm(db: Database, prm_id: int, *, name: str | None = None,
                filename: str | Path | None = None, description: str | None = None,
-               language: str | None = None, version: str | None = None) -> bool:
+               language: str | None = None, version: str | None = None,
+               content: str | None = None) -> bool:
     sets, params = [], []
     for column, value in (("name", name), ("filename", str(filename) if filename else None),
                           ("description", description), ("language", language),
-                          ("version", version)):
+                          ("version", version), ("content", content)):
         if value is not None:
             sets.append(f"{column} = ?")
             params.append(value)
@@ -384,9 +428,9 @@ def restore_prm(db: Database, prm_id: int) -> bool:
 
 def copy_prm(db: Database, prm_id: int, *, name: str | None = None,
              filename: str | Path | None = None) -> int | None:
-    """复制一份 PRM 档案（默认指同一个文件）。原档案一个字不动。
+    """复制一份 PRM 档案（正文一起复制过去）。原档案一个字不动。
 
-    只复制"档案"这一层：提示词内容还在文件里，想换内容就给 `filename` 换个文件。
+    复制出来的那份是独立的：改它的正文不会动到原件。
     """
     row = get_prm(db, prm_id)
     if row is None:
@@ -398,7 +442,7 @@ def copy_prm(db: Database, prm_id: int, *, name: str | None = None,
         title = f"{title} {now()[11:19]}"      # 撞名了就加个时间尾巴，避免唯一索引报错
     return create_prm(db, title, filename or row["filename"],
                       description=row["description"], language=row["language"],
-                      version=row["version"])
+                      version=row["version"], content=row["content"])
 
 
 def set_default_prm(db: Database, prm_id: int) -> bool:
@@ -423,7 +467,10 @@ def default_prm(db: Database) -> sqlite3.Row | None:
 
 
 def prm_file(row: sqlite3.Row | None, root: str | Path | None = None) -> Path | None:
-    """PRM 行 -> 实际文件路径（相对路径按项目根拼）。"""
+    """PRM 行 -> 当初导入它的那个文件路径（相对路径按项目根拼）。
+
+    **只用于"从哪儿导进来的"这类溯源和一次性导入**：正文的权威来源是库里的 content。
+    """
     if row is None:
         return None
     path = Path(str(row["filename"]))
@@ -432,17 +479,54 @@ def prm_file(row: sqlite3.Row | None, root: str | Path | None = None) -> Path | 
     return path
 
 
+def prm_text(db: Database, prm_id: int, root: str | Path | None = None) -> str | None:
+    """这份 PRM 的提示词正文。库里没有（老库 / 刚登记）就按 filename 读文件补进库。
+
+    自愈导入只发生一次：读到内容立刻写回 content，之后文件删了也照样发得出去。
+    正文真的空（文件也不在）返回 None，调用方据此判断"这一份发不了"。
+    """
+    row = get_prm(db, prm_id)
+    if row is None:
+        return None
+    text = row["content"]
+    if text:
+        return str(text)
+    path = prm_file(row, root)
+    if path is None or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+    update_prm(db, prm_id, content=text)      # 一次性导入：以后就以库为准
+    return text
+
+
 def ensure_prm(db: Database, filename: str | Path, *, name: str | None = None,
-               language: str | None = None, make_default: bool = False) -> int:
-    """确保这份提示词文件在库里有登记，返回 prm_id。已经有了就直接用。"""
+               language: str | None = None, make_default: bool = False,
+               root: str | Path | None = None) -> int:
+    """确保这份提示词在库里有登记，返回 prm_id。已经有了就直接用。
+
+    新登记时顺手把文件正文读进库（读不到就先留空，`prm_text` 以后还会再试一次）。
+    """
     found = find_prm_by_file(db, filename)
     if found is not None:
         if make_default and not int(found["is_default"] or 0):
             set_default_prm(db, int(found["id"]))
         return int(found["id"])
-    stem = Path(str(filename)).stem
-    return create_prm(db, name or stem, filename, language=language,
-                      make_default=make_default)
+    path = Path(str(filename))
+    if not path.is_absolute() and root:
+        path = Path(root) / path
+    content = None
+    if path.is_file():
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            content = None
+    return create_prm(db, name or path.stem, filename, language=language,
+                      make_default=make_default, content=content)
 
 
 # ============================================================== 成品溯源
@@ -569,7 +653,6 @@ def asset_layers(db: Database, asset_id: int, *, artifact_id: int | None = None,
                                            else None).plans:
             out["engine"].append({"start": plan.start, "end": plan.end,
                                   "duration": plan.duration, "notes": list(plan.notes),
-                                  "capped": bool(plan.capped),
                                   "ai_start": plan.ai_start, "ai_end": plan.ai_end})
     except Exception as exc:  # noqa: BLE001 - 算不出来不影响看 AI 原始那一层
         logger.warning("复算 Clip Engine 区间失败：%s", exc)
@@ -826,8 +909,39 @@ CENTER_HAS = ("any", "has", "none")
 NO_PROVIDER = "__none__"
 
 
+def _under(path: str | None, folder: str | None) -> bool:
+    """`path` 在 `folder`（含子目录）里吗。folder 留空 = 不筛，一律算命中。
+
+    Windows 上同一个目录会以 `F:/a`、`F:\\a`、大小写不同的写法出现（8.3 短名也算），
+    所以两边都 normcase + normpath 再比前缀，不做字符串裸比较。
+    """
+    if not folder:
+        return True
+    if not path:
+        return False
+    base = os.path.normcase(os.path.normpath(str(folder)))
+    here = os.path.normcase(os.path.normpath(str(path)))
+    return here == base or here.startswith(base.rstrip(os.sep) + os.sep)
+
+
+def known_dirs(db: Database) -> tuple[list[str], list[str]]:
+    """库里出现过的目录：（原视频目录，成品目录），各自去重排序，给筛选下拉用。
+
+    扫描目录下面常常有几十个子目录，所以这里给的是**每个文件真正所在的那一层**，
+    选哪个就只看哪个。文件在不在盘上不影响它出现在列表里（库是权威）。
+    """
+    videos = {str(Path(str(r["file_path"])).parent)
+              for r in db.all("SELECT file_path FROM videos", ())
+              if r["file_path"]}
+    products = {str(Path(str(r["path"])).parent)
+                for r in db.all("SELECT path FROM artifacts WHERE type = 'final_video'", ())
+                if r["path"]}
+    return sorted(videos), sorted(products)
+
+
 def center_rows(db: Database, *, search: str | None = None, provider: str | None = None,
                 status: str = "all", json: str = "any", product: str = "any",
+                video_dir: str | None = None, product_dir: str | None = None,
                 order: str = "recent", limit: int = 500) -> list[dict[str, Any]]:
     """资产中心主列表：一个视频一行，JSON 数 / 高光数 / 成品数 / 最近用的 AI 全在里面。
 
@@ -841,10 +955,16 @@ def center_rows(db: Database, *, search: str | None = None, provider: str | None
       * `json`：`any` / `has` / `none`
       * `product`：`any` / `has` / `none`
 
+    再加两个**目录**维度（扫描目录下常常有几十个子目录，得能只看其中一个）：
+
+      * `video_dir`：只看原视频落在这个目录（含子目录）里的
+      * `product_dir`：只看**成品**落在这个目录（含子目录）里的
+
     老调用写的是 `status="has_json"` 这类合并档，仍然照旧支持：显式给了
     `json=` / `product=` 时以它们为准，没给才把老 `status` 翻译过来。
     筛选和排序只有这一处，GUI 不再自己过一遍。
     """
+
 
     want_json = str(json or "any")
     want_product = str(product or "any")
@@ -899,6 +1019,12 @@ def center_rows(db: Database, *, search: str | None = None, provider: str | None
         if row["provider"] or row["model"]:
             latest[int(row["video_id"])] = (str(row["provider"] or ""), str(row["model"] or ""))
 
+    # 成品目录筛选要知道每个视频的成品都落在哪儿：一次查完，不逐行发 SQL
+    product_paths: dict[int, list[str]] = {}
+    if product_dir:
+        for row in db.all("SELECT video_id, path FROM artifacts WHERE type = 'final_video'", ()):
+            product_paths.setdefault(int(row["video_id"]), []).append(str(row["path"] or ""))
+
     out: list[dict[str, Any]] = []
     for row in rows:
         vid = int(row["id"])
@@ -929,6 +1055,11 @@ def center_rows(db: Database, *, search: str | None = None, provider: str | None
         if want_product == "has" and not item["product_count"]:
             continue
         if want_product == "none" and item["product_count"]:
+            continue
+        if not _under(item["file_path"], video_dir):
+            continue
+        if product_dir and not any(_under(p, product_dir)
+                                   for p in product_paths.get(vid, ())):
             continue
         out.append(item)
 

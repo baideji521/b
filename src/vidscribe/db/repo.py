@@ -17,7 +17,16 @@ from typing import Any
 from ..logging_setup import get_logger
 from .db import Database
 from .fingerprint import config_hash, fingerprint, full_sha256
-from .schema import ANALYSIS_STATES, AUTO_TASK_TYPE, TASK_ACTIVE, TASK_OPEN, TASK_STATES
+from .schema import (
+    ANALYSIS_STATES,
+    AUTO_TASK_TYPE,
+    EXPRESSION_LEGACY_MISSING,
+    EXPRESSION_NO_FACE,
+    EXPRESSION_OK,
+    TASK_ACTIVE,
+    TASK_OPEN,
+    TASK_STATES,
+)
 
 logger = get_logger(__name__)
 
@@ -212,6 +221,40 @@ def set_video_status(db: Database, video_id: int, status: str) -> None:
                      (status, now(), video_id))
 
 
+def set_blocked_language(db: Database, video_id: int, language: str | None) -> None:
+    """记下「这条视频的语言不在允许范围」。非空之后自动剪辑不再排它。
+
+    只记语言码（'id'、'ko'…），不记时间：要重跑就把这条登记删了重新导入。
+    """
+    code = (str(language).strip().lower().split("-")[0] or None) if language else None
+    with db.tx() as conn:
+        conn.execute("UPDATE videos SET blocked_language = ?, updated_at = ? WHERE id = ?",
+                     (code, now(), video_id))
+
+
+def blocked_language(db: Database, video_id: int) -> str | None:
+    """这条视频被哪个语言拦下了；没拦过返回 None。"""
+    row = db.one("SELECT blocked_language FROM videos WHERE id = ?", (video_id,))
+    if row is None:
+        return None
+    code = row["blocked_language"]
+    return str(code) if code else None
+
+
+def blocked_language_videos(db: Database, folder: str | Path | None = None) -> list[sqlite3.Row]:
+    """被语言拦下的视频（`blocked_language` 非空）。给目录就只看那个目录（含子目录）。
+
+    盘上还在不在都算：文件已经被挪走的，库里那条登记也一样该清掉。
+    """
+    if folder is None:
+        return db.all("SELECT * FROM videos WHERE blocked_language IS NOT NULL "
+                      "AND blocked_language <> '' ORDER BY file_name")
+    return db.all(
+        "SELECT * FROM videos WHERE blocked_language IS NOT NULL AND blocked_language <> '' "
+        "AND file_path LIKE ? ESCAPE '\\' ORDER BY file_name",
+        (_folder_like(folder),))
+
+
 def set_video_presence(db: Database, video_id: int, *, exists: bool,
                        in_library: bool | None = None) -> None:
     """对账用：视频还在不在盘上、在不在视频库里。"""
@@ -219,6 +262,18 @@ def set_video_presence(db: Database, video_id: int, *, exists: bool,
         conn.execute(
             "UPDATE videos SET exists_on_disk = ?, in_library = ?, updated_at = ? WHERE id = ?",
             (int(exists), None if in_library is None else int(in_library), now(), video_id))
+
+
+def rename_video(db: Database, video_id: int, target: str | Path) -> None:
+    """视频文件改名之后，把库里的路径 / 文件名跟着改（指纹和缓存目录不动）。
+
+    调用方负责先把磁盘上的文件挪好。`fingerprint` 是按内容算的，改名不影响；
+    `cache_slug` 也保持原值，免得已经算好的分析缓存全部失联。
+    """
+    path = Path(target)
+    with db.tx() as conn:
+        conn.execute("UPDATE videos SET file_path = ?, file_name = ?, updated_at = ? "
+                     "WHERE id = ?", (str(path), path.name, now(), video_id))
 
 
 def list_videos(db: Database, *, only_existing: bool = False) -> list[sqlite3.Row]:
@@ -446,6 +501,142 @@ def get_speech_words(db: Database, analysis_id: int) -> list[sqlite3.Row]:
     return db.all(
         "SELECT * FROM speech_words WHERE analysis_id = ? ORDER BY start_time, word_index",
         (analysis_id,))
+
+
+# --- 人脸表情轨（剧本 SECTION 3 的唯一权威来源）------------------------------
+def save_expression_spans(db: Database, analysis_id: int,
+                          spans: list[dict[str, Any]]) -> int:
+    """存人脸表情轨。重存会先清掉这条分析下的旧段（同一条分析只该有一套）。
+
+    拆出来的列是给查询用的，`raw_json` 存整段原样——以后 face 模型多给字段，
+    不用再改表也不会丢数据。
+    """
+    rows = []
+    for i, span in enumerate(spans, start=1):
+        if not isinstance(span, dict):
+            continue
+        rows.append((
+            analysis_id, i,
+            span.get("start"), span.get("end"),
+            span.get("emotion_en"), span.get("intensity"), span.get("samples"),
+            _dumps(span),
+        ))
+    with db.tx() as conn:
+        conn.execute("DELETE FROM expression_spans WHERE analysis_id = ?", (analysis_id,))
+        conn.executemany(
+            """
+            INSERT INTO expression_spans(analysis_id, sequence, start_time, end_time,
+                                         emotion_en, intensity, samples, raw_json)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            """, rows)
+    return len(rows)
+
+
+def get_expression_spans(db: Database, analysis_id: int) -> list[sqlite3.Row]:
+    return db.all("SELECT * FROM expression_spans WHERE analysis_id = ? ORDER BY sequence",
+                  (analysis_id,))
+
+
+def note_render(db: Database, analysis_id: int, *, output_language: str | None = None,
+                render_config: dict[str, Any] | None = None,
+                face_available: bool | None = None) -> None:
+    """记下这次分析**当时**的渲染事实：输出语言、timeline 过滤参数、有没有检到人脸。
+
+    用户后来改了 GUI 配置，同一个视频从库里重建出的剧本也必须和当初逐行一致，
+    所以这三样必须跟着分析记录存，不能等到导出时再去读"现在的配置"。
+    """
+    with db.tx() as conn:
+        conn.execute(
+            """
+            UPDATE analysis_runs
+               SET output_language = COALESCE(?, output_language),
+                   render_config   = COALESCE(?, render_config),
+                   face_available  = COALESCE(?, face_available)
+             WHERE id = ?
+            """,
+            (output_language, _dumps(render_config),
+             None if face_available is None else int(face_available), analysis_id))
+
+
+def expression_state(db: Database, analysis_id: int, *,
+                     face_available: Any = None, span_count: int | None = None) -> str:
+    """表情轨的三种状态，见 schema.EXPRESSION_STATES。
+
+    传了 face_available / span_count 就不再查库（调用方已经拿到行的时候省一次往返）。
+    判定只看库：**不去摸 timeline.json 或 cache**，那两个是派生文件。
+    """
+    if face_available is None:
+        row = db.one("SELECT face_available FROM analysis_runs WHERE id = ?", (analysis_id,))
+        face_available = None if row is None else row["face_available"]
+    if span_count is None:
+        row = db.one("SELECT COUNT(*) AS n FROM expression_spans WHERE analysis_id = ?",
+                     (analysis_id,))
+        span_count = 0 if row is None else int(row["n"])
+    if span_count > 0:
+        return EXPRESSION_OK
+    if face_available is None:
+        # 这条分析是表情落库之前跑的：库里没有这份数据，只能重新分析，绝不能当成"没有表情"
+        return EXPRESSION_LEGACY_MISSING
+    return EXPRESSION_NO_FACE
+
+
+def _loads(raw: Any) -> Any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def script_inputs(db: Database, video_id: int, *,
+                  analysis_id: int | None = None) -> dict[str, Any] | None:
+    """把库里的分析结果还原成"生成剧本要用的原始数据"，供 timeline/exporters 使用。
+
+    这里**只取数、只还原形状**：不合并时间线、不算动作轨、不排版。
+    时间线仍旧由 timeline.engine 的 build_timeline / filter_timeline 算，
+    剧本正文仍旧由 exporters.merged_lines 生成——那两处是唯一的实现，不在这里复制。
+
+    找不到可用的 completed 分析就返回 None（调用方自己决定报错还是回退）。
+    """
+    if analysis_id is None:
+        run = latest_analysis(db, video_id)
+        if run is None:
+            return None
+        analysis_id = int(run["id"])
+    else:
+        run = db.one("SELECT * FROM analysis_runs WHERE id = ?", (analysis_id,))
+        if run is None:
+            return None
+    video = db.one("SELECT * FROM videos WHERE id = ?", (video_id,))
+    if video is None:
+        return None
+
+    keys = run.keys()
+    # 老库刚升上来时这三列可能还没被任何一次分析写过：读不到就是没存过，不猜
+    output_language = run["output_language"] if "output_language" in keys else None
+    render_config = _loads(run["render_config"] if "render_config" in keys else None) or {}
+    face_available = run["face_available"] if "face_available" in keys else None
+
+    segments = [_loads(row["raw_json"]) or {} for row in get_speech_segments(db, analysis_id)]
+    events = [_loads(row["raw_json"]) or {} for row in get_visual_events(db, analysis_id)]
+    spans = [_loads(row["raw_json"]) or {} for row in get_expression_spans(db, analysis_id)]
+    return {
+        "analysis_id": analysis_id,
+        "video_id": video_id,
+        "video_name": video["file_name"],
+        "video_path": video["file_path"],
+        "duration": float(video["duration"] or 0.0),
+        "segments": segments,
+        "events": events,
+        "emotions": spans,
+        "output_language": output_language,
+        "render_config": render_config,
+        "expression_state": expression_state(db, analysis_id,
+                                             face_available=face_available,
+                                             span_count=len(spans)),
+    }
+
 
 
 # =================================================================== AI 任务
@@ -1025,6 +1216,43 @@ def get_clips(db: Database, video_id: int) -> list[sqlite3.Row]:
 
 
 # ===================================================================== 文件
+def video_footprint(db: Database, video_id: int) -> dict[str, int]:
+    """这个视频在库里占了多少行：分析 / 事件 / 语音 / AI 任务 / AI 回复 / 高光 JSON /
+    片段 / 文件登记。
+
+    删之前先给用户看清楚要没掉什么，别让人蒙着眼点「确定」。
+    """
+    counts = {
+        "analyses": "SELECT COUNT(*) FROM analysis_runs WHERE video_id = ?",
+        "events": "SELECT COUNT(*) FROM visual_events WHERE analysis_id IN "
+                  "(SELECT id FROM analysis_runs WHERE video_id = ?)",
+        "segments": "SELECT COUNT(*) FROM speech_segments WHERE analysis_id IN "
+                    "(SELECT id FROM analysis_runs WHERE video_id = ?)",
+        "tasks": "SELECT COUNT(*) FROM ai_tasks WHERE video_id = ?",
+        "results": "SELECT COUNT(*) FROM ai_results WHERE video_id = ?",
+        "assets": "SELECT COUNT(*) FROM highlight_assets WHERE video_id = ?",
+        "clips": "SELECT COUNT(*) FROM clips WHERE video_id = ?",
+        "artifacts": "SELECT COUNT(*) FROM artifacts WHERE video_id = ?",
+    }
+    return {key: int(db.value(sql, (video_id,)) or 0) for key, sql in counts.items()}
+
+
+def forget_video(db: Database, video_id: int) -> dict[str, int] | None:
+    """把这个视频从库里删掉（**磁盘上的文件一个都不动**）。返回删掉了多少行；不存在返回 None。
+
+    `videos` 是所有表的外键根，全部是 `ON DELETE CASCADE`，所以这一条 DELETE 会带走
+    它的分析、画面事件、语音段、表情段、AI 任务、AI 结果、片段、高光 JSON 资产、
+    成品登记、文件登记。**不可恢复**，调用方必须先让用户确认。
+    """
+    if db.one("SELECT id FROM videos WHERE id = ?", (video_id,)) is None:
+        return None
+    gone = video_footprint(db, video_id)
+    with db.tx() as conn:
+        conn.execute("PRAGMA foreign_keys=ON")      # 级联靠它，别指望默认
+        conn.execute("DELETE FROM videos WHERE id = ?", (video_id,))
+    return gone
+
+
 def register_artifact(db: Database, video_id: int, kind: str, path: str | Path, *,
                       sha256: str | None = None) -> int:
     """登记一个实际文件（存在与否、多大）。同一 video+type+path 重复登记就更新。"""
@@ -1133,16 +1361,20 @@ def missing_input_videos(db: Database, folder: str | Path | None) -> list[sqlite
 
 def states_for_videos(db: Database, video_ids: list[int],
                       sig: dict[str, Any] | None = None) -> dict[int, dict[str, bool]]:
-    """一批视频的四个状态，四条聚合 SQL 出来，不按视频逐个查、更不扫磁盘。
+    """一批视频的业务阶段，几条聚合 SQL 出来，不按视频逐个查、更不扫磁盘。
 
-    界面刷新就靠这个：40 个视频也是四次查询，不会因为数据库化反而变慢。
-    四个状态各自独立：
+    界面刷新就靠这个。**数据库是唯一权威**，各状态互相独立：
     - analysed  analysis_runs 里有 completed（给了 sig 还要模型/配置哈希对得上）
-    - txt       artifacts 里有还在盘上的 merged_txt
-    - json      ai_results 有记录，或 artifacts 里有 ai_script
+    - script    库里能生成完整剧本（script_ready_videos）—— 这才是"有剧本"的判据
+    - attempted 已经做过高光分析（highlight_attempted_videos）
+    - json_ok   库里有一份能直接开剪的高光 JSON（reusable_json_videos）
+    - rendered  剪辑这一步做过（clips 里有 rendered，成品后来被删也算做过）
     - clipped   artifacts 里有还在盘上的 final_video（clips 的 rendered 只算历史）
+    - txt/json  **只表示"盘上有这个文件"**（merged_txt / ai_script），仅供显示与兼容，
+                任何决策都不许用它们：TXT 是传输文件、_脚本.json 是导出文件。
     """
-    empty = {"analysed": False, "txt": False, "json": False, "clipped": False}
+    empty = {"analysed": False, "script": False, "attempted": False, "json_ok": False,
+             "rendered": False, "txt": False, "json": False, "clipped": False}
     if not video_ids:
         return {}
     marks = ", ".join("?" for _ in video_ids)
@@ -1179,6 +1411,21 @@ def states_for_videos(db: Database, video_ids: list[int],
     for row in db.all(
             f"SELECT DISTINCT video_id FROM ai_results WHERE video_id IN ({marks})", params):
         out[int(row["video_id"])]["json"] = True
+
+    # 真正参与决策的三个：能不能出剧本 / 问过 AI 没有 / 手上的 JSON 能不能直接开剪。
+    # 三者全部只查库，和上面那两个"文件在不在"是不同的东西。
+    for vid in script_ready_videos(db, video_ids):
+        if vid in out:
+            out[vid]["script"] = True
+    for vid in highlight_attempted_videos(db, video_ids):
+        if vid in out:
+            out[vid]["attempted"] = True
+    for vid in reusable_json_videos(db, video_ids):
+        if vid in out:
+            out[vid]["json_ok"] = True
+    for vid in rendered_clip_videos(db, video_ids):
+        if vid in out:
+            out[vid]["rendered"] = True
 
     # 「成品」只认还在盘上的 final_video 产物：clips.status='rendered' 是历史（当时确实剪出来了），
     # 成品后来被删掉了就不该继续显示完成——这跟队列跳过的判断（artifacts）保持同一个口径
@@ -1224,6 +1471,20 @@ def artifact_videos(db: Database, video_ids: list[int], kind: str) -> set[int]:
         """, [*video_ids, kind])}
 
 
+def rendered_clip_videos(db: Database, video_ids: list[int]) -> set[int]:
+    """这些视频里，哪些**剪过**（clips 里有 rendered 记录）。按视频去重。
+
+    这是"剪辑这一步做过没有"，跟"成品还在不在盘上"（artifact_videos final_video）
+    是两件事：成品被删掉了，剪辑仍然发生过——面板要能把这两列分开显示。
+    """
+    if not video_ids:
+        return set()
+    marks = ", ".join("?" for _ in video_ids)
+    return {int(row["video_id"]) for row in db.all(
+        f"SELECT DISTINCT video_id FROM clips "
+        f"WHERE video_id IN ({marks}) AND status = 'rendered'", list(video_ids))}
+
+
 def reusable_json_videos(db: Database, video_ids: list[int]) -> set[int]:
     """这些视频里，哪些手上有一份**能直接开剪**的 AI JSON。按视频去重。
 
@@ -1255,7 +1516,53 @@ def reusable_json_videos(db: Database, video_ids: list[int]) -> set[int]:
     return ok
 
 
+def script_ready_videos(db: Database, video_ids: list[int]) -> set[int]:
+    """这些视频里，哪些**能从库里生成完整剧本**。一条 SQL，按视频去重。
+
+    判据只看库：有 completed 的分析，且那次分析下面至少落过画面事件或语音段。
+    表情轨（expression_spans）不作为门槛——历史分析没存过它，剧本照样出四段，
+    只是 SECTION 3 会明确写"库里没有这份数据"（见 exporters 的 expression_state）。
+    **绝不看 AI_输入目录里有没有 TXT**：那是传输文件，不是剧本。
+    """
+    if not video_ids:
+        return set()
+    marks = ", ".join("?" for _ in video_ids)
+    return {int(row["video_id"]) for row in db.all(
+        f"""
+        SELECT DISTINCT r.video_id FROM analysis_runs r
+         WHERE r.status = 'completed' AND r.video_id IN ({marks})
+           AND (EXISTS(SELECT 1 FROM visual_events e WHERE e.analysis_id = r.id)
+                OR EXISTS(SELECT 1 FROM speech_segments s WHERE s.analysis_id = r.id))
+        """, list(video_ids))}
+
+
+def highlight_attempted_videos(db: Database, video_ids: list[int], *,
+                               mode: str | None = None,
+                               task_type: str = AUTO_TASK_TYPE) -> set[int]:
+    """这些视频里，哪些**已经做过高光分析**（把 PRM + 完整剧本交给 AI 过）。
+
+    判据：ai_tasks 里有非 pending 的任务（pending 只是排着队，还没提交），
+    或者 ai_results 里已经有结果。跟"结果能不能用"无关——能不能用看
+    `reusable_json_videos`，这里回答的是"问过没有"。
+    """
+    if not video_ids:
+        return set()
+    marks = ", ".join("?" for _ in video_ids)
+    params: list[Any] = [task_type, *video_ids]
+    sql = (f"SELECT DISTINCT video_id FROM ai_tasks WHERE task_type = ? "
+           f"AND video_id IN ({marks}) AND status <> 'pending'")
+    if mode:
+        sql += " AND mode = ?"
+        params.append(mode)
+    out = {int(row["video_id"]) for row in db.all(sql, params)}
+    out |= {int(row["video_id"]) for row in db.all(
+        f"SELECT DISTINCT video_id FROM ai_results WHERE video_id IN ({marks})",
+        list(video_ids))}
+    return out
+
+
 def task_videos(db: Database, video_ids: list[int], states: tuple[str, ...], *,
+
                 mode: str | None = None, task_type: str = AUTO_TASK_TYPE) -> set[int]:
     """这些视频里，哪些有处于给定状态的任务。按视频去重（一个视频有几条历史任务都只算一次）。"""
     if not video_ids or not states:
@@ -1296,12 +1603,19 @@ def video_queue_statistics(db: Database, video_ids: list[int], *,
 
     所以 done + rendering + waiting_ai + pending_render + failed + cancelled + no_json
     == total 恒成立。`json` 是一个横切指标（可能和任何桶重叠），单独给出来方便界面显示。
+    另外四个横切指标按真实业务链给：`analysed`（分析完成）、`script`（库里能出完整剧本）、
+    `attempted`（做过高光分析）、`clipped`（有有效成品）——它们和九个桶无关，只用于顶部数字。
     """
     ids = {int(v) for v in video_ids}
     ordered = sorted(ids)
     json_ok = reusable_json_videos(db, ordered) & ids
-    done = (json_ok if done_key == "json"
-            else artifact_videos(db, ordered, "final_video") & ids)
+    clipped_ids = artifact_videos(db, ordered, "final_video") & ids
+    analysed_ids = {vid for vid, state in states_for_videos(db, ordered).items()
+                    if state["analysed"]}
+    script_ids = script_ready_videos(db, ordered) & ids
+    attempted_ids = highlight_attempted_videos(db, ordered, mode=mode,
+                                               task_type=task_type) & ids
+    done = json_ok if done_key == "json" else clipped_ids
     # 旧成品还在就算完成，别让重排的任务把它抢走
     rendering = (task_videos(db, ordered, TASK_RENDERING,
                              mode=mode, task_type=task_type) & ids) - done
@@ -1331,6 +1645,12 @@ def video_queue_statistics(db: Database, video_ids: list[int], *,
         "done": len(done),
         "failed": failed,
         "cancelled": cancelled,
+        # 横切指标：跟九个互斥桶无关，界面顶部按真实业务链显示用的
+        "analysed": len(analysed_ids & ids),
+        "script": len(script_ids & ids),
+        "attempted": len(attempted_ids & ids),
+        "rendered": len(rendered_clip_videos(db, ordered) & ids),
+        "clipped": len(clipped_ids & ids),
     }
 
 

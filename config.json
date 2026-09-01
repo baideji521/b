@@ -207,15 +207,20 @@
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
-    "ai_input_dir": "F:/视频_工作目录/清洗out/挑战巧克力",
-    "ai_output_dir": "F:/视频_工作目录/成片素材/巧克力挑战素材",
+    "ai_input_dir": "F:/视频_工作目录/下载目录/预测器挑战/能活多久",
+    "ai_output_dir": "F:/视频_工作目录/成片素材/能活多久",
     "ai_job": "full",
     "upload_mode": "auto",
     "focus_browser": true,
     "side_window": true,
     "keep_merged_file": false,
     "message": "Follow the rules in prm_en.txt and analyze the attached *_merged.txt. Reply with the JSON object only.",
-    "auto_clip": true
+    "auto_clip": true,
+    "highlight_source": "all",
+    "ai_clip_video": true,
+    "ai_collect_script": false,
+    "ai_script_clip": false,
+    "skip_done_products": true
   },
   "runtime": {
     "max_auto_retries": 3,
@@ -270,5 +275,11 @@
       "iic/speech_campplus_sv_zh-cn_16k-common": "iic/speech_campplus_sv_zh-cn_16k-common",
       "iic/speech_campplus_sv_en_voxceleb_16k": "iic/speech_campplus_sv_en_voxceleb_16k"
     }
+  },
+  "assets": {
+    "input_dir": "F:/视频_工作目录/下载目录",
+    "output_dir": "F:/视频_工作目录/成片素材",
+    "filter_video_dir": "F:\\视频_工作目录\\下载目录\\预测器挑战\\能活多久",
+    "filter_product_dir": "F:\\视频_工作目录\\成片素材\\能活多久"
   }
 }

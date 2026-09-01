@@ -15,6 +15,9 @@ Phase 13 只收口 GUI，所以这一组测试盯的是**信息架构和交互�
   T_GUI_10  AI 面板不再承担 JSON / PRM 的增删改
   T_GUI_11  raw_json 不允许被原地修改（编辑只能另存成新的高光 JSON）
   T_GUI_12  当前 JSON 有明确的 ★ 标记
+  T_GUI_13  PRM 正文以数据库为准：选中导入老文件、改名 / 存正文只动库、新建不落盘
+  T_GUI_14  「导入文件…」当场读进编辑框但不写库，点「新建」才登记
+  T_GUI_15  改名有自己的提交按钮；撞名被挡；改名不会丢掉刚导入的正文
 
 真的建 Qt 控件（offscreen），用临时目录里的临时库，**绝不碰项目真实数据库**。
 可以直接 `python tests/test_gui_assets_center.py`。
@@ -39,6 +42,7 @@ from PyQt5.QtWidgets import (QApplication, QComboBox, QDialog,   # noqa: E402
                              QMessageBox, QPushButton, QWidget)
 
 from vidscribe.db import assets as db_assets                      # noqa: E402
+from vidscribe.db import repo as db_repo                          # noqa: E402
 from vidscribe.db.db import Database                              # noqa: E402
 from vidscribe.gui import assets_dialog as ad                     # noqa: E402
 
@@ -82,6 +86,9 @@ def quiet() -> None:
     ad.QMessageBox.information = staticmethod(lambda *a, **k: None)
     ad.QMessageBox.warning = staticmethod(lambda *a, **k: None)
     ad.QMessageBox.question = staticmethod(lambda *a, **k: QMessageBox.Yes)
+    # PRM 的「新增 / 修改」弹窗是模态的：默认按「取消」，需要走保存的用例自己脚本化
+    ad.PrmEditDialog.exec_ = lambda self: QDialog.Rejected
+
 
 
 def center(tmp_path: Path, *, videos: int = 1, assets: int = 2):
@@ -141,7 +148,7 @@ def test_only_one_top_level_window(tmp_path: Path) -> None:
 def test_video_list_is_the_first_index(tmp_path: Path) -> None:
     _cfg, _db, made, _window, view = center(tmp_path, videos=3)
     assert view.tbl_videos.rowCount() == 3, "视频列表得把三个视频都列出来"
-    names = {col(view.tbl_videos, line, 1) for line in range(3)}
+    names = {col(view.tbl_videos, line, 2) for line in range(3)}
     assert names == {v.name for v, _vid, _ids in made}, f"列表里的视频名不对：{names}"
     # 视频不许再塞进下拉框
     for box in view.videos.findChildren(QComboBox):
@@ -228,14 +235,17 @@ def test_prm_is_its_own_tab(tmp_path: Path) -> None:
     assert titles == ["视频资产", "PRM 管理"], f"两页结构变了：{titles}"
     view.show_prm_page()
     assert view.tabs.currentIndex() == 1, "切不到 PRM 页"
-    assert hasattr(view.prm_panel, "view_text"), "PRM 页得能改提示词正文"
+    assert hasattr(ad, "PrmEditDialog"), "PRM 正文得有地方改（新增 / 修改弹窗）"
     prm = view.prm_panel
     prm.reload()
     assert prm.table.rowCount() == 1, "PRM 列表没把档案列出来"
     assert prm.table.item(0, 1).text() == "PRM V1", "PRM 名字没显示"
     assert prm.table.isColumnHidden(0), "主键列该藏起来"
     prm.table.selectRow(0)
-    assert prm.view_text.toPlainText() == "剪辑规则", "选中 PRM 要能看到正文"
+    dlg = prm._dialog(db_assets.get_prm(prm._handle(), prm.selected()))
+    assert dlg.view_text.toPlainText() == "剪辑规则", "「修改」弹窗要带出库里的正文"
+    dlg.reject()
+
     prm.edit_search.setText("不存在的名字")
     assert prm.table.rowCount() == 0, "PRM 搜索没生效"
     prm.edit_search.clear()
@@ -249,10 +259,10 @@ def test_ai_panel_has_no_asset_crud(tmp_path: Path) -> None:
     called = {node.func.attr for node in ast.walk(tree)
               if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)}
     forbidden = {"create_prm", "update_prm", "delete_prm", "copy_prm", "restore_prm",
-                 "set_default_prm", "create_asset", "edit_asset", "delete_asset",
-                 "restore_asset", "copy_asset", "set_current_asset"}
+                 "set_default_prm", "set_prm_enabled", "create_asset", "edit_asset",
+                 "delete_asset", "restore_asset", "copy_asset", "set_current_asset"}
     assert not forbidden & called, f"AI 面板不该再做资产增删改：{forbidden & called}"
-    assert "list_prms" in called, "AI 面板还是要能读 PRM 列表（选哪一版发给 AI）"
+    assert "enabled_prms" in called, "AI 面板要能读「现在会发哪几份 PRM」（只读，不许改）"
     assert "视频资产中心" in AI_PANEL, "AI 面板要保留资产中心入口"
     for gone in ("高光方案…", "JSON 管理…", "PRM 管理…"):
         assert gone not in AI_PANEL, f"AI 面板里还留着重复入口：{gone}"
@@ -306,11 +316,11 @@ def test_sort_follows_the_order_box(tmp_path: Path) -> None:
     page = view.videos
     page.cmb_order.setCurrentIndex(page.cmb_order.findData("duration"))
     page.reload()
-    seen = [col(view.tbl_videos, line, 1) for line in range(view.tbl_videos.rowCount())]
+    seen = [col(view.tbl_videos, line, 2) for line in range(view.tbl_videos.rowCount())]
     assert seen == [names[1], names[2], names[0]], f"「视频时长」排序没生效：{seen}"
-    view.tbl_videos.horizontalHeader().sectionClicked.emit(1)   # 点「视频」表头
+    view.tbl_videos.horizontalHeader().sectionClicked.emit(2)   # 点「视频」表头
     assert str(page.cmb_order.currentData()) == "name", "点表头应该切「排序」下拉，而不是另排一套"
-    seen = [col(view.tbl_videos, line, 1) for line in range(view.tbl_videos.rowCount())]
+    seen = [col(view.tbl_videos, line, 2) for line in range(view.tbl_videos.rowCount())]
     assert seen == sorted(names), f"按视频名称排序没生效：{seen}"
 
 
@@ -330,7 +340,7 @@ def test_filters_combine_json_and_product(tmp_path: Path) -> None:
     page.cmb_json.setCurrentIndex(page.cmb_json.findData("has"))
     page.cmb_product.setCurrentIndex(page.cmb_product.findData("none"))
     page.reload()
-    names = [col(view.tbl_videos, line, 1) for line in range(view.tbl_videos.rowCount())]
+    names = [col(view.tbl_videos, line, 2) for line in range(view.tbl_videos.rowCount())]
     assert names == [made[1][0].name], f"「有 JSON + 无成品」只该剩一个视频：{names}"
     assert "chk_has_json" not in PANEL, "「只看有高光」那个勾选框应该被 JSON 下拉取代"
 
@@ -393,7 +403,12 @@ def test_gui_has_no_sql(tmp_path: Path) -> None:
 def test_only_one_primary_button(tmp_path: Path) -> None:
     """高频动作只剩「直接剪辑（唯一加粗）」和「查看」，其余进「更多 ▾」。"""
     _cfg, _db, _made, _window, view = center(tmp_path)
-    texts = [b.text() for b in view.videos.findChildren(QPushButton) if b.isVisibleTo(view)]
+    page = view.videos
+    # 三个按钮都在「③ 高光 JSON」弹窗里；视频页自己一个按钮都不摆
+    assert not [b for b in page.findChildren(QPushButton) if b.window() is view], \
+        "视频页上不该再摆按钮"
+    texts = [b.text() for b in page.findChildren(QPushButton)
+             if b.window() is page.dlg_json and b.isVisibleTo(page.dlg_json)]
     assert set(texts) == {"直接剪辑", "查看", "更多 ▾"}, \
         f"视频页按钮没收干净：{texts}"
     bold = [b.text() for b in view.videos.findChildren(QPushButton) if b.font().bold()]
@@ -466,6 +481,339 @@ def test_edit_buttons_only_in_edit_mode(tmp_path: Path) -> None:
     assert not panel.btn_save.isVisibleTo(panel), "取消编辑后按钮要收回去"
 
 
+# ------------------------------------------------------------------ T_GUI_21
+def test_center_dirs_are_its_own_config_keys(tmp_path: Path) -> None:
+    """资产中心自己的两个目录写 `assets` 一节，绝不碰 AI 面板和主界面那几个键。"""
+    cfg, _db, _made, _window, view = center(tmp_path)
+    source = tmp_path / "中心_原始"
+    product = tmp_path / "中心_成品"
+    for path in (source, product):
+        path.mkdir()
+    before = json.loads((cfg.root / "config.json").read_text(encoding="utf-8"))
+    view.edit_assets_in.setText(str(source))
+    view.edit_assets_out.setText(str(product))
+    view._save_dirs()
+    data = json.loads((cfg.root / "config.json").read_text(encoding="utf-8"))
+    assert data["assets"]["input_dir"] == str(source)
+    assert data["assets"]["output_dir"] == str(product)
+    assert (data.get("bridge", {}).get("ai_input_dir")
+            == before.get("bridge", {}).get("ai_input_dir")), "不许动 AI_输入目录"
+    assert (data.get("bridge", {}).get("ai_output_dir")
+            == before.get("bridge", {}).get("ai_output_dir")), "不许动 AI_输出目录"
+    assert data["paths"]["input_dir"] == before["paths"]["input_dir"], "不许动主界面导入目录"
+    assert view.assets_dir("input_dir") == source
+    assert view.assets_dir("output_dir") == product
+
+
+# ------------------------------------------------------------------ T_GUI_22
+def test_center_scan_registers_its_own_videos(tmp_path: Path) -> None:
+    """「扫描目录」按中心自己的输入目录登记原始视频，登记完列表里就能看到。"""
+    cfg, db, _made, _window, view = center(tmp_path)
+    source = tmp_path / "中心_原始"
+    source.mkdir()
+    (source / "独立素材.mp4").write_bytes(b"m" * 4096)
+    view.edit_assets_in.setText(str(source))
+    view._save_dirs()
+    view.on_scan_dirs()
+    names = [str(row["file_name"]) for row in db.all("SELECT file_name FROM videos")]
+    assert "独立素材.mp4" in names, f"扫描没把中心自己目录里的视频登记进库：{names}"
+    listed = [str(item["file_name"]) for item in view.videos._rows]
+    assert "独立素材.mp4" in listed, f"登记完列表里就该看得到：{listed}"
+
+
+# ------------------------------------------------------------------ T_GUI_23
+def test_video_row_shows_its_folder(tmp_path: Path) -> None:
+    """「目录」列在「视频」右边、「时长」左边，写这个文件真正所在的目录。"""
+    _cfg, _db, made, _window, view = center(tmp_path)
+    page = view.videos
+    video, _vid, _ids = made[0]
+    assert page.VIDEO_HEADERS[page.NAME_COLUMN] == "视频"
+    assert page.VIDEO_HEADERS[page.DIR_COLUMN] == "目录"
+    assert page.DIR_COLUMN == page.NAME_COLUMN + 1, "目录列必须紧挨着视频名"
+    assert page.VIDEO_HEADERS[page.DIR_COLUMN + 1] == "时长", "目录列右边就是时长"
+    cell = page.tbl_videos.item(0, page.DIR_COLUMN)
+    # Windows 上临时目录会以 8.3 短名（ADMINI~1）出现，按真实路径比
+    assert Path(cell.text()).resolve() == video.parent.resolve(), f"目录列写错了：{cell.text()}"
+    assert Path(cell.toolTip()).resolve() == video.resolve(), "悬停要能看到完整路径"
+
+
+# ------------------------------------------------------------------ T_GUI_24
+def test_json_and_product_cells_open_the_popups(tmp_path: Path) -> None:
+    """点「JSON」格子开③弹窗，点「成品」格子开④弹窗（右键里不再有这两项）。"""
+    _cfg, db, made, _window, view = center(tmp_path, assets=1)
+    page = view.videos
+    _video, vid, _ids = made[0]
+    product = tmp_path / "成品.mp4"
+    product.write_bytes(b"p" * 4096)
+    db_repo.register_artifact(db, vid, "final_video", product)
+    page.reload()
+    assert page.VIDEO_HEADERS[page.JSON_COLUMN] == "JSON"
+    assert page.VIDEO_HEADERS[page.PRODUCT_COLUMN] == "成品"
+    page._on_cell_clicked(page.tbl_videos.item(0, page.JSON_COLUMN))
+    app().processEvents()
+    assert page.dlg_json.isVisible(), "点 JSON 格子要开出③高光 JSON 弹窗"
+    page.dlg_json.close()
+    page._on_cell_clicked(page.tbl_videos.item(0, page.PRODUCT_COLUMN))
+    app().processEvents()
+    assert page.dlg_products.isVisible(), "点成品格子要开出④成品与血缘弹窗"
+    page.dlg_products.close()
+    # 点视频名那一格什么都不该发生（免得手一滑就弹窗）
+    page._on_cell_clicked(page.tbl_videos.item(0, page.NAME_COLUMN))
+    assert not page.dlg_json.isVisible() and not page.dlg_products.isVisible()
+
+
+# ------------------------------------------------------------------ T_GUI_26
+def test_products_follow_the_selected_video_after_reload(tmp_path: Path) -> None:
+    """列表重画后选中行换了视频，成品区必须跟着换 —— 否则「打开成品」开的是别人的成品。
+
+    Qt 的坑：`setRowCount(0)` 之后重新插行，选中的**行号**还在原地，
+    itemSelectionChanged 不会再发一次，详情区（成品表 / 血缘）就留在上一个视频上。
+    """
+    _cfg, db, made, _window, view = center(tmp_path, videos=2, assets=1)
+    page = view.videos
+    prm_id = int(db_assets.list_prms(db)[0]["id"])
+    outs = {}
+    for _video, vid, ids in made:
+        out = tmp_path / "output" / f"成品_{vid}.mp4"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"mp4")
+        db_assets.record_product(db, vid, out,
+                                 specs=[{"start": 1.0, "end": 4.0, "duration": 3.0}],
+                                 asset_id=ids[0], prm_id=prm_id)
+        outs[vid] = out
+    page.reload()
+    first = page.current_video_id()
+    assert first is not None
+    page.tbl_videos.selectRow(0)
+    first = page.current_video_id()
+
+    # 搜另一个视频：重画之后第 0 行换成了它，行号却没变
+    other = next(vid for _v, vid, _ids in made if vid != first)
+    page.edit_search.setText(str(next(v.name for v, vid, _i in made if vid == other)))
+    page.reload()
+    assert page.tbl_videos.rowCount() == 1
+    assert page.current_video_id() == other, "搜完只剩这一个视频，它就是当前视频"
+
+    shown = {info["path"] for info in (page._product_rows or [])}
+    assert shown == {str(outs[other])}, f"成品区还是上一个视频的：{shown}"
+    page.tbl_products.selectRow(0)
+    info = page._product_info(page.selected_product())
+    assert info is not None and info["path"] == str(outs[other]), \
+        f"「打开成品」会开错文件：{info and info['path']}"
+
+
+# ------------------------------------------------------------------ T_GUI_25
+def test_dir_filter_is_saved_and_survives_clear(tmp_path: Path) -> None:
+    """原视频目录筛选：只看这个子目录、存进全局配置，而且「清掉筛选」不动它。"""
+    cfg, db, made, _window, view = center(tmp_path)
+    page = view.videos
+    inside, _vid, _ids = made[0]
+    other_dir = tmp_path / "别的子目录"
+    other_dir.mkdir()
+    other = other_dir / "别处.mp4"
+    other.write_bytes(b"o" * 4096)
+    db_repo.upsert_video(db, other)
+    page.reload()
+    names = {str(row["file_name"]) for row in page._rows}
+    assert {inside.name, "别处.mp4"} <= names, f"两个目录的视频都该在：{names}"
+
+    index = next((i for i in range(page.cmb_video_dir.count())
+                  if page.cmb_video_dir.itemData(i)
+                  and Path(str(page.cmb_video_dir.itemData(i))).resolve()
+                  == other_dir.resolve()), -1)
+    assert index > 0, f"目录下拉里应该有 {other_dir}：" \
+                      f"{[page.cmb_video_dir.itemData(i) for i in range(page.cmb_video_dir.count())]}"
+    picked = str(page.cmb_video_dir.itemData(index))
+    page.cmb_video_dir.setCurrentIndex(index)     # 走和用户点选一样的路（选完即存 + 刷新）
+    names = {str(row["file_name"]) for row in page._rows}
+    assert names == {"别处.mp4"}, f"选了目录就只看这个目录：{names}"
+    data = json.loads((cfg.root / "config.json").read_text(encoding="utf-8"))
+    assert data["assets"]["filter_video_dir"] == picked, "目录筛选要落进全局配置"
+
+    page.on_clear_filters()
+    assert str(page.cmb_video_dir.currentData()) == picked, \
+        "「清掉筛选」不许把手动挑的目录作用域清掉"
+    names = {str(row["file_name"]) for row in page._rows}
+    assert names == {"别处.mp4"}, f"清筛选之后目录作用域还在：{names}"
+
+
+def scripted_prm_dialog(prm, *, name=None, source=None, text=None, pick=None,
+                        accepted: bool = True):
+    """把 PRM 的「新增 / 修改」弹窗脚本化：不真弹窗，按参数填好字段再返回结果。
+
+    走的是真实的 `PrmEditDialog`（真控件、真 on_pick、真 payload），只替换 `exec_`，
+    这样「弹窗 → 保存 → 写库」整条路都被测到，测试又不会卡在模态窗口上。
+    """
+    original = prm._dialog
+
+    def make(row=None):
+        dlg = original(row)
+        if pick is not None:
+            ad.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(pick), ""))
+            dlg.on_pick()
+        if name is not None:
+            dlg.edit_name.setText(name)
+        if source is not None:
+            dlg.edit_file.setText(source)
+        if text is not None:
+            dlg.view_text.setPlainText(text)
+        dlg.exec_ = lambda: (QDialog.Accepted if accepted else QDialog.Rejected)
+        return dlg
+
+    prm._dialog = make
+    return prm
+
+
+# ------------------------------------------------------------------ T_GUI_13
+def test_prm_text_is_edited_against_the_database(tmp_path: Path) -> None:
+    """PRM 正文以库为准：选中就把老文件导进库，改名 / 改正文都只动库，磁盘文件不碰。"""
+    cfg, db, _made, _window, view = center(tmp_path)
+    prm = view.prm_panel
+    prm.reload()
+    prm.table.selectRow(0)
+    prm_id = prm.selected()
+    assert prm_id is not None, "选不中 PRM"
+    source = cfg.root / "prm" / "rules.txt"
+
+    # 选中就顺手把老库里「正文还在文件里」的那份导进库
+    assert str(db_assets.get_prm(db, prm_id)["content"]) == "剪辑规则", \
+        "选中之后正文还没进库"
+    assert "正文待导入" not in col(prm.table, 0, 4), \
+        f"正文进库之后状态列不该再催导入：{col(prm.table, 0, 4)}"
+    assert "rules.txt" in prm.table.item(0, 1).toolTip(), \
+        f"来源文件挂在名称的提示里：{prm.table.item(0, 1).toolTip()}"
+
+    # 改正文：一次写回库，来源文件一个字都不动
+    scripted_prm_dialog(prm, text="新的剪辑规则")
+    prm.on_modify()
+    assert str(db_assets.get_prm(db, prm_id)["content"]) == "新的剪辑规则", "正文没写进库"
+    assert source.read_text(encoding="utf-8") == "剪辑规则", "保存正文不该回写来源文件"
+
+    # 改名也只动库，正文跟着这份档案不变（名称 + 正文一次写完，不存在半途丢失）
+    scripted_prm_dialog(prm, name="PRM V2")
+    prm.on_modify()
+    row = db_assets.get_prm(db, prm_id)
+    assert str(row["name"]) == "PRM V2", "改名没生效"
+    assert str(row["content"]) == "新的剪辑规则", "改名不该动正文"
+    assert col(prm.table, 0, 1) == "PRM V2", "表里的名字没跟着改"
+
+    # 新增：只填名称 + 正文，连来源文件都不用给
+    before = {int(r["id"]) for r in db_assets.list_prms(db)}
+    scripted_prm_dialog(prm, name="手写规则", source="", text="只在库里的正文")
+    prm.on_new()
+    fresh = [r for r in db_assets.list_prms(db) if int(r["id"]) not in before]
+    assert len(fresh) == 1, f"新增了 {len(fresh)} 份，应该正好 1 份"
+    new = fresh[0]
+    assert str(new["name"]) == "手写规则", "新增的名字不对"
+    assert str(new["content"]) == "只在库里的正文", "新增的正文没进库"
+    assert str(new["filename"]) == "手写规则.txt", f"来源文件该按名字兜底：{new['filename']}"
+    assert not (cfg.root / "手写规则.txt").exists(), "新增 PRM 不该往磁盘写文件"
+    assert prm.selected() == int(new["id"]), "新增之后该选中它"
+
+
+# ------------------------------------------------------------------ T_GUI_14
+def test_importing_a_file_fills_the_editor_without_writing_the_db(tmp_path: Path) -> None:
+    """「导入文件…」当场把正文读进弹窗（库还不动），点「保存」才登记成一份新 PRM。"""
+    cfg, db, _made, _window, view = center(tmp_path)
+    prm = view.prm_panel
+    prm.reload()
+    prm.table.selectRow(0)
+    old_id = prm.selected()
+    old_text = str(db_assets.get_prm(db, old_id)["content"] or "")
+
+    source = cfg.root / "prm" / "另一套.txt"
+    source.write_text("另一套剪辑规则", encoding="utf-8")
+    picked = ad.QFileDialog.getOpenFileName
+    ad.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(source), ""))
+    try:
+        # 弹窗里导入：正文当场读进来，名称留空按文件名兜底，库一个字都不动
+        dlg = prm._dialog()
+        dlg.on_pick()
+        assert dlg.view_text.toPlainText() == "另一套剪辑规则", "导入没把正文读进弹窗"
+        assert dlg.edit_file.text() == str(source), "来源文件框没填上"
+        assert dlg.edit_name.text() == "另一套", "名称留空时该按文件名兜底"
+        assert str(db_assets.get_prm(db, old_id)["content"] or "") == old_text, \
+            "导入只读进弹窗，不许动库里选中的那份"
+        assert len(db_assets.list_prms(db)) == 1, "导入不许自己偷偷新建一份"
+
+        # 空文件：明确拒绝，不许把空正文带进弹窗
+        empty = cfg.root / "prm" / "空的.txt"
+        empty.write_text("   \n", encoding="utf-8")
+        ad.QFileDialog.getOpenFileName = staticmethod(lambda *a, **k: (str(empty), ""))
+        blank = prm._dialog()
+        blank.on_pick()
+        assert blank.view_text.toPlainText() == "", "空文件不该被导入"
+        assert blank.edit_file.text() == "", "空文件连来源都不该记"
+        # 正文空着点「保存」也必须被挡住
+        blank.edit_name.setText("空规则")
+        blank.accept()
+        assert blank.result() != QDialog.Accepted, "正文空着不许保存"
+
+        before = {int(r["id"]) for r in db_assets.list_prms(db)}
+        scripted_prm_dialog(prm, pick=source)
+        prm.on_new()
+        fresh = [r for r in db_assets.list_prms(db) if int(r["id"]) not in before]
+        assert len(fresh) == 1, f"点「保存」该正好多出 1 份，实际 {len(fresh)}"
+        assert str(fresh[0]["name"]) == "另一套", "新增的名字不对"
+        assert str(fresh[0]["content"]) == "另一套剪辑规则", "导入的正文没跟着进库"
+    finally:
+        ad.QFileDialog.getOpenFileName = picked
+
+
+# ------------------------------------------------------------------ T_GUI_15
+def test_renaming_a_prm_has_its_own_button_and_keeps_the_text(tmp_path: Path) -> None:
+    """改名走「修改」弹窗：名称 + 正文一次写回；撞名被挡；取消不写库。"""
+    cfg, db, _made, _window, view = center(tmp_path)
+    prm = view.prm_panel
+    prm.reload()
+    prm.table.selectRow(0)
+    prm_id = prm.selected()
+
+    # 一级动作里不许再出现「先存这个再存那个」那套按钮
+    texts = [b.text() for b in prm.findChildren(QPushButton)]
+    for gone in ("保存档案", "保存名称等信息", "保存正文", "保存修改"):
+        assert gone not in texts, f"同一个动作不要摆两个按钮：还有「{gone}」"
+    assert "修改" in texts and "新增" in texts, f"清单页要有「修改 / 新增」：{texts}"
+
+    scripted_prm_dialog(prm, name="规则甲")
+    prm.on_modify()
+    assert str(db_assets.get_prm(db, prm_id)["name"]) == "规则甲", "改名没写进库"
+    assert str(db_assets.get_prm(db, prm_id)["content"]) == "剪辑规则", "改名不该动正文"
+
+    # 撞名：库里名字唯一，撞了要说清楚而不是静悄悄失败
+    second = db_assets.create_prm(db, "规则乙", "乙.txt", content="乙的正文")
+    prm.reload()
+    prm.select(second)
+    scripted_prm_dialog(prm, name="规则甲")
+    prm.on_modify()
+    assert str(db_assets.get_prm(db, second)["name"]) == "规则乙", "撞名不该改成功"
+    assert str(db_assets.get_prm(db, second)["content"]) == "乙的正文", "撞名不该动正文"
+
+    # 取消：弹窗里改了半天，点取消就一个字都不许写库
+    prm.select(second)
+    scripted_prm_dialog(prm, name="规则丁", text="丁的正文", accepted=False)
+    prm.on_modify()
+    row = db_assets.get_prm(db, second)
+    assert str(row["name"]) == "规则乙" and str(row["content"]) == "乙的正文", \
+        "点取消不该写库"
+
+    # 导入正文 → 顺手改个名 → 保存：名称和正文一起进库，不会互相顶掉
+    source = cfg.root / "prm" / "丙.txt"
+    source.write_text("丙的正文", encoding="utf-8")
+    picked = ad.QFileDialog.getOpenFileName
+    try:
+        prm.select(second)
+        scripted_prm_dialog(prm, pick=source, name="规则丙")
+        prm.on_modify()
+    finally:
+        ad.QFileDialog.getOpenFileName = picked
+    row = db_assets.get_prm(db, second)
+    assert str(row["name"]) == "规则丙", "改名没生效"
+    assert str(row["content"]) == "丙的正文", "改名把刚导入的正文丢了"
+    assert str(row["filename"]) == str(source), "来源文件该记成刚导入那个"
+
+
+
 # ------------------------------------------------------------------ 直接跑
 TESTS = (
     test_no_json_dialog,
@@ -488,6 +836,15 @@ TESTS = (
     test_layers_are_a_grid,
     test_lineage_click_locates_rows,
     test_edit_buttons_only_in_edit_mode,
+    test_center_dirs_are_its_own_config_keys,
+    test_center_scan_registers_its_own_videos,
+    test_video_row_shows_its_folder,
+    test_json_and_product_cells_open_the_popups,
+    test_products_follow_the_selected_video_after_reload,
+    test_prm_text_is_edited_against_the_database,
+    test_importing_a_file_fills_the_editor_without_writing_the_db,
+    test_renaming_a_prm_has_its_own_button_and_keeps_the_text,
+    test_dir_filter_is_saved_and_survives_clear,
 )
 
 

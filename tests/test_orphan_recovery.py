@@ -115,6 +115,12 @@ class Win:
     _auto_text_file = mw.MainWindow._auto_text_file
     _auto_script_file = mw.MainWindow._auto_script_file
     _auto_done_file = mw.MainWindow._auto_done_file
+    _auto_chain_done = mw.MainWindow._auto_chain_done
+    _skip_because_done = mw.MainWindow._skip_because_done
+    skip_done_products = mw.MainWindow.skip_done_products
+    _language_blocked = mw.MainWindow._language_blocked
+    _reusable_highlight_json = mw.MainWindow._reusable_highlight_json
+    script_payload = mw.MainWindow.script_payload
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
     _register_final_video = mw.MainWindow._register_final_video

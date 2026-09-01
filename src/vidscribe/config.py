@@ -109,6 +109,10 @@ DEFAULTS: dict[str, Any] = {
         "device": "auto",
         "compute_type": "float16",
         "language": None,
+        # 只跑这几种语言的视频（语言预检那一步就判，不跑完整识别）。
+        # 手动分析：语言不在这里面就终止并弹窗；自动剪辑：跳过并把视频标记成以后不再跑
+        # （videos.blocked_language）。留空 = 谁都跑，不拦
+        "allowed_languages": ["en", "zh"],
         "beam_size": 5,
         "vad_filter": True,
         "word_timestamps": True,
@@ -139,32 +143,21 @@ DEFAULTS: dict[str, Any] = {
         "confidence_filter": 0.0,
     },
     "highlight": {
-        # 冻帧音效：原本冻帧段是纯静音（原声只到冻帧点），这里往那段里混一条音效
-        "sfx": {
-            "enabled": True,
-            # 音效库根目录，下面一层子目录就是类别（tools/fetch_sfx.py 下载归类）
-            "dir": "assets/sfx",
-            # 原声不动，音效压低一点混进去；正数会更响，注意别削波
-            "gain_db": -6.0,
-            # 相对冻帧点的偏移，负数=提前一点点起（配合 Flash 更有力）
-            "offset_seconds": 0.0,
-            # 表情轨没覆盖到冻帧点时用哪个类别
-            "fallback_category": "punch",
-            # 冻帧点的表情（timeline.json 的 expression_track）-> 类别目录
-            # 标签集合见 visual/face.py 的 AFFECTNET
-            "emotion_map": {
-                "happy": "funny",
-                "excited": "funny",
-                "surprised": "punch",
-                "angry": "punch",
-                "sad": "riser",
-                "fearful": "riser",
-                "disgusted": "fail",
-                "contempt": "fail",
-                "neutral": "ding",
-                "calm": "ding",
-            },
-        },
+        # 成品一律无音效：原声只到冻帧点，冻帧段和片尾都是静音。
+        # 片尾固定追加 1 秒纯红背景，长度/颜色写在 highlight/clip.py，不给配置调。
+    },
+
+    # 视频资产中心自己的两个目录：和 AI 面板的 bridge.ai_input_dir / ai_output_dir
+    # **完全分开**，谁也不覆盖谁。中心只用它们扫盘登记，不参与自动剪辑的排队口径
+    "assets": {
+        # 扫原始视频：这个目录里的 mp4 登记进库，成为中心列表里的「视频」
+        "input_dir": "",
+        # 扫高光成品：这个目录里的 mp4 认成已有成品，挂回对应视频
+        "output_dir": "",
+        # 列表的两个目录筛选（手动选，选完即存，「清掉筛选」不会把它们清掉）：
+        # 扫描目录下常常有几十个子目录，得能只看其中一个
+        "filter_video_dir": "",
+        "filter_product_dir": "",
     },
     "bridge": {
         # 浏览器扩展对接（见 vidscribe/bridge/server.py）：GUI 起一个只监听
@@ -191,16 +184,19 @@ DEFAULTS: dict[str, Any] = {
         "ai_input_dir": "",
         "ai_output_dir": "",
         # 「自动剪辑」按钮干哪一串（GUI 的 AI 选项里选）：
-        # full   剪辑成片：扫 AI_输入目录，缺 <视频名>.txt 就先分析生成，再发 AI，
-        #        拿到 JSON 按主界面高光配置直接出成片，落 AI_输出目录
-        # collect 收取脚本：只把 AI 回的 JSON 存成 <视频名>_脚本.json，不剪
-        # script 脚本剪辑：直接读 AI_输入目录里现成的脚本 JSON 开剪，不问 AI
+        # full   剪辑成片：扫 AI_输入目录，库里没有分析结果就先分析，再把 PRM + 完整剧本
+        #        发 AI，回来的高光 JSON 入库后按主界面高光配置出片，落 AI_输出目录
+        # collect 收取高光 JSON：同上，但高光 JSON 入库就算干完，不剪
+        # script 高光 JSON 剪辑：只用**库里已有的**高光 JSON 开剪，一次 AI 都不问
         "ai_job": "full",
         # 自动剪辑这一轮挑哪些视频（AI 面板里选）：
         # all      全部：库里已有高光方案的直接开剪，没有的问 AI
         # existing 只挑已经有高光方案的——这一档一次 AI 都不调
         # missing  只挑还没有方案的，全部走 AI
         "highlight_source": "all",
+        # 「不跑成品」（AI 面板里那个勾选框，默认勾上）：成品库里已经有这个视频的有效成品
+        # 就整条跳过，不重新分析、不重新问 AI、不重新剪。取消勾选＝已有成品也照样重跑一遍
+        "skip_done_products": True,
         # 发 AI 时用哪一份 PRM 档案（prm_profiles.id）。0 = 按 prompt_file 那条老路找
         "prm_id": 0,
 
@@ -332,6 +328,13 @@ class Config:
     @property
     def bridge(self) -> dict[str, Any]:
         return self.data["bridge"]
+
+    @property
+    def assets(self) -> dict[str, Any]:
+        """视频资产中心自己的目录（input_dir / output_dir）和两个目录筛选，跟 bridge 无关。"""
+        return self.data.setdefault("assets", {"input_dir": "", "output_dir": "",
+                                               "filter_video_dir": "",
+                                               "filter_product_dir": ""})
 
     @property
     def mirrors(self) -> dict[str, Any]:

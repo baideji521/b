@@ -554,24 +554,25 @@ def test_get_statistics_needs_nonzero_size(tmp_path: Path) -> None:
 
 # ------------------------------------------------------------------ T21
 def test_gui_boxes_match_statistics_keys(tmp_path: Path) -> None:
-    """面板那几格的 key 必须都在统计结果里，否则刷新时直接 KeyError。"""
+    """面板头号数字的 key 必须都在统计结果里，否则刷新时直接 KeyError。"""
     import ast  # noqa: PLC0415
 
     source = (ROOT / "src" / "vidscribe" / "gui" / "ai_options.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     build = next((node for node in ast.walk(tree)
-                  if isinstance(node, ast.FunctionDef) and node.name == "_build_stats"), None)
-    assert build is not None, "ai_options 里找不到 _build_stats"
+                  if isinstance(node, ast.FunctionDef) and node.name == "_build_headline"), None)
+    assert build is not None, "ai_options 里找不到 _build_headline"
     keys = {node.elts[0].value for node in ast.walk(build)
-            if isinstance(node, ast.Tuple) and len(node.elts) == 2
-            and isinstance(node.elts[0], ast.Constant) and isinstance(node.elts[0].value, str)
-            and isinstance(node.elts[1], ast.Constant)}
+            if isinstance(node, ast.Tuple) and len(node.elts) == 3
+            and all(isinstance(el, ast.Constant) for el in node.elts)
+            and isinstance(node.elts[0].value, str)}
     assert keys, "没解析出面板的统计 key"
 
     cfg, db = make_project(tmp_path)
     db_repo.upsert_video(db, fake_video(cfg, "t21.mp4"))
     st = stats(cfg, db)
-    missing = sorted(keys - set(st))
+    # made（盘上还在的成品 mp4）是面板自己数盘算出来的，不走统计函数。
+    missing = sorted(keys - {"made"} - set(st))
     assert not missing, f"面板要显示但统计没给的字段：{missing}"
     assert "todo" not in keys, "「未剪辑」这种 total-done 混合桶不许再出现在界面上"
     db.close()

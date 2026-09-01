@@ -119,6 +119,47 @@ _STEPS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_artifacts_asset ON artifacts(highlight_asset_id)",
         "CREATE INDEX IF NOT EXISTS idx_artifacts_prm ON artifacts(prm_id)",
     ],
+    # v5：分析结果真正全部落库。表情轨（meta.face.segments）过去只写在 timeline.json /
+    # visual.json 里，删掉 output/ 与 cache/ 就再也拿不回来 —— 现在单独一张表存着。
+    # 另外把"当次分析用的渲染参数"记下来：用户后来改了 GUI 配置，
+    # 同一个视频从库里重建出的剧本也必须和当初逐行一致。
+    # 全是加法：建表 + 加列，老数据一行不动，新列一律 NULL（NULL 就代表"这条分析没存过表情轨"）。
+    5: [
+        """
+        CREATE TABLE IF NOT EXISTS expression_spans (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            analysis_id INTEGER NOT NULL REFERENCES analysis_runs(id) ON DELETE CASCADE,
+            sequence    INTEGER,
+            start_time  REAL,
+            end_time    REAL,
+            emotion_en  TEXT,
+            intensity   REAL,
+            samples     INTEGER,
+            raw_json    TEXT
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_expression_analysis "
+        "ON expression_spans(analysis_id, sequence)",
+        "ALTER TABLE analysis_runs ADD COLUMN output_language TEXT",
+        "ALTER TABLE analysis_runs ADD COLUMN render_config TEXT",
+        "ALTER TABLE analysis_runs ADD COLUMN face_available INTEGER",
+    ],
+    # v6：PRM 有了「使用状况」。老库里已有的 PRM 一律算启用（DEFAULT 1），
+    # 升上来之后发 AI 的行为和以前一致；要少发就在 PRM 管理页停用。
+    6: [
+        "ALTER TABLE prm_profiles ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1",
+    ],
+    # v7：语言拦截。语言预检判出来不在 speech.allowed_languages 里的视频，
+    # 把那个语言码记在 videos.blocked_language 上，自动剪辑以后不再排它。
+    # 老库里全是 NULL = 一个都没拦过，行为跟以前一致。
+    7: [
+        "ALTER TABLE videos ADD COLUMN blocked_language TEXT",
+    ],
+    # v8：PRM 正文进库。老库里 content 全是 NULL，第一次用到时按 filename 把文件
+    # 内容读进来补上（`assets.prm_text` 自愈导入），之后发 AI 一律用库里的正文。
+    8: [
+        "ALTER TABLE prm_profiles ADD COLUMN content TEXT",
+    ],
 }
 
 

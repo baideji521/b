@@ -159,17 +159,29 @@ def _import_artifacts(db: Database, cfg: Any, video_id: int, video: Path,
     return count
 
 
+def _legacy_script_json(video: Path, ai_out: Path | None) -> Path | None:
+    """找这个视频的历史高光 JSON：视频旁边和 AI_输出目录都看，先到先用。
+
+    脚本剪辑那一串的 JSON 往往就丢在视频旁边，AI 回传的落在 AI_输出目录。
+    这两处是**兼容导入源**，不是判断依据——认出来就进库，之后一切查库。
+    """
+    for folder in (video.parent, ai_out):
+        if folder is None:
+            continue
+        for name in (f"{video.stem}_脚本.json", f"{video.stem}.json"):
+            candidate = folder / name
+            if candidate.is_file() and candidate.stat().st_size > 0:
+                return candidate
+    return None
+
+
 def _import_ai(db: Database, cfg: Any, video_id: int, video: Path,
               ai_out: Path | None) -> tuple[int, int]:
-    """AI 脚本 JSON -> ai_task(completed) + ai_result + clips。返回（结果数，片段数）。"""
-    if ai_out is None:
-        return 0, 0
-    script = None
-    for name in (f"{video.stem}_脚本.json", f"{video.stem}.json"):
-        candidate = ai_out / name
-        if candidate.is_file() and candidate.stat().st_size > 0:
-            script = candidate
-            break
+    """历史高光 JSON -> ai_task(completed) + ai_result + clips。返回（结果数，片段数）。
+
+    库里已经有这个视频的 AI 结果就不再导——库是权威，文件只是兜底来源。
+    """
+    script = _legacy_script_json(video, ai_out)
     if script is None:
         return 0, 0
     if repo.get_ai_result(db, video_id) is not None:  # 导过就不重复导
@@ -177,6 +189,8 @@ def _import_ai(db: Database, cfg: Any, video_id: int, video: Path,
     raw = script.read_text(encoding="utf-8", errors="replace")
     payload = _read_json(script)
     clips = repo.clips_from_payload(payload)
+    if not clips:      # 抠不出可用片段的 JSON 不进库，免得"库里有 JSON"变成假状态
+        return 0, 0
     task_id = repo.create_ai_task(db, video_id, mode=str(cfg.bridge.get("ai_job") or "full"),
                                  provider=str(cfg.bridge.get("provider") or ""),
                                  input_txt=None)
@@ -186,8 +200,8 @@ def _import_ai(db: Database, cfg: Any, video_id: int, video: Path,
                                    json_data=payload, candidate_count=len(clips),
                                    winner_score=clips[0]["score"] if clips else None,
                                    validated=bool(clips))
-    final = ai_out / f"{video.stem}_高光时刻.mp4"
-    rendered = final.is_file() and final.stat().st_size > 0
+    final = (ai_out / f"{video.stem}_高光时刻.mp4") if ai_out is not None else None
+    rendered = final is not None and final.is_file() and final.stat().st_size > 0
     for spec in clips:
         repo.create_clip(db, video_id, spec, ai_result_id=result_id,
                          status="rendered" if rendered else "planned",
@@ -315,7 +329,7 @@ def _known_video(db: Database, video: Path) -> int | None:
 
 def register_video_files(cfg: Any, db: Database, video: Path, video_id: int,
                          ai_out: Path | None) -> int:
-    """把这个视频相关的实际文件登记进 artifacts：原片、merged TXT、AI 脚本、成品。
+    """把这个视频相关的实际文件登记进 artifacts：原片、剧本 TXT、历史高光 JSON、高光片段。
 
     这是磁盘扫描唯一允许出现的地方（登记/对账）。登记完之后界面上的状态判断
     一律查库，不再自己 is_file()。
@@ -358,13 +372,18 @@ def sync_inputs(cfg: Any, db: Database | None = None, folders: list[Path] | None
 
     只做登记，不跑分析、不删文件。重复跑不会重复插——视频按指纹/路径去重，
     文件按 (video, type, path) 唯一约束更新。
+
+    顺带把**历史高光 JSON**（视频旁边或 AI_输出目录的 `<视频名>_脚本.json` /
+    `<视频名>.json`）导成 ai_result + clips：这样"库里有没有可复用的高光 JSON"
+    这个判断永远只查库，文件退回到纯兼容导入源。
     """
     db = db or open_db(cfg)
     if folders is None:
         folders = _scan_dirs(cfg)
     if ai_out is None:
         ai_out = _bridge_dir(cfg, "ai_output_dir")
-    stats = {"videos_seen": 0, "videos_new": 0, "artifacts": 0}
+    stats = {"videos_seen": 0, "videos_new": 0, "artifacts": 0,
+             "ai_results": 0, "clips": 0}
     for folder in folders:
         if not folder.is_dir():
             continue
@@ -380,6 +399,13 @@ def sync_inputs(cfg: Any, db: Database | None = None, folders: list[Path] | None
                     continue
                 stats["videos_new"] += 1
             stats["artifacts"] += register_video_files(cfg, db, video, video_id, ai_out)
+            try:
+                results, clips = _import_ai(db, cfg, video_id, video, ai_out)
+            except Exception as exc:  # noqa: BLE001 - 一份坏 JSON 不该拖垮整次刷新
+                logger.warning("历史高光 JSON 导入失败 %s：%s", video, exc)
+            else:
+                stats["ai_results"] += results
+                stats["clips"] += clips
     return stats
 
 
