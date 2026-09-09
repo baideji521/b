@@ -842,7 +842,10 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         """
         out: list[str] = []
         for statement in schema.TABLES:
+            if statement in schema.DANCE_TABLES:
+                continue                      # v11 的舞蹈表，老库里当然没有
             if "CREATE TABLE IF NOT EXISTS videos" in statement:
+
                 keep = [line for line in statement.splitlines()
                         if "blocked_language" not in line and "no_audio" not in line
                         and not line.strip().startswith("--")]
@@ -874,7 +877,8 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         return out
 
     fresh = sqlite3.connect(":memory:")
-    assert migrations.apply(fresh) == 10, "新建库就是 v10"
+    assert migrations.apply(fresh) == schema.SCHEMA_VERSION, "新建库就是当前版本"
+
 
     old = sqlite3.connect(":memory:")
     old.execute("BEGIN")
@@ -884,7 +888,8 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
     old.commit()
     assert ("table", "highlight_assets") not in objects(old), "造出来的老库不该有新表"
     assert ("table", "expression_spans") not in objects(old), "造出来的老库不该有表情表"
-    assert migrations.apply(old) == 10, "老库能一路升到 v10"
+    assert migrations.apply(old) == schema.SCHEMA_VERSION, "老库能一路升到当前版本"
+
 
     missing = objects(fresh) - objects(old)
     assert not missing, f"升级漏了这些对象：{sorted(missing)}"
@@ -907,7 +912,8 @@ def test_upgrade_only_adds(tmp_path: Path) -> None:
     row = db.one("SELECT * FROM artifacts WHERE id = ?", (artifact,))
     assert row["highlight_asset_id"] is None and row["prm_id"] is None, \
         "老成品的新列就该是 NULL，不许瞎猜来源"
-    assert int(db.value("PRAGMA user_version")) == 10
+    assert int(db.value("PRAGMA user_version")) == schema.SCHEMA_VERSION
+
     assert db_assets.artifact_lineage(db, artifact)["asset"] is None, "查不到来源就老实说没有"
     db.close()
 

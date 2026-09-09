@@ -191,7 +191,52 @@ DEFAULTS: dict[str, Any] = {
         "filter_video_dir": "",
         "filter_product_dir": "",
     },
+
+    # 舞蹈素材资产 + 音乐对齐 + 自动混剪（见 vidscribe/dance/，schema v11 起）。
+    # 和高光那一套**完全分开**：目录、库表、GUI 都是独立的，互不影响。
+    "dance": {
+        # 目标歌所在目录（用户往里丢 mp3/wav/m4a）
+        "song_dir": "dance/songs",
+        # 源舞蹈视频所在目录（递归扫）
+        "source_dir": "dance/sources",
+        # 切出来的素材落哪儿。素材是**长期资产**，这个目录只增不减；
+        # 它刻意不在 cache/ 下面 —— 「缓存管理」一键清空绝不能把素材库删掉
+        "material_dir": "dance/materials",
+        # 混剪成品落哪儿
+        "output_dir": "dance/output",
+        # 固定音乐位置的长度（秒）。改它等于换一套素材版本：旧素材会被标 regenerated
+        # 但**保留**，因为历史成品还引用着它们
+        "slice_duration": 2.0,
+        # 对齐并发。技术指导要求 4~6、不要 100：每个 worker 都在做几百万点的 FFT，
+        # 开太多只会互相抢内存带宽
+        "align_workers": 4,
+        # 单个验证窗口的长度与个数。5 个窗口覆盖开头/中间/结尾 + 等距补齐，
+        # 挡住「只看前 40 秒就相信结果」这个坑
+        "window_seconds": 20.0,
+        "window_count": 5,
+        # 置信度低于此的对齐不切片（0 = 都切，由 status 自己判）。
+        # 想严一点就填 0.55（= alignment_validation.LOW_CONFIDENCE）
+        "min_confidence": 0.0,
+        # 输出画布与帧率。竖屏 9:16 是卡点舞的默认版式；所有源都被
+        # scale-to-cover + 居中裁切归一到这一套，否则多源没法拼
+        "canvas_width": 1080,
+        "canvas_height": 1920,
+        "canvas_fps": 30.0,
+        # 媒体后端：auto / pyav / ffmpeg_cpu / ffmpeg_nvenc。第一版只有 pyav 可用；
+        # 显式指定不可用的后端会**报错**而不是悄悄换（见 media_backend.resolve）
+        "media_backend": "auto",
+        # 组合搜索预算。保证 Windows + RTX 3060 本地跑得动，绝不做全排列
+        "candidate_k": 8,
+        "beam_width": 6,
+        "max_search_nodes": 20000,
+        # 一次 remix 生成几个版本（多版本混剪）
+        "versions_per_run": 3,
+        # 智能推荐总开关。关掉之后 GUI 仍然可以纯手动选素材（技术指导第二十节）
+        "recommend_enabled": True,
+    },
+
     "bridge": {
+
         # 浏览器扩展对接（见 vidscribe/bridge/server.py）：GUI 起一个只监听
         # 127.0.0.1 的小 HTTP 服务，扩展轮询领任务、驱动网页版 AI、回传 JSON
         "enabled": True,
@@ -373,6 +418,28 @@ class Config:
     @property
     def mirrors(self) -> dict[str, Any]:
         return self.data["mirrors"]
+
+    @property
+    def dance(self) -> dict[str, Any]:
+        """舞蹈子系统的配置（见 vidscribe/dance/）。`setdefault` 是为了兼容
+        没有这一节的老 config.json —— 缺了也能跑，走 DEFAULTS 那份。"""
+        return self.data.setdefault("dance", dict(DEFAULTS["dance"]))
+
+    def dance_path(self, key: str) -> Path:
+        """舞蹈的四个目录（song_dir / source_dir / material_dir / output_dir）。
+
+        单独开一个函数而不是塞进 `paths`：那一节是主流程的目录，混进来会让
+        「缓存管理」之类按 `paths` 遍历的功能连带扫到素材库。
+        """
+        value = Path(str(self.dance.get(key) or "").strip() or f"dance/{key}")
+        return value if value.is_absolute() else self.root / value
+
+    def ensure_dance_dirs(self) -> None:
+        """建舞蹈那四个目录。**不**在 `ensure_dirs` 里做 —— 没用舞蹈功能的用户
+        不该因为开一次主界面就多出四个空目录。"""
+        for key in ("song_dir", "source_dir", "material_dir", "output_dir"):
+            self.dance_path(key).mkdir(parents=True, exist_ok=True)
+
 
     def path(self, key: str) -> Path:
         value = Path(self.data["paths"][key])

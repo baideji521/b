@@ -10,7 +10,8 @@ from __future__ import annotations
 import sqlite3
 
 from ..logging_setup import get_logger
-from .schema import SCHEMA_VERSION, TABLES
+from .schema import DANCE_TABLES, SCHEMA_VERSION, TABLES
+
 
 logger = get_logger(__name__)
 
@@ -172,7 +173,13 @@ _STEPS: dict[int, list[str]] = {
     10: [
         "ALTER TABLE videos ADD COLUMN no_audio INTEGER",
     ],
+    # v11：舞蹈素材资产子系统（见 vidscribe/dance/）。**只建新表，一个已有表都不碰** ——
+    # 老库升上来之后原有分析/高光/AI 队列的行为和以前一模一样。
+    # 语句直接复用 schema.DANCE_TABLES，所以"升级上来的表"和"新建库的表"逐字相同，
+    # 不会出现历史上 v4 那种「ADD COLUMN 加不上 REFERENCES、两条路径外键不等价」的分叉。
+    11: list(DANCE_TABLES),
 }
+
 
 
 def apply(conn: sqlite3.Connection) -> int:

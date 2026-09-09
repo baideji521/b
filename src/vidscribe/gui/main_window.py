@@ -1043,6 +1043,28 @@ class MainWindow(QMainWindow):
         self.asset_center.raise_()
         self.asset_center.activateWindow()
 
+    def on_dance_montage(self) -> None:
+        """开 AI_卡点舞（**独立窗口**）。
+
+        故意不做成这个界面的一页：卡点舞有自己的后台线程和自己的库连接，
+        混进主界面只会让两边的状态互相牵连。这里只负责把它拉起来，
+        然后就完全不管它了 —— 它自己开自己的库，关窗自己收尾。
+        """
+        window = getattr(self, "_dance_window", None)
+        if window is not None and window.isVisible():
+            window.raise_()
+            window.activateWindow()
+            return
+        try:
+            from .dance_montage import launch as dance_launch  # noqa: PLC0415
+
+            dance_launch(self.cfg, self)
+            self.append_log("[卡点舞] 独立界面已打开（和主界面互不影响）")
+        except Exception as exc:  # noqa: BLE001 - 开不起来不能把主界面带走
+            self.append_log(f"[卡点舞] 界面打不开：{type(exc).__name__}: {exc}")
+            QMessageBox.warning(self, "AI_卡点舞", f"界面打不开：{exc}")
+
+
     def on_assets_changed(self) -> None:
         """资产中心里动过 JSON / PRM / 成品，就把 AI 面板上的下拉和任务表跟上。"""
         if self.ai_panel is not None:
@@ -1300,6 +1322,14 @@ class MainWindow(QMainWindow):
                                    "也能直接按某一份 JSON 出成品")
         self.btn_assets.clicked.connect(self.on_asset_center)
 
+        # AI_卡点舞：**独立窗口**，不是这个界面的一页。放这个按钮只是给个入口，
+        # 点开之后两个窗口各跑各的、各开各的库连接，谁出问题都不牵连另一边
+        self.btn_dance = QPushButton("AI_卡点舞")
+        self.btn_dance.setToolTip("独立界面：目标歌对齐 → 固定音乐位置切片 → 舞蹈素材资产库 "
+                                  "→ 多版本混剪。和主界面互不影响，可以同时开着")
+        self.btn_dance.clicked.connect(self.on_dance_montage)
+
+
         self.btn_ai_api = QPushButton("AI接口")
         self.btn_ai_api.setToolTip("找哪家 AI、走接口直连还是网页版扩展、API key、模型、"
                                    "超时、Bridge 端口、扩展上传方式")
@@ -1475,6 +1505,8 @@ class MainWindow(QMainWindow):
         first_row.addWidget(self.btn_ai_api, 0, Qt.AlignTop)
         first_row.addWidget(self.btn_ai_options, 0, Qt.AlignTop)
         first_row.addWidget(self.btn_assets, 0, Qt.AlignTop)
+        first_row.addWidget(self.btn_dance, 0, Qt.AlignTop)
+
 
         layout.addLayout(first_row)
         second_row = QHBoxLayout()

@@ -243,7 +243,10 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
         blocked_language 列和 v10 的 no_audio 列（不然升级脚本的 ADD COLUMN 会撞重名）。"""
         out: list[str] = []
         for statement in schema.TABLES:
+            if statement in schema.DANCE_TABLES:
+                continue                      # v11 的舞蹈表，老库里当然没有
             if "expression_spans" in statement:
+
                 continue
             if "CREATE TABLE IF NOT EXISTS prm_profiles" in statement:
                 out.append("\n".join(line for line in statement.splitlines()
@@ -284,8 +287,9 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
     names = lambda: [r[1] for r in old.execute("PRAGMA table_info(analysis_runs)")]
     assert "face_available" not in names(), "造出来的老库不该有 v5 的列"
 
-    assert migrations.apply(old) == 10, "v4 能一路升到 v10"
-    assert int(old.execute("PRAGMA user_version").fetchone()[0]) == 10
+    assert migrations.apply(old) == schema.SCHEMA_VERSION, "v4 能一路升到当前版本"
+    assert int(old.execute("PRAGMA user_version").fetchone()[0]) == schema.SCHEMA_VERSION
+
 
     tables = {r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "expression_spans" in tables, "新表要有"

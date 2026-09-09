@@ -20,7 +20,8 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
+
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
 TASK_STATES = ("pending", "uploading", "waiting", "processing",
@@ -371,3 +372,385 @@ TABLES: tuple[str, ...] = (
     )
     """,
 )
+
+
+# ======================================================================== 舞蹈
+# v11 起：独立的舞蹈素材资产子系统（见 vidscribe/dance/）。
+# 和高光那一套**完全分开**：不共用 highlight_assets / clips / artifacts，
+# 也不新建第二个 SQLite —— 全部落在同一个 video.db 里，表名一律 dance_ 前缀。
+#
+# 一首目标歌（dance_target_songs）下面挂：
+#   dance_audio_alignments        每个源舞蹈视频 → 这首歌的时间对齐，一条一版
+#     dance_materials             按固定音乐位置切出来的素材，**长期资产**，不物理删
+#       dance_material_usage_events   使用事件账本，所有计数都能由它重算
+#   dance_montages                一次混剪任务
+#     dance_montage_versions      每次 remix 一版，历史版本不因重新生成而丢失
+#       dance_montage_materials   这一版的编辑计划（引用 material_id，不是路径）
+#   dance_recommendation_runs     每次推荐一条，带 seed 所以可重现
+#     dance_recommendation_items  推荐出来的条目
+#     dance_recommendation_feedback 用户对推荐的反馈（采纳/否决）
+#   dance_montage_strategies      评分权重 + 组合约束 + 搜索预算，可复用可版本化
+
+#: 对齐结论。manual = 人工改过（原值仍在 original_offset 里）
+DANCE_ALIGNMENT_STATUS = ("ok", "low_confidence", "disagree", "rejected", "manual")
+#: 素材状态。历史素材一律软状态流转，不物理删除。
+#: missing = 文件在盘上找不到了（记录留着，历史成品还引用它）
+DANCE_MATERIAL_STATUS = ("ready", "disabled", "missing", "invalid", "regenerated")
+
+#: 素材使用事件。candidate ≠ use：只有真进了 montage 才算用过，
+#: 只有真渲染成功才算出过片，render_failed 绝不增加出片次数
+DANCE_USAGE_EVENTS = ("candidate", "selected", "montage",
+                      "render_success", "render_failed", "rejected")
+#: 推荐策略种类
+DANCE_STRATEGY_KINDS = ("cold_start", "rule_based", "history_based",
+                        "exploration", "hybrid")
+#: 一版混剪的渲染状态
+DANCE_RENDER_STATES = ("planned", "rendering", "rendered", "failed")
+
+DANCE_TABLES: tuple[str, ...] = (
+    # --- 目标歌 -----------------------------------------------------------
+    # 指纹口径和 videos.fingerprint 一样（大小 + 头/中/尾），所以换目录也认得出。
+    # 节拍/段落/特征都缓存成 JSON：算一次几秒钟，但每次开界面都重算就没法用了。
+    """
+    CREATE TABLE IF NOT EXISTS dance_target_songs (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        fingerprint      TEXT    NOT NULL UNIQUE,
+        file_path        TEXT    NOT NULL,
+        file_name        TEXT    NOT NULL,
+        title            TEXT,
+        duration         REAL,
+        sample_rate      INTEGER,
+        bpm              REAL,
+        beat_count       INTEGER,
+        beats_json       TEXT,
+        sections_json    TEXT,
+        features_json    TEXT,
+        rhythm_json      TEXT,
+        analysis_version TEXT,
+        exists_on_disk   INTEGER NOT NULL DEFAULT 1,
+        created_at       TEXT    NOT NULL,
+        updated_at       TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_songs_path ON dance_target_songs(file_path)",
+
+    # --- 对齐 -------------------------------------------------------------
+    # cache_key = 源指纹 + 目标指纹 + 算法版本 + 配置指纹（技术指导第二十四节）。
+    # 做成 UNIQUE：同一套输入重复跑直接命中，换算法版本自动重算而不是吃旧结果。
+    # 算法原值（original_*）和人工值（manual_*）分列存着，禁止静默覆盖。
+    """
+    CREATE TABLE IF NOT EXISTS dance_audio_alignments (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_video_id      INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        target_song_id       INTEGER NOT NULL
+                             REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        cache_key            TEXT    NOT NULL UNIQUE,
+        offset_seconds       REAL    NOT NULL,
+        confidence           REAL    NOT NULL DEFAULT 0,
+        method               TEXT,
+        waveform_offset      REAL,
+        waveform_confidence  REAL,
+        chroma_offset        REAL,
+        chroma_confidence    REAL,
+        window_count         INTEGER NOT NULL DEFAULT 0,
+        max_deviation        REAL    NOT NULL DEFAULT 0,
+        agreement            REAL    NOT NULL DEFAULT 0,
+        status               TEXT    NOT NULL DEFAULT 'ok',
+        algorithm_version    TEXT,
+        config_hash          TEXT,
+        source_duration      REAL,
+        target_duration      REAL,
+        detail_json          TEXT,
+        original_offset      REAL,
+        original_confidence  REAL,
+        manual_offset        REAL,
+        manual_reason        TEXT,
+        manual_operator      TEXT,
+        manual_at            TEXT,
+        created_at           TEXT    NOT NULL,
+        updated_at           TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_align_song "
+    "ON dance_audio_alignments(target_song_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_align_video "
+    "ON dance_audio_alignments(source_video_id, target_song_id)",
+
+    # --- 素材（长期资产） --------------------------------------------------
+    # UNIQUE(target_song_id, source_video_id, segment_index, generation_version)：
+    # 同一首歌、同一个源、同一个音乐位置、同一个切片版本，只能有一条。
+    # 重切（换 slice_duration / 换算法）走新的 generation_version，旧素材标 regenerated
+    # 但**留着** —— 历史成品还引用着它们。
+    """
+    CREATE TABLE IF NOT EXISTS dance_materials (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_video_id      INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        alignment_id         INTEGER
+                             REFERENCES dance_audio_alignments(id) ON DELETE SET NULL,
+        target_song_id       INTEGER NOT NULL
+                             REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        segment_index        INTEGER NOT NULL,
+        target_start         REAL    NOT NULL,
+        target_end           REAL    NOT NULL,
+        source_start         REAL    NOT NULL,
+        source_end           REAL    NOT NULL,
+        duration             REAL    NOT NULL,
+        file_path            TEXT,
+        file_hash            TEXT,
+        alignment_confidence REAL    NOT NULL DEFAULT 0,
+        generation_version   TEXT    NOT NULL DEFAULT '',
+        person               TEXT,
+        source_group         TEXT,
+        quality              REAL,
+        candidate_count      INTEGER NOT NULL DEFAULT 0,
+        use_count            INTEGER NOT NULL DEFAULT 0,
+        montage_count        INTEGER NOT NULL DEFAULT 0,
+        output_count         INTEGER NOT NULL DEFAULT 0,
+        first_used_at        TEXT,
+        last_used_at         TEXT,
+        last_output_at       TEXT,
+        status               TEXT    NOT NULL DEFAULT 'ready',
+        note                 TEXT,
+        created_at           TEXT    NOT NULL,
+        updated_at           TEXT    NOT NULL,
+        UNIQUE(target_song_id, source_video_id, segment_index, generation_version)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_mat_position "
+    "ON dance_materials(target_song_id, segment_index, status)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_mat_source "
+    "ON dance_materials(source_video_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_mat_usage "
+    "ON dance_materials(target_song_id, use_count, output_count)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_mat_person ON dance_materials(person)",
+
+    # --- 使用事件账本 ------------------------------------------------------
+    # 所有计数（use_count / montage_count / output_count）都必须能由这张表重算
+    # （技术指导第九节）。dance_materials 上那几个数只是加速用的缓存。
+    # 事件只追加，永不修改、永不删除 —— 这是唯一的事实来源。
+    """
+    CREATE TABLE IF NOT EXISTS dance_material_usage_events (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        material_id  INTEGER NOT NULL REFERENCES dance_materials(id) ON DELETE CASCADE,
+        montage_id   INTEGER REFERENCES dance_montages(id) ON DELETE SET NULL,
+        version_id   INTEGER REFERENCES dance_montage_versions(id) ON DELETE SET NULL,
+        event        TEXT    NOT NULL,
+        segment_index INTEGER,
+        detail_json  TEXT,
+        created_at   TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_events_material "
+    "ON dance_material_usage_events(material_id, event)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_events_version "
+    "ON dance_material_usage_events(version_id, event)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_events_time "
+    "ON dance_material_usage_events(created_at)",
+
+    # --- 策略 -------------------------------------------------------------
+    # 一份策略 = 评分权重 + 组合约束 + 搜索预算，整份可复用可版本化。
+    # LLM 可以帮用户生成一份策略，但最终选择必须由确定性评分/搜索完成，
+    # 所以这张表里只有数字，没有"让模型自己挑"这种口子（技术指导第二十一节第 4 条）。
+    """
+    CREATE TABLE IF NOT EXISTS dance_montage_strategies (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        name             TEXT    NOT NULL,
+        kind             TEXT    NOT NULL DEFAULT 'hybrid',
+        version          TEXT    NOT NULL DEFAULT 'v1',
+        weights_json     TEXT    NOT NULL DEFAULT '{}',
+        constraints_json TEXT    NOT NULL DEFAULT '{}',
+        search_json      TEXT    NOT NULL DEFAULT '{}',
+        is_default       INTEGER NOT NULL DEFAULT 0,
+        note             TEXT,
+        created_at       TEXT    NOT NULL,
+        updated_at       TEXT    NOT NULL,
+        deleted_at       TEXT
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dance_strategy_name_live "
+    "ON dance_montage_strategies(name) WHERE deleted_at IS NULL",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_dance_strategy_default_live "
+    "ON dance_montage_strategies(is_default) WHERE is_default = 1 AND deleted_at IS NULL",
+
+    # --- 混剪任务 / 版本 ---------------------------------------------------
+    """
+    CREATE TABLE IF NOT EXISTS dance_montages (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_song_id INTEGER NOT NULL
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        name           TEXT    NOT NULL,
+        slice_duration REAL    NOT NULL DEFAULT 2.0,
+        note           TEXT,
+        created_at     TEXT    NOT NULL,
+        updated_at     TEXT    NOT NULL,
+        deleted_at     TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_montage_song "
+    "ON dance_montages(target_song_id, deleted_at)",
+
+    # 「这一次混剪用了哪些**完整源视频**」。粒度是源视频，不是素材 ——
+    # 素材级明细在 dance_montage_materials 里。两张都要：
+    # 用户在界面上先勾"这轮用 A/B/D 三个人"，再由推荐在这三个人的素材里挑，
+    # 没有这张表就没法表达"这一轮把 C 排除在外"这件事。
+    """
+    CREATE TABLE IF NOT EXISTS dance_montage_sources (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        montage_id   INTEGER NOT NULL REFERENCES dance_montages(id) ON DELETE CASCADE,
+        video_id     INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,
+        alignment_id INTEGER REFERENCES dance_audio_alignments(id) ON DELETE SET NULL,
+        order_index  INTEGER NOT NULL DEFAULT 0,
+        enabled      INTEGER NOT NULL DEFAULT 1,
+        note         TEXT,
+        created_at   TEXT    NOT NULL,
+        UNIQUE(montage_id, video_id)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_msrc_montage "
+    "ON dance_montage_sources(montage_id, enabled, order_index)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_msrc_video "
+    "ON dance_montage_sources(video_id)",
+
+
+    # 每次 remix 都是一个 version，历史版本不能因为重新生成而丢失
+    # （技术指导第十四节）。七个重复率就存在这里。
+    """
+    CREATE TABLE IF NOT EXISTS dance_montage_versions (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        montage_id            INTEGER NOT NULL
+                              REFERENCES dance_montages(id) ON DELETE CASCADE,
+        version_index         INTEGER NOT NULL,
+        signature             TEXT    NOT NULL DEFAULT '',
+        strategy_id           INTEGER
+                              REFERENCES dance_montage_strategies(id) ON DELETE SET NULL,
+        recommendation_run_id INTEGER
+                              REFERENCES dance_recommendation_runs(id) ON DELETE SET NULL,
+        clip_count            INTEGER NOT NULL DEFAULT 0,
+        duration              REAL    NOT NULL DEFAULT 0,
+        material_repeat       REAL    NOT NULL DEFAULT 0,
+        position_repeat       REAL    NOT NULL DEFAULT 0,
+        person_repeat         REAL    NOT NULL DEFAULT 0,
+        source_repeat         REAL    NOT NULL DEFAULT 0,
+        pair_repeat           REAL    NOT NULL DEFAULT 0,
+        combination_repeat    REAL    NOT NULL DEFAULT 0,
+        overall_repeat        REAL    NOT NULL DEFAULT 0,
+        repeat_detail_json    TEXT,
+        timeline_json         TEXT,
+        output_path           TEXT,
+        render_status         TEXT    NOT NULL DEFAULT 'planned',
+        render_detail_json    TEXT,
+        error                 TEXT,
+        created_at            TEXT    NOT NULL,
+        updated_at            TEXT    NOT NULL,
+        UNIQUE(montage_id, version_index)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_version_montage "
+    "ON dance_montage_versions(montage_id, version_index)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_version_signature "
+    "ON dance_montage_versions(signature)",
+
+    # 一版混剪的编辑计划。引用 material_id 而不是文件路径 —— 素材才是资产，
+    # 路径只是它现在恰好躺在哪儿（技术指导第十五节）。
+    """
+    CREATE TABLE IF NOT EXISTS dance_montage_materials (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        version_id           INTEGER NOT NULL
+                             REFERENCES dance_montage_versions(id) ON DELETE CASCADE,
+        material_id          INTEGER NOT NULL
+                             REFERENCES dance_materials(id) ON DELETE CASCADE,
+        order_index          INTEGER NOT NULL,
+        segment_index        INTEGER NOT NULL,
+        target_start         REAL    NOT NULL,
+        target_end           REAL    NOT NULL,
+        source_start         REAL    NOT NULL,
+        source_end           REAL    NOT NULL,
+        selection_score      REAL,
+        score_breakdown_json TEXT,
+        created_at           TEXT    NOT NULL,
+        UNIQUE(version_id, order_index)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_vm_version "
+    "ON dance_montage_materials(version_id, order_index)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_vm_material "
+    "ON dance_montage_materials(material_id)",
+
+    # --- 推荐 -------------------------------------------------------------
+    # 推荐必须可重现（技术指导第十一节）：seed + 策略 + 算法版本全部落库，
+    # 同样的输入重跑一定得到同样的结果。随机数一律走 stable_rng(seed, *parts)，
+    # 禁止用全局 random。
+    """
+    CREATE TABLE IF NOT EXISTS dance_recommendation_runs (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_song_id    INTEGER NOT NULL
+                          REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        montage_id        INTEGER REFERENCES dance_montages(id) ON DELETE SET NULL,
+        strategy_id       INTEGER
+                          REFERENCES dance_montage_strategies(id) ON DELETE SET NULL,
+        strategy_kind     TEXT    NOT NULL DEFAULT 'hybrid',
+        strategy_version  TEXT,
+        random_seed       INTEGER NOT NULL DEFAULT 0,
+        candidate_count   INTEGER NOT NULL DEFAULT 0,
+        recommended_count INTEGER NOT NULL DEFAULT 0,
+        algorithm_version TEXT,
+        filter_json       TEXT,
+        notes             TEXT,
+        created_at        TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_recrun_song "
+    "ON dance_recommendation_runs(target_song_id, created_at)",
+
+    """
+    CREATE TABLE IF NOT EXISTS dance_recommendation_items (
+        id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id               INTEGER NOT NULL
+                             REFERENCES dance_recommendation_runs(id) ON DELETE CASCADE,
+        material_id          INTEGER NOT NULL
+                             REFERENCES dance_materials(id) ON DELETE CASCADE,
+        segment_index        INTEGER NOT NULL,
+        rank                 INTEGER NOT NULL,
+        score                REAL    NOT NULL DEFAULT 0,
+        score_breakdown_json TEXT,
+        reason               TEXT,
+        created_at           TEXT    NOT NULL,
+        UNIQUE(run_id, segment_index, rank)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_recitem_run "
+    "ON dance_recommendation_items(run_id, segment_index, rank)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_recitem_material "
+    "ON dance_recommendation_items(material_id)",
+
+    # 用户对推荐的反馈：采纳 / 否决 / 换掉。下一次 history_based 推荐会读它。
+    """
+    CREATE TABLE IF NOT EXISTS dance_recommendation_feedback (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_id      INTEGER NOT NULL
+                    REFERENCES dance_recommendation_runs(id) ON DELETE CASCADE,
+        item_id     INTEGER
+                    REFERENCES dance_recommendation_items(id) ON DELETE SET NULL,
+        material_id INTEGER REFERENCES dance_materials(id) ON DELETE SET NULL,
+        verdict     TEXT    NOT NULL,
+        comment     TEXT,
+        created_at  TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_feedback_run "
+    "ON dance_recommendation_feedback(run_id, verdict)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_feedback_material "
+    "ON dance_recommendation_feedback(material_id, verdict)",
+)
+
+#: 推荐反馈的结论
+DANCE_FEEDBACK_VERDICTS = ("accepted", "rejected", "replaced")
+
+# 新建库时一次把舞蹈那几张表也建好；老库靠 migrations 的 v11 走同一批语句，
+# 两条路径**用的是同一份 SQL**，不会出现"升级上来的表和新建的表不一样"。
+TABLES = TABLES + DANCE_TABLES
+
+
+
+
+

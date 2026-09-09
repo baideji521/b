@@ -1601,6 +1601,289 @@ def cmd_montage(cfg: Config, args: argparse.Namespace) -> int:
     return 1 if any(bad for _i, bad in checked) else 0
 
 
+# ------------------------------------------------------------------ 卡点舞混剪
+def _dance_song(db: Any, cfg: Config, text: str):
+    """`--song` 既能给库里的 id，也能给一个文件路径。返回 `TargetSong`。
+
+    给路径时顺手注册 + 分析（命中指纹就直接复用，不重复分析同一首歌）。
+    """
+    from vidscribe.dance import material_ingest as ingest  # noqa: PLC0415
+    from vidscribe.dance import material_repository as repo  # noqa: PLC0415
+
+    if str(text).isdigit():
+        row = repo.get_song(db, int(text))
+        if row is None:
+            raise ValueError(f"库里没有目标歌 #{text}")
+        return ingest.TargetSong(song_id=int(row["id"]), path=Path(row["file_path"]),
+                                 fingerprint=str(row["fingerprint"] or ""),
+                                 duration=float(row["duration"] or 0.0),
+                                 bpm=float(row["bpm"] or 0.0),
+                                 sample_rate=int(row["sample_rate"] or 0))
+
+    path = Path(text)
+    if not path.is_absolute():
+        for base in (cfg.root, Path(cfg.dance["song_dir"])):
+            if (base / path).is_file():
+                path = base / path
+                break
+    if not path.is_file():
+        raise ValueError(f"目标歌文件不在盘上：{text}")
+    return ingest.register_song(db, path)
+
+
+def _dance_sources(cfg: Config, values: list[str]) -> list[Path]:
+    """`--sources` 可以给目录、也可以给一串文件。目录就按视频后缀扫一遍。"""
+    out: list[Path] = []
+    for text in values or [cfg.dance["source_dir"]]:
+        path = Path(text)
+        if not path.is_absolute():
+            path = cfg.root / path
+        if path.is_dir():
+            out.extend(sorted(p for p in path.rglob("*")
+                              if p.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".flv")))
+        elif path.is_file():
+            out.append(path)
+        else:
+            logger.warning("跳过不存在的源：%s", path)
+    return out
+
+
+def cmd_dance_montage(cfg: Config, args: argparse.Namespace) -> int:
+    """卡点舞混剪：对齐 / 切片 / 素材 / 推荐 / 混剪 / 统计 / 历史 / 界面。
+
+    这条命令**只操作 dance_* 那批表**，原有功能的表一个都不碰。返回码沿用全局约定：
+    0 = 成功，1 = 业务失败（对齐失败、渲染失败），2 = 参数不对。
+    """
+    from vidscribe.db import open_db  # noqa: PLC0415
+
+    try:  # Windows 控制台默认 GBK，中文报告会花屏
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+    if args.action == "gui":
+        return cmd_dance_gui(cfg, args)
+
+    cfg.ensure_dance_dirs()
+    db = open_db(cfg)
+    try:
+        return _dance_dispatch(cfg, args, db)
+    except ValueError as exc:          # 参数/输入问题：明确报 2，不打整段堆栈
+        logger.error("%s", exc)
+        return 2
+    finally:
+        db.close()
+
+
+def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
+    from dataclasses import replace  # noqa: PLC0415
+
+    from vidscribe.dance import history, material_ingest as ingest  # noqa: PLC0415
+    from vidscribe.dance import material_repository as repo  # noqa: PLC0415
+    from vidscribe.dance import material_selection as selection  # noqa: PLC0415
+    from vidscribe.dance import (  # noqa: PLC0415
+        media_backend, montage_render, music_structure, recommendation, statistics,
+        strategy as strategy_mod,
+    )
+    from vidscribe.dance.types import FilterSpec  # noqa: PLC0415
+
+
+    action = args.action
+    if action == "songs":
+        rows = repo.list_songs(db)
+        if not rows:
+            print("库里还没有目标歌。用 `dance-montage align --song <歌文件>` 登记第一首。")
+            return 0
+        print(f"{'ID':>4}  {'时长':>8}  {'BPM':>6}  {'素材':>5}  歌名")
+        for row in rows:
+            count = db.connect().execute(
+                "SELECT COUNT(*) FROM dance_materials WHERE target_song_id = ?",
+                (int(row["id"]),)).fetchone()[0]
+            print(f"{int(row['id']):>4}  {float(row['duration'] or 0):>7.2f}s  "
+                  f"{float(row['bpm'] or 0):>6.1f}  {int(count):>5}  {row['title']}")
+        return 0
+
+    if not args.song:
+        raise ValueError(f"{action} 需要 --song <歌id 或 歌文件路径>")
+    song = _dance_song(db, cfg, args.song)
+    slice_duration = float(args.slice or cfg.dance["slice_duration"])
+    strategy_mod.ensure_presets(db)
+
+    if action == "align":
+        sources = _dance_sources(cfg, args.sources)
+        if not sources:
+            raise ValueError("一个源视频都没找到（--sources 给目录或文件）")
+        workers = int(args.workers or cfg.dance["align_workers"])
+        outcomes = ingest.align_batch(db, song, sources, workers=workers,
+                                      force=bool(args.force),
+                                      on_log=lambda line: logger.info("%s", line))
+        bad = [o for o in outcomes if not o.ok]
+        for outcome in outcomes:
+            if outcome.ok:
+                align = outcome.alignment
+                print(f"[对齐] {outcome.source_path.name}｜偏移 {align.offset:+.3f}s"
+                      f"｜置信 {align.confidence:.3f}｜{align.status}"
+                      f"｜{'缓存' if outcome.cached else '新算'}")
+            else:
+                print(f"[对齐] {outcome.source_path.name}｜失败：{outcome.error}")
+        print(f"共 {len(outcomes)} 个源，成功 {len(outcomes) - len(bad)}，失败 {len(bad)}")
+        return 1 if bad else 0
+
+    if action == "slice":
+        sources = _dance_sources(cfg, args.sources)
+        canvas = media_backend.Canvas(
+            width=int(cfg.dance["canvas_width"]), height=int(cfg.dance["canvas_height"]),
+            fps=float(cfg.dance["canvas_fps"]))
+        backend = media_backend.resolve(str(args.backend or cfg.dance["media_backend"]))
+        outcomes = ingest.align_batch(db, song, sources,
+                                      workers=int(args.workers or cfg.dance["align_workers"]),
+                                      on_log=lambda line: logger.info("%s", line))
+        total = failed = 0
+        for outcome in outcomes:
+            if not outcome.ok:
+                print(f"[切片] {outcome.source_path.name}｜跳过：对齐失败（{outcome.error}）")
+                failed += 1
+                continue
+            result = ingest.slice_and_register(
+                db, song, outcome, slice_duration=slice_duration,
+                material_dir=cfg.dance_path("material_dir"), canvas=canvas,
+                backend=backend, on_log=lambda line: logger.info("%s", line))
+            total += len(result.material_ids)
+            state = "成功" if result.ok else f"失败：{result.error}"
+            print(f"[切片] {outcome.source_path.name}｜入库 {len(result.material_ids)} 条"
+                  f"｜跳过 {result.skipped} 个位置｜{state}")
+            failed += 0 if result.ok else 1
+        print(f"素材库现有 {total} 条新素材（本次），失败 {failed} 个源")
+        return 1 if failed else 0
+
+    if action == "materials":
+        spec = FilterSpec(target_song_id=song.song_id, limit=int(args.limit or 50))
+        if args.preset:
+            spec = selection.preset_spec(args.preset, spec)
+        if args.position is not None:
+            spec = replace(spec, segment_index=int(args.position))
+        if args.person:
+            spec = replace(spec, persons=tuple(args.person))
+
+        found = selection.find_materials(db, spec)
+        print(f"[素材] 目标歌《{song.path.stem}》命中 {len(found)} 条"
+
+              f"{'（方案 ' + args.preset + '）' if args.preset else ''}")
+        print(f"{'ID':>5}  {'位置':>4}  {'时间':>13}  {'人物':<10}  "
+              f"{'对齐':>5}  {'候选':>4}  {'使用':>4}  {'出片':>4}  状态")
+        for m in found:
+            print(f"{m.id:>5}  {m.segment_index:>4}  "
+                  f"{m.target_start:>6.2f}→{m.target_end:<6.2f}  "
+                  f"{(m.person or '(未标注)'):<10}  {m.alignment_confidence:>5.2f}  "
+                  f"{m.candidate_count:>4}  {m.use_count:>4}  {m.output_count:>4}  {m.status}")
+        return 0
+
+    if action == "recommend":
+        if args.verify:
+            original, again, same = recommendation.reproduce(db, int(args.verify))
+            for line in recommendation.describe(again):
+                print(line)
+            print(f"[复现] 推荐 #{original.id} 与重跑结果"
+                  f"{'一致 ✓' if same else '不一致（库状态可能变了）'}")
+            return 0 if same else 1
+        positions = ([int(args.position)] if args.position is not None
+                     else [p.index for p in music_structure.target_positions(
+                         song.duration, slice_duration)])
+
+        plan = strategy_mod.resolve(db, int(args.strategy or 0))
+        spec = selection.preset_spec(args.preset) if args.preset else None
+        run = recommendation.recommend(db, song.song_id, positions, strategy=plan,
+                                       seed=int(args.seed or 0), spec=spec)
+        for line in recommendation.describe(run):
+            print(line)
+        return 0
+
+    if action == "remix":
+        canvas = media_backend.Canvas(
+            width=int(cfg.dance["canvas_width"]), height=int(cfg.dance["canvas_height"]),
+            fps=float(cfg.dance["canvas_fps"]))
+        backend = media_backend.resolve(str(args.backend or cfg.dance["media_backend"]))
+        manual = None
+        if args.manual:
+            manual = {int(k): int(v) for k, v in json.loads(
+                Path(args.manual).read_text(encoding="utf-8")).items()}
+        made = montage_render.remix(
+            db, song.song_id, out_dir=(args.out or cfg.dance_path("output_dir")),
+            slice_duration=slice_duration, versions=int(args.versions or 0),
+            strategy_id=int(args.strategy or 0), seed=int(args.seed or 0),
+            canvas=canvas, backend=backend, name=args.name or "",
+            recommend_enabled=not args.no_recommend, manual=manual,
+            render_video=not args.plan_only,
+            spec=selection.preset_spec(args.preset) if args.preset else None,
+            on_log=lambda line: print(line))
+        bad = [v for v, r in made if not (r.ok or args.plan_only)]
+        for version_id, result in made:
+            for line in montage_render.describe(result):
+                print(line)
+            print(f"  版本 #{version_id}")
+        return 1 if bad else 0
+
+    if action == "stats":
+        overview = statistics.song_overview(db, song.song_id)
+        print(f"[统计] 目标歌《{song.path.stem}》{song.duration:.2f}s｜BPM {song.bpm:.1f}")
+
+        print(f"  素材 {overview['materials']['total']} 条"
+              f"（可用 {overview['materials']['ready']}，"
+              f"从未使用 {overview['materials']['never_used']}，"
+              f"从未出片 {overview['materials']['never_output']}）")
+        print(f"  来源 {overview['materials']['sources']} 个｜"
+              f"人物 {overview['materials']['persons']} 个｜"
+              f"覆盖位置 {overview['materials']['positions']} 个｜"
+              f"平均对齐置信 {overview['materials']['avg_confidence']:.3f}")
+        print(f"  混剪版本：{overview['versions']}")
+        print("  各类事件：" + "，".join(f"{k} {v}"
+                                       for k, v in history.event_summary(db, song.song_id).items()))
+        print(f"{'位置':>4}  {'素材':>4}  {'人物':>4}  {'使用':>4}  {'出片':>4}")
+        for row in statistics.position_coverage(db, song.song_id):
+            print(f"{row['segment_index']:>4}  {row['materials']:>4}  "
+                  f"{row['persons']:>4}  {row['uses']:>4}  {row['outputs']:>4}")
+        for row in statistics.person_breakdown(db, song.song_id):
+            print(f"  {row['person']:<12} 素材 {row['materials']:>4}"
+                  f"｜使用 {row['uses']:>4}｜出片 {row['outputs']:>4}"
+                  f"｜覆盖 {row['positions']:>3} 个位置")
+        return 0
+
+    if action == "history":
+        if args.recount:
+            report = history.recount_song(db, song.song_id)
+            print(f"[重算] 检查 {report.get('total', 0)} 条素材，"
+                  f"修正 {report.get('changed', 0)} 条（计数一律以事件流水为准）")
+            return 0
+        rows = history.song_events(db, song.song_id, limit=int(args.limit or 50))
+        print(f"[历史] 目标歌《{song.path.stem}》最近 {len(rows)} 条事件")
+
+        for row in rows:
+            print(f"  {row['created_at']}  {str(row['event']):<14} "
+                  f"素材 #{row['material_id']:<5} 位置 {row['segment_index']}")
+        for version in repo.versions_for_song(db, song.song_id, limit=int(args.limit or 50)):
+            print(f"  版本 #{version['id']} 第 {version['version_index']} 版"
+                  f"｜{version['clip_count']} 格｜{float(version['duration'] or 0):.2f}s"
+                  f"｜{version['render_status']}｜综合重复率 "
+                  f"{float(version['overall_repeat'] or 0):.3f}")
+        return 0
+
+    raise ValueError(f"未知动作 {action!r}")
+
+
+def cmd_dance_gui(cfg: Config, args: argparse.Namespace) -> int:
+    """启动 AI_卡点舞 独立界面。和主界面各开各的，互不影响。"""
+    _apply_mirror(cfg)
+    try:
+        from vidscribe.gui.dance_montage import launch  # noqa: PLC0415
+    except ImportError as exc:
+        logger.error("GUI 依赖缺失（需要 PyQt5）：%s", exc)
+        logger.error("安装命令: pip install PyQt5==5.15.11 "
+                     "-i https://pypi.tuna.tsinghua.edu.cn/simple")
+        return 1
+    cfg.ensure_dance_dirs()
+    return launch(cfg)
+
+
 # ------------------------------------------------------------------ 参数解析
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1791,7 +2074,48 @@ def build_parser() -> argparse.ArgumentParser:
     p_ai.add_argument("--auto", action="store_true",
                       help="开起来直接跑一遍自动剪辑，不用手点")
     p_ai.set_defaults(func=cmd_ai)
+
+    p_dance = sub.add_parser(
+        "dance-montage",
+        help="AI_卡点舞：目标歌对齐 → 固定位置切片 → 素材库 → 多版本混剪")
+    p_dance.add_argument("action", choices=("songs", "align", "slice", "materials",
+                                           "recommend", "remix", "stats", "history", "gui"),
+                         help="songs 列目标歌｜align 对齐｜slice 切片入库｜materials 查素材｜"
+                              "recommend 推荐｜remix 出片｜stats 统计｜history 流水｜gui 开界面")
+    p_dance.add_argument("--song", default=None, metavar="ID|文件",
+                         help="目标歌：库里的 id，或一个音频/视频文件路径（会自动登记分析）")
+    p_dance.add_argument("--sources", nargs="*", default=None, metavar="目录|文件",
+                         help="源舞蹈视频，可给目录（递归扫）或一串文件。默认取 dance.source_dir")
+    p_dance.add_argument("--slice", type=float, default=None, metavar="秒",
+                         help="每格时长，常用 1.0/1.5/2.0/2.5/3.0，默认取 dance.slice_duration")
+    p_dance.add_argument("--workers", type=int, default=None,
+                         help="对齐并发数（4~6 够了，再多只会互相抢 IO）")
+    p_dance.add_argument("--force", action="store_true", help="忽略对齐缓存，全部重算")
+    p_dance.add_argument("--backend", default=None, help="媒体后端：auto/pyav/ffmpeg/nvenc")
+    p_dance.add_argument("--out", default=None, help="成品目录，默认 dance.output_dir")
+    p_dance.add_argument("--versions", type=int, default=None, help="一次出几个版本")
+    p_dance.add_argument("--strategy", type=int, default=None, help="策略 id，默认用默认策略")
+    p_dance.add_argument("--preset", default=None,
+                         help="筛选方案：never_output/never_used/low_use/long_unused/"
+                              "high_confidence/by_person/exclude_recent")
+    p_dance.add_argument("--seed", type=int, default=None, help="随机种子（落库，可复现）")
+    p_dance.add_argument("--position", type=int, default=None, help="只看某一个音乐位置")
+    p_dance.add_argument("--person", nargs="*", default=None, help="只看某几个人物")
+    p_dance.add_argument("--limit", type=int, default=None, help="列表最多显示几行")
+    p_dance.add_argument("--name", default=None, help="这次混剪的名字")
+    p_dance.add_argument("--manual", default=None, metavar="JSON",
+                         help='纯手动选择：一个 {"位置": 素材id} 的 json 文件，配 --no-recommend')
+    p_dance.add_argument("--no-recommend", dest="no_recommend", action="store_true",
+                         help="关闭智能推荐，只用 --manual 给的选择")
+    p_dance.add_argument("--plan-only", dest="plan_only", action="store_true",
+                         help="只出编辑计划不渲染（想先看看这一版长什么样）")
+    p_dance.add_argument("--verify", type=int, default=None, metavar="RUN_ID",
+                         help="重跑一次历史推荐，验证结果可复现")
+    p_dance.add_argument("--recount", action="store_true",
+                         help="按事件流水把所有计数重算一遍（history 动作专用）")
+    p_dance.set_defaults(func=cmd_dance_montage)
     return parser
+
 
 
 
