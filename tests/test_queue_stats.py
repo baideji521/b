@@ -66,7 +66,10 @@ from vidscribe.db import repo as db_repo                 # noqa: E402
 from vidscribe.db.importer import reconcile, refresh_from_disk  # noqa: E402
 from vidscribe.db.schema import TASK_ACTIVE              # noqa: E402
 
-GOOD_JSON = {"clip": {"start": 4.0, "end": 13.0, "score": 0.87, "type": "hook", "reason": "r"}}
+#: 一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）：
+#: 剪辑区间在 segments[0].sa / .end（原视频时间），文案在 timeline
+GOOD_JSON = {"timeline": {"duration": 9.0, "score": 0.87, "type": "hook", "reason": "r"},
+             "segments": [{"sa": 4.0, "end": 13.0, "dst": [0.0, 9.0]}]}
 FINAL_TAIL = "_高光时刻.mp4"
 BUCKETS = ("no_json", "pending_render", "waiting_ai", "rendering", "done", "failed", "cancelled")
 

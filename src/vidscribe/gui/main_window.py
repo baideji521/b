@@ -54,12 +54,14 @@ from PyQt5.QtWidgets import (
 
 from ..config import Config
 from ..constants import VIDEO_SUFFIXES
+from .. import ai_protocol
 from ..db import open_db
 from ..db import assets as db_assets
 from ..db import repo as db_repo
 from ..db.importer import refresh_from_disk
 from ..db.lock import RuntimeLock, queue_lock_path
 from ..emotions import display_name as emotion_display
+from ..highlight import clip_engine, from_moments
 from . import flow
 from .flow import FlowLayout
 from ..progress import parse as parse_progress
@@ -69,13 +71,13 @@ from ..translate import needs_translation
 from ..timeline.exporters import (
     export_events,
     fmt_time,
+    legacy_score,
     multi_speaker,
     speaker_tag,
     txt_words,
     words_of,
     write_capcut_srt,
     write_events_txt,
-    write_grouped_merged_txt,
     write_json,
     write_merged_txt,
     write_script_txt,
@@ -97,17 +99,19 @@ PLAYING_COLOR = QColor(theme.PLAYING)   # 正在播放的字幕
 NORMAL_TEXT_COLOR = QColor(theme.TEXT)  # 播过去恢复的原色
 
 
-def _emotion_cell(emotion_en: Any, intensity: Any, language: str, stored: Any = None) -> str:
+def _emotion_cell(emotion_en: Any, score: Any, language: str, stored: Any = None) -> str:
     """情绪单元格文本：按当前显示语言现渲，没判到就显示 -。
 
     切「翻译」看译文时显示名要跟着译文语言变，所以不能直接用 JSON 里存的显示名。
     老结果没有英文标签时用存的显示名反查（emotions.display_name 认中英两种写法）。
+
+    score 是这一路自己的数值：画面情绪传置信度，语音情绪传强度。
     """
     name = emotion_display(emotion_en, stored, language)
     if not name:
         return "-"
-    if isinstance(intensity, (int, float)):
-        return f"{name} {float(intensity):.2f}"
+    if isinstance(score, (int, float)):
+        return f"{name} {float(score):.2f}"
     return str(name)
 
 
@@ -181,15 +185,29 @@ class HighlightDialog(QDialog):
     片尾   = 冻帧点     + 文本加减（冻帧+字幕这段的时长）
     overlay.time 不参与计算，只从 overlay 里取字幕文本。
     值会存进 gui_settings.json，下次打开自动带回来。
+
+    「末帧冻结」是全局开关，改完即存进 config.json 的
+    highlight.freeze_tail_seconds：这儿是它唯一的入口，
+    手动剪辑、AI 自动剪辑、命令行 highlight 子命令都认这个键。
+    AI 报的 timeline.duration 里已经含冻帧那几秒，所以区间只按 sa→end 剪，冻帧渲染时加回去。
+
+    「静音最多留」同样是全局设置，改完即存进 config.json 的 highlight.silence_keep：
+    区间**里面**超时的静音剪到只剩这么多秒（0 = 不剪），和末帧冻结一个加一个减，互不影响。
     """
 
 
     
 
     offsetsChanged = pyqtSignal(float, float)
+    freezeChanged = pyqtSignal(float)
+    silenceChanged = pyqtSignal(float)
+    silenceTargetChanged = pyqtSignal(float)
+    engineChanged = pyqtSignal(bool)
 
     def __init__(self, parent, text: str, offsets: tuple[float, float],
-                 peaks: list[dict] | None = None):
+                 peaks: list[dict] | None = None,
+                 freeze_seconds: float = 2.0, clip_engine: bool = False,
+                 silence_keep: float = 2.0, silence_target: float = 0.0):
         super().__init__(parent)
         self.setWindowTitle("剪辑高光")
         self.resize(720, 560)
@@ -209,6 +227,80 @@ class HighlightDialog(QDialog):
             grid.addWidget(QLabel(label), row, 0)
             grid.addWidget(spin, row, 1)
             grid.addWidget(QLabel(tip), row, 2)
+
+        # 末帧冻结：AI 报的 duration 里已经含这几秒，剪辑区间只按 sa→end 走，这里加回去
+        self.spin_freeze = QDoubleSpinBox()
+        self.spin_freeze.setDecimals(2)
+        self.spin_freeze.setRange(0.0, 30.0)
+        self.spin_freeze.setSingleStep(0.5)
+        self.spin_freeze.setSuffix(" 秒")
+        self.spin_freeze.setValue(max(0.0, float(freeze_seconds)))
+        self.spin_freeze.setToolTip("成品最后把末帧冻住几秒（静音），0 = 不冻。"
+                                    "AI 给的 timeline.duration 已经把这几秒算进去了，"
+                                    "剪辑区间只按 sa→end 剪，这几秒在渲染时加回来。"
+                                    "改完即存，全局生效")
+        self.spin_freeze.valueChanged.connect(self.freezeChanged.emit)
+        grid.addWidget(QLabel("末帧冻结"), 2, 0)
+        grid.addWidget(self.spin_freeze, 2, 1)
+        grid.addWidget(QLabel("成品末帧冻住几秒（静音），0 = 不冻。全局设置，改完即存"), 2, 2)
+
+        # 静音压缩：区间**内部**那些「没人说话干等着」的静音，最多留这么多秒（0 = 不剪）。
+        # 填的是「剪完之后留多少」，不是「剪掉多少」：填 0.80 表示一处 3.80 秒的静音
+        # 剪成 0.80 秒，剪口取静音正中间，前后各留一半。静音在开头、中间还是结尾一视同仁，
+        # 位置全由逐词时间戳推出来，所以不需要开关也不需要谁指定在哪——填了就生效。
+        # 步长 0.1：这个数是要按素材手感微调的，0.5 一跳太粗
+        self.spin_silence = QDoubleSpinBox()
+        self.spin_silence.setDecimals(2)
+        self.spin_silence.setRange(0.0, 30.0)
+        self.spin_silence.setSingleStep(0.1)
+        self.spin_silence.setSuffix(" 秒")
+        self.spin_silence.setValue(max(0.0, float(silence_keep)))
+        self.spin_silence.setToolTip("区间里超时的静音剪到只剩这么多秒（0 = 不剪）。\n"
+                                     "填的是剪完之后**留多少**，不是剪掉多少；"
+                                     "剪口取静音正中间，前后各留一半。\n"
+                                     "别填到 0.5 以下：压完每处静音就只剩这么多，"
+                                     "比 0.5 还短的话第二轮一个能插旁白的空隙都找不到。\n"
+                                     "改完即存，全局生效（手动 / AI 自动 / 命令行同一个键）")
+        self.spin_silence.valueChanged.connect(self.silenceChanged.emit)
+        grid.addWidget(QLabel("静音最多留"), 3, 0)
+        grid.addWidget(self.spin_silence, 3, 1)
+        grid.addWidget(QLabel("区间内超时静音剪到只剩这么多秒（0 = 不剪，别低于 0.5）。改完即存"),
+                       3, 2)
+
+        # 成品时长上限：超了才剪静音，剪到刚好压进来（0 = 不设上限，按上面那个数固定剪）。
+        # 连「静音最多留」那么紧都压不进来时就按那个数剪到最紧，成品仍会超一点 ——
+        # 那说明说话内容本身就有这么长，再往下剪得动区间，不是静音这一层的事
+        self.spin_target = QDoubleSpinBox()
+        self.spin_target.setDecimals(2)
+        self.spin_target.setRange(0.0, 300.0)
+        self.spin_target.setSingleStep(1.0)
+        self.spin_target.setSuffix(" 秒")
+        self.spin_target.setValue(max(0.0, float(silence_target)))
+        self.spin_target.setToolTip("成品最长多少秒（0 = 不设上限）。\n"
+                                    "没超就一刀不剪；超了才剪静音，而且只剪到刚好压进来，"
+                                    "静音能留多少留多少。\n"
+                                    "连「静音最多留」那么紧都压不进来时就按那个数剪到最紧，"
+                                    "成品仍会超一点 —— 那说明说话内容本身就有这么长。"
+                                    "改完即存，全局生效")
+        self.spin_target.valueChanged.connect(self.silenceTargetChanged.emit)
+        grid.addWidget(QLabel("成品最长"), 4, 0)
+        grid.addWidget(self.spin_target, 4, 1)
+        grid.addWidget(QLabel("超过这么多秒才剪静音，剪到刚好压进来（0 = 不设上限）。全局设置"),
+                       4, 2)
+
+        # 剪辑引擎总开关：关掉（默认）就完全按 AI 的 sa/end 剪，成品名和提取数据的
+        # duration 也就等于那个区间长度。勾完即存，全局生效（config.json）
+        self.chk_engine = QCheckBox("用剪辑引擎修正区间")
+        self.chk_engine.setChecked(bool(clip_engine))
+        self.chk_engine.setToolTip("默认不勾：完全按 AI 给的 sa → end 剪，成品名和"
+                                   "「提取数据」的 duration 就是这个区间长度。\n"
+                                   "勾上：用库里的逐词时间戳把区间修到词 / 整句边界"
+                                   "（起点可能前移、结束可能延到整句说完），成品不断句，"
+                                   "但区间会和 AI 给的不一样。勾完即存，全局生效")
+        self.chk_engine.toggled.connect(self.engineChanged.emit)
+        grid.addWidget(self.chk_engine, 5, 0, 1, 2)
+        grid.addWidget(QLabel("按逐词时间戳把区间对齐到词 / 整句边界。全局设置，勾完即存"),
+                       5, 2)
         grid.setColumnStretch(2, 1)
 
 
@@ -254,6 +346,21 @@ class HighlightDialog(QDialog):
     def _emit_offsets(self, *_args) -> None:
         self.offsetsChanged.emit(*self.offsets())
 
+    def clip_engine(self) -> bool:
+        return bool(self.chk_engine.isChecked())
+
+    def freeze_seconds(self) -> float:
+        return round(max(0.0, self.spin_freeze.value()), 2)
+
+    def silence_keep(self) -> float:
+        return round(max(0.0, self.spin_silence.value()), 2)
+
+    def silence_target(self) -> float:
+        return round(max(0.0, self.spin_target.value()), 2)
+
+
+
+
     def offsets(self) -> tuple[float, float]:
         return (round(self.spin_start.value(), 2), round(self.spin_end.value(), 2))
 
@@ -298,8 +405,19 @@ class AiApiWorker(QThread):
 
 
 class HighlightWorker(QThread):
-    """剪辑高光：按 AI JSON 起剪 -> 到冻帧点抓帧冻结 -> 冻帧特效 + 逐字字幕 -> 片尾收尾。
+    """剪辑高光：按 AI JSON 起剪 -> 超了时长上限就剪静音压回来 -> 到冻帧点抓帧冻结
+    -> 冻帧特效 + 逐字字幕 -> 片尾收尾。
 
+    时长这一段的顺序（配置在 `highlight.silence_target` / `silence_keep`）：
+
+      1. 按 AI 给的 sa → end 起剪，算出这一段的跨度；
+      2. 跨度没超上限 → 一刀不剪，整段照渲；
+      3. 超了 → 只剪静音，而且**只剪到刚好压进上限**，静音能留多少留多少；
+      4. 连「静音最紧留多少」都压不进去 → 就按那个数剪到最紧，成品仍会超一点
+         （那说明说话内容本身就有这么长，再往下剪得动区间，不是静音这一层的事）。
+
+    上限填 0 就是不设上限：这时按 `silence_keep` 一个固定档剪。算法只写在
+    `clip_engine.trim_for` 一处，渲染和「提取数据」都调它，两边不会差一刀。
 
     渲染是纯 CPU 的解码/画图/编码，放线程里跑，日志逐行发回界面。
     """
@@ -311,17 +429,23 @@ class HighlightWorker(QThread):
     def __init__(self, cfg, payload_text: str, fallback: Path | None,
                  export_dir: Path | None, offsets: tuple[float, float, float] = (0.0, 0.0, 0.0),
                  video_only: bool = False,
-                 name_suffix: str = ""):
+                 asset_id: int | None = None):
         super().__init__()
         self.cfg = cfg
         self.payload_text = payload_text
         self.fallback = fallback
         self.export_dir = export_dir
         self.offsets = offsets
-        # AI 自动剪辑走这条：只落 <视频名>_高光时刻.mp4，不写同名 .json
+        # 这一次按哪份高光方案剪的（没给就现查当前方案）。加减秒数要盖进 JSON，
+        # 而血缘的铁律是「有一个字不一样就另存一版」，所以盖的时候会派生新版本
+        self.asset_id = asset_id
+        # 派生出来的新方案 id：成品要挂在**实际用的那一版**上，主界面拿它记账
+        self.asset_id_used: int | None = None
+        # 这个视频的逐词时间戳（`_plan_result` 里查一次就留着）：静音压缩要靠它找静音，
+        # 和剪辑引擎那个开关无关 —— 引擎关着也照样剪静音
+        self.segments: tuple = ()
+        # AI 自动剪辑走这条：只落 <视频名>_<时长>.mp4，不写同名 .json
         self.video_only = video_only
-        # 文件名后缀：同一个视频用不同方案 / 不同 PRM 剪出来的成品要能并存，不许互相覆盖
-        self.name_suffix = name_suffix
         self.output: Path | None = None
         # 实际剪出来的区间 (起剪, 冻帧点)：加减秒数都已经算进去了，用来回写 clips
         self.cut_ranges: list[tuple[float, float]] = []
@@ -329,7 +453,12 @@ class HighlightWorker(QThread):
         self.cut_specs: list[dict[str, Any]] = []
 
     def _plan_result(self, video: Path, payload: Any = None):
-        """跑剪辑引擎：逐词时间戳从库里取、时长现探，日志逐行发回界面。"""
+        """跑剪辑引擎：逐词时间戳从库里取、时长现探，日志逐行发回界面。
+
+        `highlight.clip_engine` 关掉（默认）时**不取逐词时间戳**，等于按 AI 的 sa/end
+        原样剪——`plan_clips` 在没有 segments 时只做合法性校验和「不超出视频时长」，
+        所以成品区间就是 JSON 上那个区间，文件名和提取数据的 duration 跟着一致。
+        """
         from ..highlight import clip_engine  # noqa: PLC0415
 
         if payload is None:
@@ -337,6 +466,10 @@ class HighlightWorker(QThread):
 
         segments: tuple = ()
         duration = None
+        use_engine = bool(self.cfg.highlight.get("clip_engine", False))
+        # 静音压缩要用逐词时间戳，和引擎开关无关：引擎关着（默认）也照样剪静音，
+        # 所以只要这两件里有一件要用就得查库
+        want_words = use_engine or float(self.cfg.highlight.get("silence_keep", 2.0)) > 0
         try:
             from ..db import open_db, repo  # noqa: PLC0415
 
@@ -344,7 +477,10 @@ class HighlightWorker(QThread):
             try:
                 row = repo.find_video(db, video)
                 if row is not None:
-                    segments = clip_engine.segments_for_video(db, int(row["id"]))
+                    if want_words:
+                        self.segments = clip_engine.segments_for_video(db, int(row["id"]))
+                        if use_engine:
+                            segments = self.segments
                     # 库里没时长就在这儿探一次并写回：探测点只有这一处，
                     # 资产中心显示时长只查库，不扫盘
                     duration = repo.ensure_duration(db, int(row["id"]), video)
@@ -352,7 +488,10 @@ class HighlightWorker(QThread):
                 db.close()
         except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
             self.log.emit(f"[剪辑引擎] 取不到逐词时间戳（{exc}），本次不修边界")
-        if segments:
+        if not use_engine:
+            self.log.emit("[剪辑引擎] 已关闭（highlight.clip_engine=false）："
+                          "按 AI 的区间原样剪，只按视频时长收尾")
+        elif segments:
             self.log.emit(f"[剪辑引擎] 逐词时间戳：{len(segments)} 句")
         else:
             self.log.emit("[剪辑引擎] 库里没有逐词时间戳，AI 区间原样使用（只按视频时长收尾）")
@@ -372,6 +511,47 @@ class HighlightWorker(QThread):
                 self.log.emit(line)
         return result
 
+    def _stamp_offsets_in_db(self, video: Path, start_delta: float, end_delta: float, *,
+                             freeze_seconds: float = 0.0) -> None:
+        """把这一次剪辑的三个参数盖进高光 JSON —— 该另存一版就另存，绝不动有成品的那份。
+
+        参数一律取「剪辑高光」窗里的当前配置（起始 / 结束加减秒数、末帧冻结），
+        有就替换、没有就新增。判定和派生都在 `db.assets.fork_with_offsets`：
+        这份方案还没出成品就原地盖（一个成品一份 JSON）；已经有成品挂着才派生新版本，
+        老成品的溯源一个字都不许变。三个参数跟库里一模一样就沿用，不多造版本。
+        写不进去只记一句日志，不挡着出片。
+        """
+        try:
+            from ..db import open_db, repo  # noqa: PLC0415
+
+            db = open_db(self.cfg)
+            try:
+                asset_id = self.asset_id
+                if asset_id is None:
+                    row = repo.find_video(db, video)
+                    if row is None:
+                        return
+                    asset = db_assets.current_asset(db, int(row["id"]))
+                    if asset is None:
+                        return
+                    asset_id = int(asset["id"])
+                used, forked = db_assets.fork_with_offsets(
+                    db, int(asset_id), start_delta, end_delta,
+                    freezeframe=freeze_seconds)
+                if used is None:
+                    return
+                self.asset_id_used = int(used)
+                if forked:
+                    self.log.emit(f"[OFFSET] 这次的参数已另存为高光 JSON #{used}"
+                                  f"（派生自 #{asset_id}，AI 原话不动），成品挂这一版")
+                else:
+                    self.log.emit(f"[OFFSET] 参数已写进高光 JSON #{used}"
+                                  f"（startframe / freeze / freezeframe）")
+            finally:
+                db.close()
+        except Exception as exc:  # noqa: BLE001 - 写不进库也要能出片
+            self.log.emit(f"[OFFSET] 剪辑参数没能写进高光 JSON（不影响出片）：{exc}")
+
     def run(self) -> None:
         try:
             from ..highlight import (  # noqa: PLC0415 - 重依赖（av/cv2/PIL）延迟导入
@@ -381,6 +561,22 @@ class HighlightWorker(QThread):
             from ..video_io import is_complete_video  # noqa: PLC0415
 
             payload = json.loads(self.payload_text)
+            start_delta, end_delta = self.offsets
+            # 末帧冻结秒数：全局配置，「剪辑高光」窗里改（默认 2 秒）
+            freeze_seconds = max(0.0, float(self.cfg.highlight.get("freeze_tail_seconds", 2.0)))
+            # 静音最多留几秒：同一个窗里改，0 = 不剪（老行为）。剪的是区间**里面**
+            # 那些没人说话的静音，位置由逐词时间戳推出来，开头 / 中间 / 结尾一视同仁。
+            # 填了成品时长上限时，这个数的含义变成「最紧敢留多少」
+            silence_keep = max(0.0, float(self.cfg.highlight.get("silence_keep", 2.0)))
+            # 成品时长上限：超了才剪，剪到刚好压进来。0 = 不设上限，按 silence_keep 固定剪
+            silence_target = max(0.0, float(self.cfg.highlight.get("silence_target", 0.0)))
+            # 一进剪辑环节就把这一次的三个参数盖进 JSON（有就替换、没有就新增）：
+            # 起始 / 结束加减秒数、末帧冻结，一律以「剪辑高光」窗里的当前配置为准，
+            # JSON 里的旧值绝不参与这一次剪辑。手动、AI 自动、按 JSON 直接剪都走这里
+            payload = ai_protocol.stamp_offsets(
+                payload, start_delta, end_delta,
+                freezeframe=freeze_seconds) or payload
+            self.payload_text = json.dumps(payload, ensure_ascii=False)
             try:
                 spec = parse_spec(payload)      # 先解一遍：既校验 JSON，也用来定位源视频
             except ValueError:
@@ -389,46 +585,113 @@ class HighlightWorker(QThread):
                 if alt is None:
                     raise
                 spec = parse_spec(alt)
-            start_delta, end_delta = self.offsets
-            self.log.emit(f"[OFFSET] JSON 原始 clip.start={spec.clip_start:.2f} "
-                          f"clip.end={spec.clip_end:.2f}")
+            self.log.emit(f"[OFFSET] JSON 原始 sa={spec.clip_start:.2f} "
+                          f"end={spec.clip_end:.2f}｜这次用：起始{start_delta:+.2f} / "
+                          f"结束{end_delta:+.2f}、冻帧 {freeze_seconds:.2f}s"
+                          f"（都取自剪辑高光窗）")
 
             video = resolve_video(spec, self.cfg.path("output_dir"),
                                   self.cfg.path("input_dir"), self.fallback)
+            # 库里那份当前方案也盖上这三个参数：以后不用再去 gui_settings 找是按什么剪的
+            self._stamp_offsets_in_db(video, start_delta, end_delta,
+                                      freeze_seconds=freeze_seconds)
             # 和文本导出共用「导出目录」；没设过就退回该视频的结果目录
             directory = (self.export_dir if self.export_dir and self.export_dir.is_dir()
                          else self.cfg.path("output_dir") / video.stem)
-            target = default_target(directory, video)
-            if self.name_suffix:      # 同一视频多方案 / 多 PRM：各自一个文件名，谁都不覆盖谁
-                target = target.with_name(f"{target.stem}{self.name_suffix}{target.suffix}")
 
             # 先让剪辑引擎把 AI 的粗区间修到语义边界上，再交给既有渲染
             plans = self._plan_result(video, payload).plans
             if not plans:
                 raise ValueError("剪辑引擎没给出任何可剪片段，这条不开剪")
-            jobs: list[tuple[Any, Path, Any]] = []
+            jobs: list[tuple[Any, Path, Any, list[tuple[float, float]] | None]] = []
+            # 同名跳过的那几段：成品已经在盘上，但库里记的时长可能是老账（见下面 `if not jobs`）
+            standing: list[tuple[Any, Path, Any, list[tuple[float, float]] | None]] = []
+
             for index, plan in enumerate(plans, start=1):
                 one = parse_spec(clip_engine.payload_for(plan))
                 one = one.shifted(start_delta, end_delta)
-                out_path = (target if index == 1
-                            else target.with_name(f"{target.stem}_{index}{target.suffix}"))
-                jobs.append((one, out_path, plan))
+                # 静音压缩：区间里超时的静音先算好剪成哪几段（原视频绝对秒）。
+                # 只剩一段说明没什么可剪的，就当没开这个功能，逐字节还是老行为
+                keeps = None
+                if silence_keep > 0 and self.segments:
+                    spans = clip_engine.trim_for(self.segments, one.clip_start, one.clip_end,
+                                                 keep=silence_keep, target=silence_target)
+                    if len(spans) > 1:
+                        keeps = spans
+                # 成品名带**实际剪进去的时长**（起剪 → 结束，含加减秒数；引擎开着就是
+                # 修正后的区间；静音剪掉的那部分不算在里面）：<视频名>_1095.mp4 = 10.95 秒。
+                # 冻帧不算在里面，「提取数据」导出的 duration 是同一个口径，两边永远对得上。
+                # 同名不让位、不覆盖：盘上已经有这个名字就是已经剪过了，直接跳过
+                played = (sum(hi - lo for lo, hi in keeps) if keeps
+                          else max(0.0, one.duration))
+                planned = round(played, 2)
+                out_path = default_target(directory, video, planned, index=index)
+                if out_path.exists():
+                    self.log.emit(f"[剪辑引擎] 同名成品已经在盘上，跳过这一段："
+                                  f"{out_path.name}")
+                    standing.append((one, out_path, plan, keeps))
+                    continue
+
+                jobs.append((one, out_path, plan, keeps))
                 self.log.emit(f"[OFFSET] 第 {index} 段 起始{start_delta:+.2f} / "
                               f"结束{end_delta:+.2f} 秒 → "
                               f"起剪={one.clip_start:.2f} 结束={one.clip_end:.2f}"
-                              f"（片尾另加 1 秒红屏）")
+                              + (f"（末帧冻结 {freeze_seconds:.2f}s）" if freeze_seconds
+                                 else "（不冻帧）"))
+                if keeps:
+                    self.log.emit(f"[静音压缩] 第 {index} 段 "
+                                  + (f"目标 {silence_target:.2f}s（静音最紧留 "
+                                     f"{silence_keep:.2f}s）：" if silence_target > 0
+                                     else f"静音最多留 {silence_keep:.2f}s：")
+                                  + f"{one.duration:.2f}s → {planned:.2f}s，"
+                                  f"剪成 {len(keeps)} 段 "
+                                  + " + ".join(f"{lo:.2f}-{hi:.2f}" for lo, hi in keeps))
+                    if silence_target > 0 and planned > silence_target + 0.01:
+                        self.log.emit(f"[静音压缩] 压不进 {silence_target:.2f}s（说话本身就有"
+                                      f"这么长），已按静音最紧留 {silence_keep:.2f}s 剪，"
+                                      f"成品 {planned:.2f}s")
+                elif silence_keep > 0 and not self.segments:
+                    self.log.emit("[静音压缩] 库里没有逐词时间戳，这一段不剪静音")
+                elif (silence_keep > 0 and silence_target > 0
+                      and one.duration <= silence_target):
+                    self.log.emit(f"[静音压缩] 第 {index} 段只有 {one.duration:.2f}s，"
+                                  f"没超 {silence_target:.2f}s，整段照渲不剪静音")
 
-            for index, (job, out_path, plan) in enumerate(jobs, start=1):
+            if not jobs:
+                # 该出的成品都已经在盘上了。以前这里直接当「跳过」返回，什么都不登记 ——
+                # 于是库里那条时长要是错的（老版本把区间长度当成品时长写进去过），
+                # 重剪多少次都纠不过来：同名 → 跳过 → 不写库 → 错值原地不动。
+                # 现在把这几段的实际区间和时长照样交出去，让主界面回写一遍
+                standing_ok: list[Path] = []
+                for one, out_path, plan, keeps in standing:
+                    # 盘上那个文件也得验一遍：坏文件的区间不许进库（和渲染那条路同一条规矩）
+                    if not self._standing_ok(out_path):
+                        continue
+                    self._remember_cut(one, plan, keeps)
+                    standing_ok.append(out_path)
+
+                if standing_ok:
+                    self.log.emit("[剪辑引擎] 该出的成品都已经在盘上了，不重剪，"
+                                  "只把实际区间和时长回写一遍库")
+                    self.output = standing_ok[0]
+                    self.done.emit(True, str(self.output))
+                    return
+                # 一段都没有：空路径就是「跳过」的信号，`on_highlight_done` 认它
+                self.log.emit("[剪辑引擎] 没有可用的成品，这一份不用剪")
+                self.done.emit(True, "")
+                return
+
+
+            for index, (job, out_path, plan, keeps) in enumerate(jobs, start=1):
                 self.log.emit(f"[剪辑引擎] 开始渲染第 {index}/{len(jobs)} 段 -> {out_path.name}")
                 result = render_highlight(video, job, out_path, on_log=self.log.emit,
-                                          on_progress=self.progress.emit)
+                                          on_progress=self.progress.emit,
+                                          freeze_seconds=freeze_seconds,
+                                          keep_spans=keeps)
                 if not is_complete_video(out_path):   # 和登记闸门同一个判断（Batch 4）
                     raise RuntimeError(f"成片封装不完整，不当成成品：{out_path}")
                 self.log.emit("[剪辑引擎] 成片验证通过")
-                # 记下真正剪的区间（引擎修正 + 加减秒数之后的值），交给主界面回写 clips
-                self.cut_ranges.append((job.clip_start, job.clip_end))
-                self.cut_specs.append(db_assets.clip_spec_for(plan, job.clip_start,
-                                                              job.clip_end))
+                self._remember_cut(job, plan, keeps)
                 if not self.video_only:
                     write_json(out_path.with_suffix(".json"),
                                {"spec": job.raw,
@@ -441,6 +704,37 @@ class HighlightWorker(QThread):
             return
         self.output = jobs[0][1]
         self.done.emit(True, str(self.output))
+
+    def _standing_ok(self, out_path: Path) -> bool:
+        """盘上这个同名成品还能不能当成品用。
+
+        同名跳过那条路也要过这道闸：坏文件的区间不许回写进库。
+        规矩和渲染那条路一样（`is_complete_video`），只是这里验的是**别人早先渲的**
+        那个文件，所以单独一个方法 —— 免得和「渲染完验成片」那次混在一起。
+        """
+        if is_complete_video(out_path):
+            return True
+        self.log.emit(f"[剪辑引擎] {out_path.name} 封装不完整，不当成品，也不回写库")
+        return False
+
+    def _remember_cut(self, job: Any, plan: Any,
+
+                      keeps: list[tuple[float, float]] | None) -> None:
+        """记下这一段真正剪的区间和时长，交给主界面回写 `clips`。
+
+        `cut_ranges` 只有区间两头，`cut_specs` 才带正确的时长 —— 两份都要，
+        因为回写那边要靠段数对齐（`cut_ranges`），取值要靠 `cut_specs`。
+
+        静音剪过的时候，`duration` 记的是**实际剪进去的**长度（和文件名同一个口径），
+        不是 `end - start`：中间被剪掉了几截，拿区间长度当成品时长就会比成品本身长，
+        「提取数据」那边算出来的空隙坐标也会整体偏掉。
+        """
+        self.cut_ranges.append((job.clip_start, job.clip_end))
+        spec = db_assets.clip_spec_for(plan, job.clip_start, job.clip_end)
+        if keeps:
+            spec["duration"] = round(sum(hi - lo for lo, hi in keeps), 3)
+        self.cut_specs.append(spec)
+
 
 
 class AudioWorker(QThread):
@@ -483,8 +777,6 @@ class MainWindow(QMainWindow):
         self.audio_worker: AudioWorker | None = None
         self.clip_worker: HighlightWorker | None = None
         self.ai_worker: AiApiWorker | None = None
-        # 合并素材：这个视频按片尾红屏切出来的素材区间。None = 还没扫过（见 pieces_spans）
-        self.piece_spans: list[tuple[float, float]] | None = None
         # 浏览器扩展对接（Bridge）：GUI 起服务，扩展轮询领任务去驱动网页版 AI
         self.bridge = None
         self._bridge_events: BridgeEvents | None = None
@@ -518,6 +810,13 @@ class MainWindow(QMainWindow):
         self._last_prm_id: int | None = None
         # 这一次开剪用的高光方案 id（成品要靠它反查"按哪份 JSON 剪的"）
         self._last_asset_id: int | None = None
+        # 欠着没删的预览音轨：正在用声音的视频先不删，切走 / 退出时再清
+        self._pending_audio_drop: Path | None = None
+        # 预览音轨被清理后自动重解的一次性机会（换视频时重新给）
+        self._audio_redone = False
+        # 手上这条任务已经开剪过的方案 id：一份 JSON 一个成品，同一条任务里不许重复剪
+        # 同一份（成品没挂上来源时会一直算"还没出成品"，没有这个集合就成死循环）
+        self._auto_rendered_assets: set[int] = set()
         # AI 面板（第二主界面）：非模态，只开一个
         self.ai_panel = None
         # 视频资产中心：同样非模态、全程只有一份
@@ -955,8 +1254,8 @@ class MainWindow(QMainWindow):
         self.btn_export_dir.clicked.connect(self.on_pick_export_dir)
         self.btn_highlight = QPushButton("剪辑高光")
         self.btn_highlight.setToolTip("粘贴 AI JSON：从 clip.start 剪到 clip.end 原速播放，"
-                                     "片尾固定接 1 秒纯红背景；"
-                                     "输出到导出目录，文件名带 _高光时刻")
+                                     "片尾按配置冻住末帧几秒；"
+                                     "输出到导出目录，文件名带成片时长")
 
         self.btn_highlight.clicked.connect(self.on_highlight)
         # 选目录和打开目录挨着放在第一行：先选，再打开
@@ -1208,6 +1507,11 @@ class MainWindow(QMainWindow):
 
     def load_video(self, video: Path) -> None:
         self.video_path = Path(video).resolve()
+        # 上一个视频欠着的预览音轨清理，这会儿补上（换视频就不再需要它的声音了）
+        if self._pending_audio_drop is not None \
+                and self._pending_audio_drop != self.video_path:
+            self._clear_preview_audio(self._pending_audio_drop)
+        self._audio_redone = False       # 新视频：重解音轨的一次性机会重新给
         if not self.player.open(self.video_path):
             self.append_log(f"[播放器] 无法解码 {self.video_path.name}")
         self.setWindowTitle(f"{theme.APP_TITLE} — {self.video_path.name}")
@@ -1225,7 +1529,6 @@ class MainWindow(QMainWindow):
         self.timeline, self.speech = [], []
         self.timeline_doc, self.speech_doc = {}, {}
         self.show_translated = False
-        self.piece_spans = None   # 换视频/重新分析：素材分界重新算（缓存在 red_pieces.json）
         if out is None:
             return
         timeline_file = out / "timeline.json"
@@ -1240,6 +1543,13 @@ class MainWindow(QMainWindow):
                     used_model = f"，视觉模型 {str(vmeta['model_id']).split('/')[-1]}"
             except Exception:
                 used_model = ""
+
+        # 派生文件可能被清掉 / 换过输出目录 / 在别的机器上分析过：库里有就从库恢复，
+        # 不再因为 output 下没文件就误报「还没分析」。
+        rebuilt: tuple[dict[str, Any], dict[str, Any]] | None = None
+        if (not timeline_file.is_file()) or (not speech_file.is_file()):
+            rebuilt = self._rebuild_docs_from_db()
+
         if timeline_file.is_file():
             try:
                 with open(timeline_file, "r", encoding="utf-8") as fh:
@@ -1252,6 +1562,15 @@ class MainWindow(QMainWindow):
                 )
             except Exception as exc:
                 self.append_log(f"[警告] 读取 timeline.json 失败: {exc}")
+        elif rebuilt is not None:
+            self.timeline_doc = rebuilt[0]
+            self.timeline = self.timeline_doc.get("timeline", [])
+            self.statusBar().showMessage(
+                f"{self.video_path.name}：{len(self.timeline)} 条时间轴（从数据库恢复），"
+                f"输出语言 {self.timeline_doc.get('output_language') or '-'}"
+                f"{used_model or '（output 下派生文件缺失）'}")
+            self.append_log(f"[恢复] output 下没有 timeline.json，已从数据库重建 "
+                            f"{len(self.timeline)} 条时间轴（库是权威来源）")
         else:
             self.statusBar().showMessage(f"{self.video_path.name}：还没有分析结果，点击“分析当前视频”")
         if speech_file.is_file():
@@ -1259,17 +1578,116 @@ class MainWindow(QMainWindow):
                 with open(speech_file, "r", encoding="utf-8") as fh:
                     self.speech_doc = json.load(fh)
                 segments = self.speech_doc.get("segments", [])
-                # 老结果是"一段多句"的：读进来就按标点切成一句一行，不用重跑分析。
-                # 只切显示用的这份，不回写文件；要落盘走「保存语音结果」。
-                self.speech = split_sentences(segments)
-                if len(self.speech) != len(segments):
-                    self.append_log(f"[断句] 已有结果按标点重排：{len(segments)} 段 -> "
-                                    f"{len(self.speech)} 行（译文需重新翻译）")
+                if self.speech_doc.get("sentences_final"):
+                    # 分析时已经定稿（ASR 分句 + 按说话人切换点切开）：照原样显示。
+                    # 再切一刀会把切开的句子合回去，段数一变译文就有几行作废
+                    self.speech = list(segments)
+                else:
+                    # 老结果是"一段多句"的：读进来就按标点切成一句一行，不用重跑分析。
+                    # 只切显示用的这份，不回写文件；要落盘走「保存语音结果」。
+                    self.speech = split_sentences(segments)
+                    if len(self.speech) != len(segments):
+                        self.append_log(f"[断句] 老结果按标点重排：{len(segments)} 段 -> "
+                                        f"{len(self.speech)} 行（重排掉的那几行要补译文）")
             except Exception as exc:
                 self.append_log(f"[警告] 读取 speech_events.json 失败: {exc}")
+        elif rebuilt is not None:
+            self.speech_doc = rebuilt[1]
+            segments = self.speech_doc.get("segments", [])
+            # 库是权威来源，里面的句子边界就是分析定稿的那份，不再切
+            self.speech_doc["sentences_final"] = True
+            self.speech = list(segments)
+
+        # 从库恢复的这次顺手把派生文件写回 output，下次直接读文件，翻译/导出也有得用
+        if rebuilt is not None:
+            self._materialize_output_json(out, timeline_file, speech_file)
 
         self.refresh_timeline_table()
         self.refresh_speech_list()
+
+    def _materialize_output_json(self, out: Path, timeline_file: Path,
+                                 speech_file: Path) -> None:
+        """把内存里（多半刚从库重建）的文档写回 output/<视频>/，best effort 不拦打开。"""
+        try:
+            out.mkdir(parents=True, exist_ok=True)
+            if not timeline_file.is_file() and self.timeline_doc:
+                write_json(timeline_file, self.timeline_doc)
+            if not speech_file.is_file() and self.speech_doc:
+                write_json(speech_file, self.speech_doc)
+        except OSError as exc:
+            self.append_log(f"[警告] 回写 output 派生文件失败（不影响显示）：{exc}")
+
+    def _rebuild_docs_from_db(self) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        """磁盘上没有 output/<视频>/timeline.json 时，从**权威库**重建时间线/语音两份文档。
+
+        分析结果真正落库（analysis_runs + speech/visual/表情轨），output 下那三个 JSON
+        只是派生文件——派生文件被清掉、换过输出目录、或在别的机器上分析过，库里有数据
+        界面也该照样显示。重建走的就是 pipeline / exporters 同一条路
+        （from_cache → build_timeline → filter_timeline → action_track），不另写一套。
+        库里也没有（没进过库 / 没跑完）才返回 None，由调用方回退到「还没分析」。
+        """
+        payload = self.script_payload()
+        if not payload:
+            return None
+        try:
+            from ..events import SpeechEvent, VisualEvent  # 局部引：避免 GUI 启动就背 torch
+            from ..timeline.engine import (action_track, build_timeline,
+                                           filter_timeline)
+
+            cfg = payload.get("render_config") or {}
+            visual = [VisualEvent.from_cache(e) for e in (payload.get("events") or [])]
+            speech = [SpeechEvent.from_cache(s) for s in (payload.get("segments") or [])]
+            entries = build_timeline(
+                visual, speech,
+                min_overlap=float(cfg.get("min_overlap_seconds", 0.2)))
+            filtered = filter_timeline(
+                entries,
+                importance=str(cfg.get("importance_filter", "low")),
+                min_confidence=float(cfg.get("confidence_filter", 0.0)))
+            timeline_doc: dict[str, Any] = {
+                "video": str(payload.get("video_name") or ""),
+                "video_path": str(payload.get("video_path") or ""),
+                "duration": float(payload.get("duration") or 0.0),
+                "original_language": payload.get("output_language"),
+                "output_language": payload.get("output_language"),
+                "timeline": [
+                    {
+                        "start": e["start"], "end": e["end"],
+                        "visual": e["visual"], "speech": e["speech"],
+                        "importance": e["importance"],
+                        "timestamp_source": e["timestamp_source"],
+                        "ocr_text": e["ocr_text"],
+                        "visual_event_id": e["visual_event_id"],
+                        "speech_event_ids": e["speech_event_ids"],
+                        "source_frames": e["source_frames"],
+                        "visual_confidence": e["visual_confidence"],
+                        "speech_confidence": e["speech_confidence"],
+                        "speech_speakers": e["speech_speakers"],
+                        "speech_emotion": e["speech_emotion"],
+                        "speech_emotion_en": e["speech_emotion_en"],
+                        "speech_emotion_intensity": e["speech_emotion_intensity"],
+                        "visual_emotion": e["visual_emotion"],
+                        "visual_emotion_en": e["visual_emotion_en"],
+                        "visual_emotion_confidence": e["visual_emotion_confidence"],
+                        "quality": e["quality"],
+                    }
+                    for e in filtered
+                ],
+                "action_track": action_track(visual),
+                "expression_track": payload.get("emotions") or [],
+                "_rebuilt_from_db": True,
+            }
+            speech_doc: dict[str, Any] = {
+                "video": str(payload.get("video_name") or ""),
+                "duration": float(payload.get("duration") or 0.0),
+                "output_language": payload.get("output_language"),
+                "available": bool(payload.get("segments")),
+                "segments": payload.get("segments") or [],
+            }
+            return timeline_doc, speech_doc
+        except Exception as exc:  # noqa: BLE001 - 重建失败不拦打开，退回「还没分析」
+            self.append_log(f"[警告] 从数据库重建分析结果失败：{exc}")
+            return None
 
     def has_translation(self) -> bool:
         """界面上有没有任何译文：决定「翻译」是重新跑模型还是只切换显示。"""
@@ -1320,7 +1738,8 @@ class MainWindow(QMainWindow):
                                            entry.get("speech_emotion_intensity"), lang,
                                            entry.get("speech_emotion") or entry.get("emotion"))
             visual_emotion = _emotion_cell(entry.get("visual_emotion_en"),
-                                           entry.get("visual_emotion_intensity"), lang,
+                                           legacy_score(entry, "visual_emotion_confidence",
+                                                        "visual_emotion_intensity"), lang,
                                            entry.get("visual_emotion"))
             cells = [
                 time_text,
@@ -1633,8 +2052,20 @@ class MainWindow(QMainWindow):
         if self.busy():
             return
         dialog = HighlightDialog(self, self._last_highlight_json, self._highlight_offsets,
-                                 (self.speech_doc or {}).get("emotion_peaks"))
+                                 (self.speech_doc or {}).get("emotion_peaks"),
+                                 freeze_seconds=float(
+                                     self.cfg.highlight.get("freeze_tail_seconds", 2.0)),
+                                 clip_engine=bool(
+                                     self.cfg.highlight.get("clip_engine", False)),
+                                 silence_keep=float(
+                                     self.cfg.highlight.get("silence_keep", 2.0)),
+                                 silence_target=float(
+                                     self.cfg.highlight.get("silence_target", 0.0)))
         dialog.offsetsChanged.connect(self.on_highlight_offsets_changed)
+        dialog.freezeChanged.connect(self.on_freeze_changed)
+        dialog.silenceChanged.connect(self.on_silence_changed)
+        dialog.silenceTargetChanged.connect(self.on_silence_target_changed)
+        dialog.engineChanged.connect(self.on_clip_engine_changed)
         if dialog.exec_() != QDialog.Accepted:
             return
         text = dialog.payload()
@@ -1644,14 +2075,61 @@ class MainWindow(QMainWindow):
             return
         self.run_highlight(text)
 
-    def run_highlight(self, text: str, ai: bool = False, name_suffix: str = "") -> None:
+    def _render_text_from_moments(self, text: str) -> str | None:
+        """粘贴框里是**结果清单**时，现算成高光方案再交给渲染；是方案就原文一个字不动。
+
+        清单一行只有 `setup_at` / `result_at` 两个时间点，**故意不带文件名** —— 区间得拿
+        库里的逐词时间戳现算（和 `assets --import-moments` 同一个实现），视频由
+        `_moments_video()` 补上。算出来的每一条都入库成一份方案（跟 AI 对接那条路完全
+        一样的记账），渲染这次只出第一条，其余在资产中心逐条渲染 —— 一个 worker 只剪
+        一份方案，这是既有约定。
+
+        返回 None = 认出是清单但算不出方案（没选视频 / 这个视频没跑过分析）：原因已经
+        写进日志，调用方别再往渲染送 —— 把清单原文丢给 worker 只会报一句「找不到源视频」，
+        看不出真正缺的是什么。
+        """
+        proto = ai_protocol.split_payloads(text)
+        if proto and all(ai_protocol.clips(one) for one in proto):
+            return text          # 已经是方案（老协议 / 新协议）：原文照旧交给 worker
+        rows = from_moments.rows_from_text(text)
+        payloads = [one for one in self._payloads_from_reply(text)
+                    if ai_protocol.clips(one)]
+        if not payloads:
+            if not rows:
+                return text      # 不是清单也不是方案：原文交给 worker，错在哪由它报
+            self.append_log("[结果清单] 认出是结果清单，但一条方案都算不出来（上面几行写了原因）："
+                            "清单本来就不带文件名，得靠主界面当前视频 + 它的逐词时间戳算区间，"
+                            "先选中这个视频、确认分析跑过，再剪")
+            QMessageBox.warning(self, "剪辑高光",
+                                "粘贴的是结果清单（一行只有两个时间点），"
+                                "但算不出区间。\n\n"
+                                "清单不带文件名，程序要靠主界面当前视频和它的逐词时间戳"
+                                "现算区间：先在主界面选中这个视频，确认它分析过语音，再剪。")
+            return None
+        asset_ids = self._save_ai_result(payloads)
+        if asset_ids and asset_ids[0] is not None:
+            # 成品血缘要挂在真正开剪的那一份上
+            self._last_asset_id = int(asset_ids[0])
+        if len(payloads) > 1:
+            self.append_log(f"[结果清单] 共 {len(payloads)} 条已全部入库，"
+                            f"这次剪第 1 条，其余在资产中心逐条渲染")
+        return json.dumps(payloads[0], ensure_ascii=False, indent=2)
+
+    def run_highlight(self, text: str, ai: bool = False) -> None:
         """按 JSON 直接起渲染。手动走对话框和 AI 自动回填都汇到这里。
 
-        用的是界面上「剪辑高光」那套配置（加减秒数）。成品一律不混音效，
-        片尾固定追加 1 秒纯红背景。
-        AI 自动那条只出一个成品：<视频名>_高光时刻.mp4，落在「AI_输出目录」；
+        用的是界面上「剪辑高光」那套配置（加减秒数、末帧冻结、静音最多留）。成品一律不混音效。
+        粘贴的是**结果清单**（一行两个时间点）也认：先算成方案再剪，见 `_render_text_from_moments`。
+        AI 自动那条只出一个成品：<视频名>_<时长>.mp4（例 _689 = 6.89 秒），落在「AI_输出目录」；
         那栏留空才退回界面上选的「导出目录」。
         """
+        ready = self._render_text_from_moments(text)
+        if ready is None:
+            # 清单算不出方案：原因已经告诉用户了，这一轮不开渲染
+            if self.auto_running():
+                self._auto_advance("failed", "结果清单算不出区间（没选视频或没有逐词时间戳）")
+            return
+        text = ready
         self._last_highlight_json = text
         self.btn_highlight.setEnabled(False)
         self.set_progress(0.0)
@@ -1664,12 +2142,13 @@ class MainWindow(QMainWindow):
             directory = ai_out
         self.clip_worker = HighlightWorker(self.cfg, text, self.video_path, directory,
                                            self._highlight_offsets,
-                                           video_only=ai, name_suffix=name_suffix)
+                                           video_only=ai,
+                                           asset_id=self._last_asset_id)
         if ai:
             where = ai_out if ai_out is not None else self.export_root()
             label = "AI_输出目录" if ai_out is not None else "导出目录"
             self.append_log(f"[剪辑高光] 输出到{label}：{where}"
-                            f"（加减秒数 {self._highlight_offsets}，无音效，片尾 1 秒红屏）")
+                            f"（加减秒数 {self._highlight_offsets}，无音效）")
 
 
         self.clip_worker.log.connect(self.append_log)
@@ -1706,6 +2185,78 @@ class MainWindow(QMainWindow):
         """对话框里一改加减秒数就存盘（400ms 防抖），点取消也留着。"""
         self._highlight_offsets = (round(start, 2), round(end, 2))
         self.schedule_save()
+
+    def on_freeze_changed(self, seconds: float) -> None:
+        """末帧冻结秒数：立刻写 config.json 的 highlight.freeze_tail_seconds，全局生效。
+
+        0 = 不冻。AI 报的 timeline.duration 已经含这几秒，所以剪辑区间一点不动，
+        只是渲染时把播放段最后一帧再重复这么久（静音）。
+        """
+        value = round(max(0.0, float(seconds)), 2)
+        try:
+            self.cfg.save_patch({"highlight": {"freeze_tail_seconds": value}})
+        except OSError as exc:
+            self.cfg.highlight["freeze_tail_seconds"] = value   # 写不进文件也让这一轮生效
+            self.append_log(f"[剪辑高光] 末帧冻结秒数写不进 config.json（只在内存里生效）：{exc}")
+        else:
+            self.append_log(f"[剪辑高光] 末帧冻结：{value:.2f} 秒"
+                            + ("（0 = 不冻）" if value <= 0 else ""))
+
+    def on_silence_changed(self, seconds: float) -> None:
+        """静音最多留几秒：立刻写 config.json 的 highlight.silence_keep，全局生效。
+
+        0 = 不剪（老行为）。这个数是「剪完之后**留多少**」：填 2.00 表示一处 3.80 秒的
+        静音剪成 2.00 秒，剪口取静音正中间、前后各留一半。静音在区间的开头、中间还是
+        结尾一视同仁，位置由逐词时间戳推出来，所以不需要开关。
+        手动剪辑、AI 自动剪辑、命令行读的是同一个键，成品口径只有一份。
+        """
+        value = round(max(0.0, float(seconds)), 2)
+        try:
+            self.cfg.save_patch({"highlight": {"silence_keep": value}})
+        except OSError as exc:
+            self.cfg.highlight["silence_keep"] = value   # 写不进文件也让这一轮生效
+            self.append_log(f"[剪辑高光] 静音保留秒数写不进 config.json（只在内存里生效）：{exc}")
+        else:
+            self.append_log(f"[剪辑高光] 静音最多留：{value:.2f} 秒"
+                            + ("（0 = 不剪）" if value <= 0 else ""))
+
+    def on_silence_target_changed(self, seconds: float) -> None:
+        """成品最长多少秒：立刻写 config.json 的 highlight.silence_target，全局生效。
+
+        0 = 不设上限（这时按 `silence_keep` 固定剪）。填了之后的顺序是：
+        没超就一刀不剪 → 超了才剪静音，且只剪到刚好压进来 → 连 `silence_keep`
+        那么紧都压不进来时就按那个数剪到最紧，成品仍会超一点。
+        手动剪辑、AI 自动剪辑、命令行、提取数据读的是同一个键，口径只有一份。
+        """
+        value = round(max(0.0, float(seconds)), 2)
+        try:
+            self.cfg.save_patch({"highlight": {"silence_target": value}})
+        except OSError as exc:
+            self.cfg.highlight["silence_target"] = value   # 写不进文件也让这一轮生效
+            self.append_log(f"[剪辑高光] 成品时长上限写不进 config.json（只在内存里生效）：{exc}")
+        else:
+            self.append_log(f"[剪辑高光] 成品最长 {value:.2f} 秒"
+                            + ("（0 = 不设上限）" if value <= 0
+                               else "：超了才剪静音，剪到刚好压进来"))
+
+    def on_clip_engine_changed(self, checked: bool) -> None:
+        """剪辑引擎开关：立刻写 config.json 的 highlight.clip_engine，全局生效。
+
+        关（默认）＝完全按 AI 的 sa → end 剪，成品名和「提取数据」的 duration 就是
+        这个区间长度；开＝用逐词时间戳把区间对齐到词 / 整句边界，区间会和 AI 给的不同。
+        手动剪辑、AI 自动剪辑、CLI 都读这一个键。
+        """
+        checked = bool(checked)
+        try:
+            self.cfg.save_patch({"highlight": {"clip_engine": checked}})
+        except OSError as exc:
+            self.cfg.highlight["clip_engine"] = checked      # 写不进文件也让这一轮生效
+            self.append_log(f"[剪辑高光] 引擎开关写不进 config.json（只在内存里生效）：{exc}")
+        else:
+            self.append_log("[剪辑引擎] " + ("开（按逐词时间戳修正区间）" if checked
+                                            else "关（完全按 AI 的区间剪）"))
+
+
 
     # ------------------------------------------------------- AI 对接（Bridge）
     def start_bridge(self) -> None:
@@ -1865,42 +2416,30 @@ class MainWindow(QMainWindow):
 
         两条路都会在日志里写明来源，不静默切换：
         分析结果的权威来源是库，output/timeline.json 只是派生文件。
-
-        这个视频是合并视频（有片尾红屏分界）时，两条路都自动按素材分段——
-        正文一个字不变，只是多一层「素材 1..N」的归类，AI 才分得清哪段是哪条素材。
         """
-        pieces = self.pieces_spans()
         payload = self.script_payload()
         if payload is not None and (payload["segments"] or payload["events"]):
             try:
                 count = write_script_txt(path, payload,
                                         translated=self.show_translated,
                                         # 老记录没存过 output_language，才用界面上这个兜底
-                                        language=self.export_language(),
-                                        pieces=pieces)
+                                        language=self.export_language())
             except ValueError as exc:      # 译文没落库：明说，然后用内存里的译文，绝不拿原文冒充
                 self.append_log(f"[剧本] {exc}")
             else:
                 self.append_log(
                     f"[剧本] 来源：数据库（分析 #{payload['analysis_id']}，"
-                    f"表情轨 {payload['expression_state']}，时间线 {count} 条"
-                    + (f"，按 {len(pieces)} 段素材分段）" if pieces else "）"))
+                    f"表情轨 {payload['expression_state']}，时间线 {count} 条）")
                 return count
         else:
             self.append_log("[剧本] 数据库里没有这个视频的分析结果")
-        common = dict(actions=self.timeline_doc.get("action_track"),
-                      emotions=self.timeline_doc.get("expression_track"),
-                      duration=float(self.timeline_doc.get("duration") or 0.0))
-        if pieces:
-            count = write_grouped_merged_txt(
-                path, self.video_path.name, pieces, self.speech, self._events_for_export(),
-                self.show_translated, self.export_language(), **common)
-        else:
-            count = write_merged_txt(
-                path, self.video_path.name, self.speech, self._events_for_export(),
-                self.show_translated, self.export_language(), **common)
-        self.append_log(f"[剧本] 来源：内存回退（时间线 {count} 条"
-                        + (f"，按 {len(pieces)} 段素材分段）" if pieces else "）"))
+        count = write_merged_txt(
+            path, self.video_path.name, self.speech, self._events_for_export(),
+            self.show_translated, self.export_language(),
+            actions=self.timeline_doc.get("action_track"),
+            emotions=self.timeline_doc.get("expression_track"),
+            duration=float(self.timeline_doc.get("duration") or 0.0))
+        self.append_log(f"[剧本] 来源：内存回退（时间线 {count} 条）")
         return count
 
     def write_ai_text(self) -> tuple[Path, int]:
@@ -2371,8 +2910,8 @@ class MainWindow(QMainWindow):
         self._bridge_temp_files = []
 
     # -------------------------------------------------------- 自动剪辑（批量）
-    VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi", ".flv", ".webm", ".m4v",
-                      ".ts", ".mpg", ".mpeg", ".wmv")
+    # constants 那一份，和入库扫盘同口径（类属性只是给 self./测试留个入口）
+    VIDEO_SUFFIXES = VIDEO_SUFFIXES
 
     def auto_busy(self) -> str:
         """有活在跑就返回一句人话，闲着返回空串。跟 busy() 同样的判断，只是不弹窗。"""
@@ -2392,6 +2931,7 @@ class MainWindow(QMainWindow):
         就现生成一份临时剧本 TXT 发给 AI，不重跑分析；库里什么都没有才本地分析。
         回来的高光 JSON 入库后按主界面高光配置剪，高光片段落 AI_输出目录。
         高光 JSON 剪辑：一次 AI 都不调，只用库里已有的高光 JSON 开剪。
+        只解析视频：只跑本地分析，不问 AI、也不剪，分析结果进库这一条就算干完。
 
         """
         if self.auto_running():
@@ -2405,7 +2945,8 @@ class MainWindow(QMainWindow):
         if ai_in is None:
             QMessageBox.information(self, "自动剪辑", "先在 AI 面板里设好 AI_输入目录")
             return
-        videos = sorted(p for p in ai_in.iterdir()
+        # rglob 而不是 iterdir：输入目录里常常再按频道/日期分子目录，逐层扫下去
+        videos = sorted(p for p in ai_in.rglob("*")
                         if p.is_file() and p.suffix.lower() in self.VIDEO_SUFFIXES)
         if not videos:
             QMessageBox.information(self, "自动剪辑", f"{ai_in} 里没有视频")
@@ -2416,7 +2957,8 @@ class MainWindow(QMainWindow):
                                 "数据库打不开，自动剪辑的队列就在数据库里，先解决数据库再跑")
             return
         job = str(self.cfg.bridge.get("ai_job") or "full")
-        labels = {"full": "剪辑成片", "collect": "收取脚本", "script": "脚本剪辑"}
+        labels = {"full": "剪辑成片", "collect": "收取脚本", "script": "脚本剪辑",
+                  "analyze": "只解析视频"}
         self._auto_job = job
         self._auto_stop = False      # 上一轮点过「停止」，这次是重新开工
         self._set_auto_state(False)
@@ -2456,6 +2998,8 @@ class MainWindow(QMainWindow):
         source = self.highlight_source()
         created = reused = already = off_source = 0
         blocked = 0
+        silent = 0        # 分析完一句语音都没有的：没人说话就是没互动，不排队
+        mute = 0          # 文件里根本没有音轨的：连语音都无从谈起，不排队
         for video in videos:
             if self._skip_because_done(video):
                 already += 1
@@ -2469,6 +3013,16 @@ class MainWindow(QMainWindow):
                 blocked += 1
                 self.append_log(f"[自动剪辑] {video.name} 上次判定是 {language} 语音，不再排队")
                 continue
+            # 先看有没有声音：没音轨的连分析都不用起（比语言预检还早一步）
+            if self._mute_video(vid, video):
+                mute += 1
+                self.append_log(f"[自动剪辑] {video.name} 没有音轨（没声音），不排队")
+                continue
+            # 分析过、但一句话都没识别出来的：没人说话就是没互动，排队也只会 failed
+            if self._silent_video(vid):
+                silent += 1
+                self.append_log(f"[自动剪辑] {video.name} 分析完没有一句语音（没互动），不排队")
+                continue
             if not self._source_allows(vid, source):
                 off_source += 1
                 continue
@@ -2478,7 +3032,9 @@ class MainWindow(QMainWindow):
                     provider=str(self.cfg.bridge.get("provider") or "") or None,
                     model=str(self.cfg.bridge.get("api_model") or "") or None,
                     prompt_version=str(self.cfg.bridge.get("task_type") or "") or None,
-                    max_attempts=1)
+                    # 回答里没有 JSON（生成被掐断、AI 自己没给）时退回队列，让扩展把
+                    # 这条任务的 txt 重新挂上去再问一遍；两轮都不给才定格 failed。
+                    max_attempts=max(1, int(self.cfg.bridge.get("max_attempts", 2) or 2)))
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[自动剪辑] {video.name} 入队失败：{exc}")
                 continue
@@ -2491,7 +3047,54 @@ class MainWindow(QMainWindow):
             self.append_log(f"[自动剪辑] 按「{label}」筛掉 {off_source} 个视频，没给它们排队")
         if blocked:
             self.append_log(f"[自动剪辑] 语言不符被标记过的视频有 {blocked} 个，一个都没排队")
+        if silent:
+            self.append_log(f"[自动剪辑] 一句语音都没有的视频有 {silent} 个（没人说话 = 没互动），"
+                            f"一个都没排队")
+        if mute:
+            self.append_log(f"[自动剪辑] 没有音轨的视频有 {mute} 个（没声音），一个都没排队；"
+                            f"AI 面板的「清空无声音视频」可以随时把它们清掉")
         return created, reused, already, off_source
+
+    def _mute_video(self, vid: int, video: Path) -> bool:
+        """这个视频文件里**有没有音轨**（没音轨 → True，不排队）。
+
+        结论缓存在 `videos.no_audio`：一个文件只探一次，之后每一轮自动剪辑都查库。
+        没探过就当场探一次（只开容器读流清单，不解码，比语言预检便宜得多）。
+        探不出来一律当「有声音」，宁可多跑也不漏跑——这一列还兼着
+        AI 面板「清空无声音视频」的判据，误判会真删文件。
+        """
+        db = self._db()
+        if db is None:
+            return False
+        try:
+            known = db_repo.no_audio_flag(db, vid)
+            if known is not None:
+                return known
+            from ..video_io import has_audio_track  # noqa: PLC0415 - 只有排队时用得上
+
+            missing = not has_audio_track(video)
+            db_repo.set_no_audio(db, vid, missing)
+        except Exception as exc:  # noqa: BLE001 - 探不出来就放过（宁可多跑，不要漏跑）
+            self.append_log(f"[自动剪辑] 查不出有没有音轨（当成有）：{exc}")
+            return False
+        return missing
+
+
+    def _silent_video(self, vid: int) -> bool:
+        """这个视频分析完了却**一句话都没识别出来**吗（没分析过 → False，别乱判）。
+
+        一句话都没有 = 片子里没人说话 = 没互动，这种素材：
+        程序也算不出区间（`plan_from_span` 全靠句子边界吸附，没句子就没边界），
+        发给 AI 白花一次调用，回来的清单也只能记 failed。所以直接不跑。
+        """
+        db = self._db()
+        if db is None:
+            return False
+        try:
+            return db_repo.speech_lines(db, vid) == 0
+        except Exception as exc:  # noqa: BLE001 - 查不出来就放过（宁可多跑，不要漏跑）
+            self.append_log(f"[自动剪辑] 查不出有没有语音（当成有）：{exc}")
+            return False
 
     def _language_blocked(self, vid: int) -> str | None:
         """这个视频上次被语言拦下过吗（`videos.blocked_language`）。查不出来就当没拦。"""
@@ -2578,6 +3181,18 @@ class MainWindow(QMainWindow):
                 self._settle_auto_task("cancelled", f"语言 {language} 不在允许范围")
                 self._auto_video = None
                 continue
+            # 排进来之后才探出没有音轨的：没声音就没剧本，判 cancelled，不重试
+            if self._mute_video(int(task["video_id"]), video):
+                self.append_log(f"[自动剪辑] {video.name} 没有音轨（没声音），跳过")
+                self._settle_auto_task("cancelled", "没有音轨，没声音")
+                self._auto_video = None
+                continue
+            # 排进来之后才发现一句语音都没有的：没人说话 = 没互动，判 cancelled，不重试
+            if self._silent_video(int(task["video_id"])):
+                self.append_log(f"[自动剪辑] {video.name} 一句语音都没有（没人说话 = 没互动），跳过")
+                self._settle_auto_task("cancelled", "没有语音，算不出区间")
+                self._auto_video = None
+                continue
             # ① 已经干完的：直接跳过，不重新分析、不重新问 AI、不重新剪
             #    （面板上取消「不跑成品」就不跳，已有成品也重跑一遍）
             if self._skip_because_done(video):
@@ -2592,7 +3207,16 @@ class MainWindow(QMainWindow):
         # 新的一条任务：上一条的方案 / PRM 记账清掉，免得张冠李戴
         self._last_asset_id = None
         self._last_prm_id = None
+        self._auto_rendered_assets = set()
         self.load_video(video)
+
+        # ①之半 只解析视频：这一串跟高光 JSON 一点关系都没有，库里有没有 JSON 都不管，
+        #        直接本地分析，分析结果进库就算干完（在 on_worker_done 里收尾）
+        if self._auto_job == "analyze":
+            self.append_log(f"[自动剪辑] {video.stem} 只解析视频：只跑本地分析，不问 AI、不剪辑")
+            self._set_auto_step(video.stem, "分析")
+            self.on_analyze(False)
+            return
 
         # ② 库里已经有能直接开剪的高光 JSON：三种模式都不许再问 AI
         reusable = self._reusable_highlight_json(video)
@@ -2872,14 +3496,24 @@ class MainWindow(QMainWindow):
             self.append_log(f"[数据库] 对账失败，状态可能不准：{exc}")
 
     def _auto_product_ready(self) -> bool:
-        """数据库里确认这条任务真的干完了，才允许把任务算 completed。
+        """数据库里确认这一次渲染真的落地了，才允许往下走。
 
-        剪辑成片 / 高光 JSON 剪辑看有效成品 final_video，收取高光 JSON 看库里有没有
-        可复用的高光 JSON。渲染线程说"成了"不算数——库里没有就是没完成。
+        剪辑成片 / 高光 JSON 剪辑看库里有没有还在盘上的有效成品 final_video——
+        注意这里**只问「这一次出了成品没有」**，不问「所有 JSON 都剪完没有」
+        （那是 `_auto_chain_done` 的事，剩下的由 `_render_next_asset` 接着剪）。
+        收取高光 JSON 看库里有没有可复用的高光 JSON，只解析视频看有没有跑完的分析。
+        渲染线程说"成了"不算数——库里没有就是没完成。
         """
-        if self._auto_video is None:
+        video = self._auto_video
+        if video is None:
             return False
-        return self._auto_chain_done(self._auto_video)
+        if self._auto_job in ("full", "script"):
+            db = self._db()
+            vid = self._db_video_id(video)
+            if db is None or vid is None:
+                return False
+            return db_repo.artifact_path(db, vid, "final_video") is not None
+        return self._auto_chain_done(video)
 
     def _register_final_video(self, output: str) -> None:
         """成品刚出炉：登记 final_video，并把这个视频的 clip 标成已渲染。
@@ -2905,7 +3539,19 @@ class MainWindow(QMainWindow):
         ranges = list(getattr(self.clip_worker, "cut_ranges", None) or ())
         specs = list(getattr(self.clip_worker, "cut_specs", None) or ())
         try:
-            pending = [c for c in db_repo.get_clips(db, vid) if c["status"] != "rendered"]
+            # 先把指向这个路径的旧渲染记录退回待剪：同名重剪（删掉成品再剪、时长又一样）
+            # 时，旧记录会假装成这次的渲染区间，血缘里就是「⚠ 不一致」
+            stale = db_assets.detach_product_clips(db, vid, target)
+            if stale:
+                self.append_log(f"[数据库] 这个成品名下 {stale} 条旧渲染记录已退回待剪")
+            # 只认**这次那份 JSON** 的 planned 行。一个视频有好几份 JSON 时，AI 落库时
+            # 每份都建了自己的 planned 行；以前这里把「这个视频所有没渲染的 planned 行」
+            # 都标成 rendered 并写上这次的成品路径，于是别的 JSON 的区间被这个成品认领了
+            # ——血缘里的「实际渲染」就成了另一份 JSON 的区间（⚠ 不一致）。
+            # 对齐靠 ai_result_id：planned 行和高光方案都记着自己是哪次 AI 结果来的
+            result_id = self._asset_result_id(db)
+            pending = [c for c in db_repo.get_clips(db, vid)
+                       if c["status"] != "rendered" and c["ai_result_id"] == result_id]
             if not pending:
                 # 只用 JSON 剪的那条路：没有 planned 行，按实际剪出来的补建
                 made = db_assets.record_clips(db, vid, target, specs)
@@ -2922,15 +3568,45 @@ class MainWindow(QMainWindow):
                 times = {}
                 if ranges:
                     start, end = ranges[index]
-                    times = {"start": start, "end": end, "duration": round(end - start, 3)}
+                    # 时长取 `cut_specs` 里那个数：静音剪过的话它是**实际剪进去的**长度。
+                    # 这里以前直接写 `end - start`，把剪掉的静音又算回去了 —— 库里的
+                    # 时长于是比盘上的成品长，「提取数据」按它算的空隙坐标整体偏掉，
+                    # 而且从数据上看不出来（`start` / `end` 都对，只有 duration 撒谎）
+                    made = specs[index] if index < len(specs) else {}
+                    seconds = ai_protocol.num(made.get("duration"))
+                    times = {"start": start, "end": end,
+                             "duration": (seconds if seconds is not None
+                                          else round(end - start, 3))}
                 db_repo.update_clip(db, int(clip["id"]), status="rendered",
                                     output_path=target, **times)
+
             if ranges:
                 start, end = ranges[0]
                 self.append_log(f"[数据库] 实际剪辑区间已回写：{start:.2f} → {end:.2f}"
                                 + (f"（共 {len(ranges)} 段）" if len(ranges) > 1 else ""))
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[数据库] 标记片段已渲染失败：{exc}")
+
+    def _asset_result_id(self, db) -> int | None:
+        """这次开剪那份高光 JSON 是哪次 AI 结果来的（`highlight_assets.ai_result_id`）。
+
+        planned 片段和高光方案都记着同一个 `ai_result_id`，所以拿它就能把「这次要回写的
+        片段」和别的 JSON 的片段分开。手动导入的方案没有这个 id（None），那种情况下
+        库里也不会有它的 planned 行，成品的片段会由 `record_clips` 按实际区间补建。
+        """
+        asset_id = getattr(self, "_last_asset_id", None)
+        if asset_id is None:
+            return None
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            row = db_assets.get_asset(db, int(asset_id))
+        except Exception as exc:  # noqa: BLE001 - 查不出来就当没有，走补建那条路
+            self.append_log(f"[数据库] 方案 #{asset_id} 的 AI 结果查不出来：{exc}")
+            return None
+        if row is None or row["ai_result_id"] is None:
+            return None
+        return int(row["ai_result_id"])
 
     def _link_final_video(self, artifact_id: int | None) -> None:
         """把成品挂回这次用的高光方案和 PRM。
@@ -2961,50 +3637,246 @@ class MainWindow(QMainWindow):
             parts.append(f"PRM #{prm_id}")
         self.append_log("[高光方案] 成品来源已记账：" + " + ".join(parts))
 
-    def _save_ai_result(self, parsed: dict, raw_text: str = "") -> None:
+    def _video_by_name(self, name: str) -> Path | None:
+        """文件名 → 盘上的路径（走库里那张表）。名字空的、库里没有、文件没了都返回 None。
+
+        名字是清单 / 方案**自带**的身份（`video` 字段，照抄剧本第一行）。名字在库里换成
+        路径，所以视频改过名 / 搬过位置也找得到。找不到就说清楚缺什么，别悄悄换成当前
+        视频算出一堆别人的区间。
+        """
+        name = str(name or "").strip()
+        if not name:
+            return None
+        db = self._db()
+        row = db_repo.get_video_by_name(db, name) if db is not None else None
+        if row is None:
+            self.append_log(f"[视频归属] JSON 里写的是 {name}，库里没有这个视频（先分析一遍），"
+                            f"改按主界面当前视频算")
+            return None
+        path = Path(str(row["file_path"] or ""))
+        if not path.is_file():
+            self.append_log(f"[视频归属] JSON 里写的是 {name}，库里记的路径已经不在盘上："
+                            f"{path}，改按主界面当前视频算")
+            return None
+        return path
+
+    def _video_of_source(self, source: Any) -> Path | None:
+        """一份回复（方案 JSON 或结果清单）自己说它是哪个视频的，认不出就 None。
+
+        先看方案的 `video`，没有再看清单行的 `video`。两边都是同一个字段名 ——
+        剧本第一行那个文件名，AI 照抄。有它在，一份 JSON 隔几天再导也不会记错人。
+        """
+        names = [str(one.get("video") or "").strip()
+                 for one in ai_protocol.split_payloads(source)]
+        if not any(names):
+            names = [from_moments.video_of_row(one) for one in from_moments.rows_from_text(
+                source if isinstance(source, str) else "")]
+        name = next((one for one in names if one), "")
+        return self._video_by_name(Path(name.replace("\\", "/")).name if name else "")
+
+    def _video_for_rows(self, rows: list[dict]) -> Path | None:
+        """清单里指名的那个视频（行里没写文件名、或者库里找不到就返回 None）。"""
+        name = next((from_moments.video_of_row(one) for one in rows
+                     if from_moments.video_of_row(one)), "")
+        found = self._video_by_name(name)
+        if found is not None:
+            self.append_log(f"[结果清单] 按清单里写的视频算：{name}")
+        return found
+
+    def _moments_video(self) -> Path | None:
+        """结果清单该按哪个视频算区间。
+
+        清单**故意不带文件名** —— 一行只有两个时间点，区间必须拿这个视频的逐词时间戳
+        现算，所以文件名由程序补，不让 AI 写（它写了也可能写错）。这里就是「补」的地方。
+
+        优先级：自动队列正在处理的 → 主界面当前打开的 → 上一次记账的那份方案挂的 →
+        库里**还没拿到结果**的那条 AI 任务挂的。最后一条是关键兜底：清单就是刚才拿某个
+        视频的剧本问出来的，问的时候库里记了 video_id，所以哪怕主界面什么都没选也能对上人。
+
+        兜底**只认没跑完的任务**（`db_repo.video_of_open_task`），不拿「最近一条任务」凑数：
+        那条很可能是别的视频早就跑完的，按它算区间会剪出一条张冠李戴的成品，而且看起来
+        还像成功了 —— 那比报错难查得多。查询一律走 db 层，界面里不写 SQL。
+        """
+        for candidate in (self._auto_video, self.video_path):
+            if candidate is not None and Path(candidate).is_file():
+                return Path(candidate)
+        db = self._db()
+        if db is None:
+            return None
+        row = None
+        if self._last_asset_id is not None:
+            row = db_repo.video_of_asset(db, int(self._last_asset_id))
+        if row is None:
+            row = db_repo.video_of_open_task(db)
+            if row is not None:
+                self.append_log(f"[结果清单] 主界面没选视频，按库里那条还没跑完的 AI 任务算："
+                                f"{Path(str(row['file_path'] or '')).name}"
+                                f"（不是这个就先在主界面选中正确的视频）")
+        if row is None:
+            return None
+        path = Path(str(row["file_path"] or ""))
+        return path if path.is_file() else None
+
+    def _payloads_from_reply(self, *sources: Any, vid: int | None = None) -> list[dict]:
+
+        """AI 回复 → 一份份高光方案。老协议照旧，**清单格式也认**。
+
+        两种回复形状：
+
+          * 完整方案（老 / 新协议，带 `clip` 或 `segments`）—— 走协议层，行为一个字不变；
+          * **结果清单**（一行只有 `setup_at` / `result_at` 两个时间点）—— 区间不在回复里，
+            得拿库里的逐词时间戳现算，所以这一条路必须知道是哪个视频。
+
+        清单那条路和 `assets --import-moments` **同一个实现**（`from_moments`），
+        所以界面剪出来的和命令行导入的是同一个区间，不存在两套算法。
+
+        协议层拆得出来就不再试清单 —— 老回复优先，避免把带 `clip` 的方案误当清单。
+        """
+        proto: list[dict] = []
+        for source in sources:
+            found = ai_protocol.split_payloads(source)
+            # `split_payloads` 对 dict 很宽松：连 `clip` / `segments` 都没有的也照样放行。
+            # 结果清单（一行只有两个时间点）和 AI 的报错回复都属于这一类，所以这里再确认
+            # 一次「真有片段」—— 少了这一步，清单会被当成"已经是方案"直接放过去，
+            # 入库一堆没有区间的空壳，而且永远走不到下面那条清单分支。
+            if found and all(ai_protocol.clips(one) for one in found):
+                return found
+            proto = proto or found
+
+        rows: list[dict] = []
+        for source in sources:
+            rows = from_moments.rows_from_text(source if isinstance(source, str)
+                                              else json.dumps(source, ensure_ascii=False)
+                                              if source else "")
+            if rows:
+                break
+        if not rows:
+            return proto
+        # 清单每一行都带着剧本第一行那个文件名，**以它为准**：一份清单丢到哪儿都认得出
+        # 自己属于谁，不靠界面上刚好选中了谁去猜。行里没写才退回当前视频那套兜底
+        named = self._video_for_rows(rows)
+        if named is not None:
+            video, vid = named, None      # 清单指名的视频，vid 重新查（可能不是当前那个）
+        else:
+            video = self._moments_video()
+        if video is None:
+            self.append_log("[AI 对接] 回复是结果清单，但既没写文件名，主界面也没选视频、"
+                            "库里也没有没跑完的 AI 任务，算不出区间")
+            return proto
+        db = self._db()
+        if db is None:
+            return proto
+        if vid is None:
+            vid = self._db_video_id(video, create=True)
+        if vid is None:
+            return proto
+        segments = clip_engine.segments_for_video(db, int(vid))
+        if not segments:
+            self.append_log(f"[AI 对接] 回复是结果清单，但 {video.name} 库里没有逐词时间戳，"
+                            "先跑一遍分析")
+            return proto
+        # 时长要给下去：整段几乎没语音的视频靠它把反推出来的区间夹在片子里
+        span_row = db_repo.get_video(db, int(vid))
+        seconds = (float(span_row["duration"])
+                   if span_row is not None and span_row["duration"] else None)
+        made, notes = from_moments.payloads_from_rows(segments, rows, video_name=video.name,
+                                                     duration=seconds)
+        for line in notes:
+            self.append_log(f"[结果清单] {line}")
+        if not made:
+            self.append_log(f"[AI 对接] 清单 {len(rows)} 行一条都没算出合法区间")
+            return proto
+        self.append_log(f"[结果清单] {len(rows)} 行 → 算出 {len(made)} 份方案")
+        # 升级成新协议再交出去：后面入库、渲染、提取全都按新协议那一套走
+        return [ai_protocol.payload_of(one[0]) for one in made]
+
+    def _save_ai_result(self, parsed: Any, raw_text: str = "") -> list[int | None]:
         """AI 回的 JSON 进库，挂在当前这条任务下面（ai_results.task_id 指回 ai_tasks.id）。
 
         手工单发（没有队列任务）时 task_id 是空的，结果照样留档，不会挂到别人身上；
         提示词指纹这三列两条路都写，所以手工发的结果也能回答用的是哪一版提示词。
+
+        `parsed` 可以是一份 dict（最常见，行为和以前一个字都没差），也可以是一串
+        list / JSONL 文本——那就是「AI 一口气回了好几份高光方案」。这里一律先用
+        `ai_protocol.split_payloads` 归一成一份份 dict，然后**每份各走一遍完整流程**：
+        自己一行 ai_results、自己的 clips、自己一个高光方案（名字由库自动排下去，
+        方案 A/B/C…，谁也不覆盖谁）。
+        返回每一份登记出来的方案 id，顺序跟拆出来的一致；抠不出片段、或者这一份存砸了
+        的位置是 None（调用方要按下标取，别当成紧凑列表）。
         """
-        video = self._auto_video or self.video_path
+        # 方案 / 清单里那个 `video` 就是它的身份：库里认得这个名字就以它为准，免得把
+        # A 视频的方案记到 B 视频名下（清单可以隔几天再导，界面上选的早就不是它了）
+        video = self._video_of_source(parsed) or self._moments_video()
         if video is None:
-            return
+            return []
         db = self._db()
         if db is None:
-            return
+            return []
         vid = self._db_video_id(video, create=True)
         if vid is None:
-            return
+            return []
+        payloads = self._payloads_from_reply(parsed, vid=vid)
+        if not payloads:
+            self.append_log("[数据库] 这次回复里一份 JSON 都拆不出来，没东西可存")
+            return []
         prompt = self._last_prompt or {}
-        try:
-            clips = db_repo.clips_from_payload(parsed)
-            # 抠不出片段的回复（AI 回了 {"error": ...} 这种）不能算「已校验」，
-            # 否则以后查库分不出哪份 JSON 真的能剪。和 importer 那条路保持一致。
-            result_id = db_repo.save_ai_result(
-                db, vid, task_id=self._auto_task_id, raw_response=raw_text or None,
-                json_data=parsed, candidate_count=len(clips) or None,
-                winner_score=clips[0]["score"] if clips else None,
-                validated=bool(clips),
-                validation_error=None if clips else "JSON 里抠不出可用片段",
-                prompt_hash=prompt.get("prompt_hash"), prompt_path=prompt.get("prompt_path"),
-                prompt_size=prompt.get("prompt_size"))
-            for spec in clips:
-                db_repo.create_clip(db, vid, spec, ai_result_id=result_id)
-            self._register_highlight_asset(db, vid, parsed, result_id, bool(clips))
-        except Exception as exc:  # noqa: BLE001
-            self.append_log(f"[数据库] AI 结果存不进去：{exc}")
+        asset_ids: list[int | None] = []
+        for index, payload in enumerate(payloads, start=1):
+            # 多份的时候日志带上第几份，单份那条路文案保持原样，不多嘴
+            where = f"第 {index} 份 " if len(payloads) > 1 else ""
+            try:
+                clips = db_repo.clips_from_payload(payload)
+                # 抠不出片段的回复（AI 回了 {"error": ...} 这种）不能算「已校验」，
+                # 否则以后查库分不出哪份 JSON 真的能剪。和 importer 那条路保持一致。
+                # raw_response 每份都存同一段 AI 原话：这几份本来就是**同一次回复**拆出来的，
+                # 追溯时要能从任意一份回到原文，所以宁可重复存，也不留空。
+                result_id = db_repo.save_ai_result(
+                    db, vid, task_id=self._auto_task_id, raw_response=raw_text or None,
+                    json_data=payload, candidate_count=len(clips) or None,
+                    winner_score=clips[0]["score"] if clips else None,
+                    validated=bool(clips),
+                    validation_error=None if clips else "JSON 里抠不出可用片段",
+                    prompt_hash=prompt.get("prompt_hash"), prompt_path=prompt.get("prompt_path"),
+                    prompt_size=prompt.get("prompt_size"))
+                for spec in clips:
+                    db_repo.create_clip(db, vid, spec, ai_result_id=result_id)
+                asset_ids.append(
+                    self._register_highlight_asset(db, vid, payload, result_id, bool(clips)))
+            except Exception as exc:  # noqa: BLE001
+                # 一份砸了不许带累其余几份：这份记 None，接着存下一份
+                asset_ids.append(None)
+                self.append_log(f"[数据库] {where}AI 结果存不进去：{exc}")
+        usable = [aid for aid in asset_ids if aid is not None]
+        self._last_asset_ids = list(asset_ids)   # 这次拆出来的全部方案 id，日志/追溯用
+        # `_last_asset_id` 指**最后一份能剪的方案**：`_register_highlight_asset` 本来就是
+        # 一份份往下写、最后登记的那个留在这个字段里，这么定和改动前完全一致（单份路径
+        # 一个字都没变）；一份能剪的都没有才是 None，下游拿 None 的兜底逻辑照旧管用。
+        self._last_asset_id = usable[-1] if usable else None
+        if len(payloads) > 1:
+            names = []
+            for asset_id in usable:
+                try:
+                    row = db_assets.get_asset(db, int(asset_id))
+                except Exception:  # noqa: BLE001 - 只是拼日志，取不到名就用 id 顶上
+                    row = None
+                names.append(str(row["name"]) if row is not None else f"#{asset_id}")
+            tail = ("，已全部入库（" + " / ".join(names) + "）") if names \
+                else "，但一份能剪的都没有（都只留在 ai_results 里追溯）"
+            self.append_log(f"[高光方案] 这次 AI 回复拆出 {len(payloads)} 份 JSON{tail}")
+        return asset_ids
 
     def _register_highlight_asset(self, db, vid: int, parsed: dict,
-                                  result_id: int, usable: bool) -> None:
-        """把这份 AI JSON 登记成一个「高光方案」资产。
+                                  result_id: int, usable: bool) -> int | None:
+        """把这份 AI JSON 登记成一个「高光方案」资产。返回方案 id（没登记就是 None）。
 
         每次都是新的一行，旧方案一个字都不动（同一个视频可以有任意多份方案）。
+        一次 AI 回复可能拆出好几份 JSON，每份都单独调一次这儿登记成**独立方案**，
+        名字由库自动往下排（方案 A/B/C…），互不覆盖。
         抠不出片段的回复不登记成方案——那种 JSON 剪不出东西，留在 ai_results 里追溯就够了。
         """
         self._last_asset_id = None
         if not usable:
-            return
+            return None
         try:
             from ..bridge import providers  # noqa: PLC0415
             from ..db import assets as db_assets  # noqa: PLC0415
@@ -3024,13 +3896,16 @@ class MainWindow(QMainWindow):
             row = db_assets.get_asset(db, asset_id)
             self.append_log(f"[高光方案] 已登记 {row['name']}（{row['provider'] or '未知 AI'}"
                             f" / {row['model'] or '未知模型'}，{row['clip_count']} 个高光）")
+            return asset_id
         except Exception as exc:  # noqa: BLE001 - 登记失败不该影响剪辑
             self.append_log(f"[高光方案] 登记不进去（不影响本次剪辑）：{exc}")
+            return None
 
-    def render_asset(self, asset_id: int, prm_id: int | None = None) -> bool:
-        """只用库里这份高光方案剪一条成片：**不调用 AI**。数据管理界面点「按此方案剪」走这里。
+    def render_asset(self, asset_id: int) -> bool:
+        """只用库里这份高光 JSON 剪一条成片：**不调用 AI，也不牵扯 PRM**。
 
-        成品文件名带上方案名和 PRM 名，所以「一份 JSON 配不同 PRM」剪出来的几个成品能并存。
+        PRM 是问 AI 时用的提示词，渲染这一步压根不读它，所以这里既不选 PRM、
+        也不往成品上挂 `prm_id`。成品名带成片时长（`<视频名>_689.mp4` = 6.89 秒）。
         """
         db = self._db()
         if db is None:
@@ -3055,27 +3930,25 @@ class MainWindow(QMainWindow):
         if video is None or not video.is_file():
             QMessageBox.information(self, "高光方案", f"源视频不在盘上：{video}")
             return False
-        prm = db_assets.get_prm(db, int(prm_id)) if prm_id else self.selected_prm()
         self.load_video(video)
         self._auto_video = None          # 这是手动剪，不占自动队列的位置
         self._last_asset_id = int(asset["id"])
-        self._last_prm_id = int(prm["id"]) if prm is not None else None
-        suffix = f"_{asset['name']}" + (f"_{prm['name']}" if prm is not None else "")
+        self._last_prm_id = None         # 直剪不用 PRM，成品也不挂 PRM
         self.append_log(f"[高光 JSON] 按 高光 JSON #{asset['id']}（{asset['name']}）开剪"
-                        "（不调 AI）"
-                        + (f"，记 PRM {prm['name']}" if prm is not None else ""))
+                        "（不调 AI，不用 PRM）")
 
-        self.run_highlight(json.dumps(payload, ensure_ascii=False, indent=2),
-                           ai=True, name_suffix=suffix)
+        self.run_highlight(json.dumps(payload, ensure_ascii=False, indent=2), ai=True)
         return True
 
     def _asset_json_for_render(self, video: Path) -> str | None:
-        """库里有没有能直接开剪的高光方案。有就返回 JSON 文本（不会去问 AI）。
+        """库里有没有**还没出成品**的高光 JSON。有就返回 JSON 文本（不会去问 AI）。
 
+        自动剪辑是「一份 JSON 一个成品」：这里取 `assets_without_product` 的第一份
+        （旧的先剪），剪完一份 `_render_next_asset` 再来取下一份，直到全部出完。
+        软删的不算、抠不出片段的不算、已经有还在盘上的成品的不算。
         选「没有 JSON」时一律返回 None——那一轮就是要重新问 AI 的。
-        方案取当前方案（`is_current`），软删的不算、抠不出片段的不算。
-        顺手把 `_last_asset_id` / `_last_prm_id` 记上：成品出炉时靠它们记账，
-        所以同一份 JSON 换一版 PRM 再剪，两个成品的来源分得清。
+        顺手记下 `_last_asset_id`：成品出炉时靠它记账，所以每个成品都能反查是哪份
+        JSON 剪的。**这条路不碰 PRM**——没问 AI 就没用到提示词。
         """
         if self.highlight_source() == "missing":
             return None
@@ -3086,22 +3959,44 @@ class MainWindow(QMainWindow):
         try:
             from ..db import assets as db_assets  # noqa: PLC0415
 
-            row = db_assets.current_asset(db, vid)
-            if row is None or int(row["clip_count"] or 0) <= 0:
+            pending = [r for r in db_assets.assets_without_product(db, vid)
+                       if int(r["id"]) not in self._auto_rendered_assets]
+            if not pending:
                 return None
+            row = pending[0]
             payload = db_assets.loads(str(row["current_json"]))
             if not isinstance(payload, dict) or not db_repo.clips_from_payload(payload):
                 self.append_log(f"[高光方案] {row['name']} 里抠不出可用片段，还是走 AI")
                 return None
             self._last_asset_id = int(row["id"])
-            prm = self.selected_prm()
-            self._last_prm_id = int(prm["id"]) if prm is not None else None
-            self.append_log(f"[自动剪辑] 库里已有 {row['name']}（{row['clip_count']} 个高光），"
-                            "直接按它开剪，不调 AI")
+            self._last_prm_id = None
+            self._auto_rendered_assets.add(int(row["id"]))
+            self.append_log(f"[自动剪辑] 库里 {row['name']}（{row['clip_count']} 个高光）"
+                            f"还没出成品，直接按它开剪，不调 AI"
+                            + (f"；这个视频还有 {len(pending) - 1} 份 JSON 排在后面"
+                               if len(pending) > 1 else ""))
             return json.dumps(payload, ensure_ascii=False, indent=2)
         except Exception as exc:  # noqa: BLE001
             self.append_log(f"[高光方案] 现成方案取不出来（改走 AI）：{exc}")
             return None
+
+    def _render_next_asset(self) -> bool:
+        """同一个视频还有没出成品的高光 JSON，就接着剪下一份，返回有没有又起一次渲染。
+
+        「一份 JSON 一个成品」：一条任务负责把这个视频所有 JSON 都剪出来，中间不放手
+        （不 settle、不领下一条任务），所以队列里仍然是一个视频一条任务。
+        点了「停止」就不再往下剪，手上这条由 `_auto_finish(release=True)` 退回等待。
+        """
+        video = self._auto_video
+        if video is None or self._auto_stop or self._auto_job not in ("full", "script"):
+            return False
+        text = self._asset_json_for_render(video)
+        if text is None:
+            return False
+        self._last_highlight_json = text
+        self._set_auto_step(video.stem, "剪辑")
+        self.run_highlight(text, ai=True)
+        return True
 
     def _resume_existing_ai_json(self) -> str | None:
         """这条任务是不是已经问过 AI 了。是就返回可以直接开剪的 JSON 文本，否则 None。
@@ -3198,9 +4093,16 @@ class MainWindow(QMainWindow):
     def _auto_chain_done(self, video: Path) -> bool:
         """这个视频这一串算不算已经干完。**判据全在数据库。**
 
-        收取高光 JSON：库里有一份能直接开剪的高光 JSON 就算干完
-        （`reusable_json_videos`，跟队列决策同一个口径）。
-        剪辑成片 / 高光 JSON 剪辑：库里有还在盘上的有效成品 final_video 才算干完。
+        收取高光 JSON：两个条件都满足才算干完 —— 库里有一份能直接开剪的 AI 结果
+        （`reusable_json_videos`，跟队列决策同一个口径），**并且**至少还留着一份
+        没被软删的高光方案（`videos_with_assets`）。
+        少了后半条会有一个很难查的坑：在资产中心把收来的方案全删了（明摆着要重收一份），
+        队列却只看 `ai_results`，照旧说「都已经有成品，没活可干」——
+        用户删了东西却什么也没发生，只能去动「不跑成品」那个勾选框。
+        只解析视频：库里有一条**跑完的**分析记录就算干完（`latest_analysis` 默认
+        只认 status='completed'，所以拿到非 None 就是真跑完了）。成品、JSON 一概不看。
+        剪辑成片 / 高光 JSON 剪辑：**每一份高光 JSON 都出了成品**才算干完——
+        一份 JSON 一个成品，剩一份没剪就还没完（`assets_without_product`）。
         AI_输出目录里那份 `_脚本.json` 在不在一概不算——它只是导出文件。
         """
         db = self._db()
@@ -3208,8 +4110,30 @@ class MainWindow(QMainWindow):
         if db is None or vid is None:
             return False
         if self._auto_job == "collect":
-            return vid in db_repo.reusable_json_videos(db, [vid])
-        return db_repo.artifact_path(db, vid, "final_video") is not None
+            if vid not in db_repo.reusable_json_videos(db, [vid]):
+                return False
+            try:
+                from ..db import assets as db_assets  # noqa: PLC0415
+
+                return vid in db_assets.videos_with_assets(db, [vid])
+            except Exception as exc:  # noqa: BLE001 - 查不出来就按老口径（有结果即算完）
+                self.append_log(f"[自动剪辑] 查不出还留着几份方案（按已有 AI 结果算完）：{exc}")
+                return True
+        if self._auto_job == "analyze":
+            try:
+                return db_repo.latest_analysis(db, vid) is not None
+            except Exception as exc:  # noqa: BLE001 - 查不出来就当没干完，别把队列卡死
+                self.append_log(f"[自动剪辑] 查不出有没有分析结果（当成没干完）：{exc}")
+                return False
+        if db_repo.artifact_path(db, vid, "final_video") is None:
+            return False
+        try:
+            from ..db import assets as db_assets  # noqa: PLC0415
+
+            return not db_assets.assets_without_product(db, vid)
+        except Exception as exc:  # noqa: BLE001 - 查不出来就按「有成品即算完」的老口径
+            self.append_log(f"[自动剪辑] 查不出还有几份 JSON 没剪（按已有成品算完）：{exc}")
+            return True
 
     def _auto_done_file(self, video: Path) -> Path | None:
         """干完的那份成品文件路径。**只用于日志显示**，不参与任何判定（判定看 `_auto_chain_done`）。"""
@@ -3230,6 +4154,13 @@ class MainWindow(QMainWindow):
         if not ready and not self.speech and not self.timeline:
             self.append_log("[自动剪辑] 库里和内存里都没有分析结果，跳过这个")
             self._auto_advance("failed", "分析完了没读到结果")
+            return
+        # 刚跑完的分析一句语音都没有：没人说话 = 没互动，不发 AI（发了也算不出区间）
+        vid = self._db_video_id(self._auto_video)
+        if vid is not None and self._silent_video(int(vid)):
+            self.append_log(f"[自动剪辑] {self._auto_video.name} 分析完没有一句语音"
+                            f"（没人说话 = 没互动），不发 AI")
+            self._auto_advance("cancelled", "没有语音，算不出区间")
             return
         prompts = self.resolve_prompt_files()
         if not prompts:
@@ -3362,25 +4293,43 @@ class MainWindow(QMainWindow):
         self.refresh_bridge_label()
 
     def on_bridge_result(self, info: dict) -> None:
-        """AI 回来了：解析出 JSON 就直接按它剪，解析不出只记日志不猜。"""
+        """AI 回来了：解析出 JSON 就直接按它剪，解析不出只记日志不猜。
+
+        向下兼容：回一份 JSON 照旧；回多份（数组 / JSONL / 挨着的几个 {...}）
+        就**全都入库**（各存一行、方案名自动排开，谁也不覆盖谁），
+        剪辑用第一份抠得出片段的。"""
         self.clean_bridge_temp()
-        parsed = info.get("json")
-        if not isinstance(parsed, dict):
+        raw_text = str(info.get("text") or "")
+        # 拆成一份份：**优先从 AI 原文拆**——扩展（ai-task.js）和 API 那条路预先抠好的
+        # `json` 字段都只给了第一个配平对象，一口气回好几份时剩下的全在原文里，
+        # 先信 json 字段会被「只拆出 1 份」短路掉。原文一份都拆不出来才退回 json 字段。
+        payloads = self._payloads_from_reply(raw_text, info.get("json"))
+        if not payloads:
             reason = info.get("error") or "回答里没有可解析的 JSON"
             self.append_log(f"[AI 对接] 任务失败：{reason}")
-            text = str(info.get("text") or "")
-            if text:
-                self.append_log(f"[AI 对接] AI 原文前 200 字：{text[:200]}")
+            if raw_text:
+                self.append_log(f"[AI 对接] AI 原文前 200 字：{raw_text[:200]}")
             if self.auto_running():  # 批量里不弹窗拦着，记一笔接着下一个
                 self._auto_advance("failed", f"没拿到可用 JSON：{reason}")
                 return
             QMessageBox.warning(self, "AI 对接", f"没拿到可用 JSON：{reason}")
             return
-        self._last_highlight_json = json.dumps(parsed, ensure_ascii=False, indent=2)
-        clip = parsed.get("clip") if isinstance(parsed.get("clip"), dict) else parsed
-        self.append_log(f"[AI 对接] 收到 JSON：clip.start={clip.get('start')} "
-                        f"clip.end={clip.get('end')}")
-        self._save_ai_result(parsed, str(info.get("text") or ""))
+        # 全都入库：`_save_ai_result` 一份份存，返回的方案 id 按下标和 payloads 对得上
+        asset_ids = self._save_ai_result(payloads, raw_text)
+        usable = next((i for i, p in enumerate(payloads)
+                       if db_repo.clips_from_payload(p)), None)
+        parsed = payloads[usable if usable is not None else 0]
+        if usable is not None:
+            # 成品血缘要挂在真正开剪的那份方案上，这里把记账的 id 指过去
+            if usable < len(asset_ids) and asset_ids[usable] is not None:
+                self._last_asset_id = int(asset_ids[usable])
+                # 这份已经交给渲染了，别在 _render_next_asset 里又被挑一次
+                self._auto_rendered_assets.add(int(asset_ids[usable]))
+            self._last_highlight_json = json.dumps(parsed, ensure_ascii=False, indent=2)
+        first = (ai_protocol.raw_segments(parsed) or [{}])[0]
+        extra = f"（共 {len(payloads)} 份，全部入库）" if len(payloads) > 1 else ""
+        self.append_log(f"[AI 对接] 收到 JSON：segments[0].sa={first.get('sa')} "
+                        f"end={first.get('end')} dst={first.get('dst')}{extra}")
         idle = ((self.clip_worker is None or not self.clip_worker.isRunning())
                 and (self.worker is None or not self.worker.isRunning()))
         if self.auto_running():
@@ -3394,7 +4343,7 @@ class MainWindow(QMainWindow):
                     self._auto_advance("failed", "高光 JSON 没能入库（抠不出可用片段）")
                 return
             # 是 dict 还不够：抠不出片段的 JSON 剪不出东西，绝不让它进"剪辑中"
-            if not db_repo.clips_from_payload(parsed):
+            if usable is None:
                 self.append_log("[自动剪辑] AI 的 JSON 里抠不出可用片段，这条不开剪")
                 self._auto_advance("failed", "AI JSON 里没有可用片段")
                 return
@@ -3406,9 +4355,11 @@ class MainWindow(QMainWindow):
             return
 
         if self.cfg.bridge.get("auto_clip", True) and idle:
-
-            self.append_log("[AI 对接] 直接按这份 JSON 开始剪辑（bridge.auto_clip）")
-            self.run_highlight(self._last_highlight_json, ai=True)
+            # 主界面这条手动流程（分析 → 发 AI → 回填 → 自动剪）落**主界面的导出目录**，
+            # 不碰 AI_输出目录：那一栏只归 AI 面板的自动剪辑队列用
+            self.append_log("[AI 对接] 直接按这份 JSON 开始剪辑（bridge.auto_clip），"
+                            "成品落主界面的导出目录")
+            self.run_highlight(self._last_highlight_json)
 
             return
         self.statusBar().showMessage("AI 结果已收到，剪辑高光对话框已带上 JSON", 10000)
@@ -3418,27 +4369,43 @@ class MainWindow(QMainWindow):
 
     def on_highlight_done(self, ok: bool, message: str) -> None:
         self.btn_highlight.setEnabled(True)
-        if ok:
+        skipped = ok and not message      # 空路径 = 同名成品已在盘上，这一份跳过了
+        if skipped:
+            self.set_progress(1.0, "100%")
+            self.lbl_stage.setText("跳过")
+            self.statusBar().showMessage("同名成品已经在盘上，这一份跳过", 10000)
+            self.append_log("[剪辑高光] 同名成品已经在盘上，这一份跳过（没登记、没覆盖）")
+        elif ok:
             self.set_progress(1.0, "100%")
             self.lbl_stage.setText("完成")
 
             self.statusBar().showMessage(f"高光片段已生成：{message}", 10000)
             self.append_log(f"[剪辑高光] 已生成 {message}")
+            # 成品挂在**实际用的那一版** JSON 上：加减秒数派生出新版本时，血缘要指新的那条
+            used = getattr(self.clip_worker, "asset_id_used", None)
+            if used is not None:
+                self._last_asset_id = int(used)
             self._register_final_video(message)
         else:
             self.lbl_stage.setText("失败")
             self.append_log(f"[剪辑高光] 失败：{message}")
             if not self.auto_running():
                 QMessageBox.warning(self, "剪辑高光失败", message)
+        # 面板的表跟成品走：手动剪、资产中心直剪也要刷（以前只在跑批时刷，手动出的
+        # 成品进了库，面板那一行还停在「—」）
+        if self.ai_panel is not None:
+            self.ai_panel.refresh_tasks()
         if self.auto_running():
-            if self.ai_panel is not None:
-                self.ai_panel.refresh_tasks()
             # 剪辑砸了就是砸了；就算渲染线程说成了，成品没登记进库也不算完成
             if not ok:
                 self._auto_advance("failed", f"剪辑失败：{message}")
                 return
-            if self._auto_product_ready() is False:
+            # 同名跳过：这一份不算失败，也不用查成品落地了，直接看还有没有别的 JSON 要剪
+            if not skipped and self._auto_product_ready() is False:
                 self._auto_advance("failed", f"渲染说成了但成品没落地/没登记：{message}")
+                return
+            # 一份 JSON 一个成品：这个视频还有没剪的 JSON 就接着剪，不放手这条任务
+            if self._render_next_asset():
                 return
             self._auto_advance("completed")
 
@@ -3669,11 +4636,15 @@ class MainWindow(QMainWindow):
                 self.load_results()
                 if label == "分析":
                     self._drop_preview_audio()
-                    # 顺手扫一遍片尾红屏：是合并视频就记下素材分界，导出时自动按素材分段
-                    self.pieces_spans(force=True)
                 if self._auto_video is not None and label == "分析":
-                    # 自动剪辑那一串：分析完就生成 <视频名>.txt 接着发 AI
-                    self._auto_after_analyze()
+                    if self._auto_job == "analyze":
+                        # 只解析视频：分析进库这一条就到头了，绝不生成剧本、也绝不发 AI
+                        self.append_log(f"[自动剪辑] {self._auto_video.stem} 分析结果已入库，"
+                                        "只解析视频这一串到此为止")
+                        self._auto_advance("completed")
+                    else:
+                        # 自动剪辑那一串：分析完就生成 <视频名>.txt 接着发 AI
+                        self._auto_after_analyze()
                 # 「自动」勾着就顺手把文本发给 AI，回来的 JSON 再按 auto_clip 开剪
                 elif label == "分析" and self.chk_auto_ai.isChecked():
                     self.append_log("[自动] 分析完了，直接发给 AI")
@@ -3723,12 +4694,28 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ 声音
     def _drop_preview_audio(self) -> None:
-        """开了「分析完就删预览音轨」就把这个视频的 wav 删掉，cache 里只剩 json。"""
+        """开了「分析完就删预览音轨」就把这个视频的 wav 删掉，cache 里只剩 json。
+
+        **正在用声音的视频先不删**：分析刚完就是最想点着句子听声音的时候，删掉的话
+        每点一句都报「音轨切分失败」。记在 `_pending_audio_drop` 里，切走这个视频
+        或者退出时再清。
+        """
         if not self.cfg.runtime.get("drop_preview_audio", False) or self.video_path is None:
+            return
+        if self.chk_sound.isChecked() or self.player.audio_available():
+            self._pending_audio_drop = self.video_path
+            self.append_log("[缓存] 预览音轨先留着（这个视频还在用声音），切走时再清")
+            return
+        self._clear_preview_audio(self.video_path)
+
+    def _clear_preview_audio(self, video: Path | None) -> None:
+        """真删某个视频的预览音轨（`drop_preview_audio` 开着才会走到这儿）。"""
+        if video is None:
             return
         from .. import cache as cache_mod  # noqa: PLC0415
 
-        result = cache_mod.drop_preview_audio(self.cfg, self.video_path)
+        self._pending_audio_drop = None
+        result = cache_mod.drop_preview_audio(self.cfg, video)
         if result["removed"]:
             self.append_log(f"[缓存] 删掉预览音轨，腾出 {result['freed_text']}")
 
@@ -3773,9 +4760,20 @@ class MainWindow(QMainWindow):
         self.chk_sound.setChecked(False)
         self.chk_sound.blockSignals(False)
         self.append_log(f"[声音] 播放失败：{message}")
+        # 预览音轨被缓存清理删了：自动重新解一次（只试一次，免得来回打转）
+        if "预览音轨已被清理" in message and self.video_path is not None \
+                and not self._audio_redone:
+            self._audio_redone = True
+            self.player.set_audio_file(None)
+            self.chk_sound.blockSignals(True)
+            self.chk_sound.setChecked(True)
+            self.chk_sound.blockSignals(False)
+            self.append_log("[声音] 预览音轨不在了，重新从视频里解一次")
+            self.prepare_audio()
 
     def closeEvent(self, event) -> None:  # noqa: N802
         self.save_settings()  # 退出时把界面参数存下来，下次启动自动加载
+        self._clear_preview_audio(self._pending_audio_drop)   # 欠着的音轨清理补上
         self.stop_bridge()
         # 手上这条自动剪辑任务退回队列，别留个 processing 孤儿挡着下次入队
         self._release_auto_task_on_exit()
@@ -4124,10 +5122,8 @@ class MainWindow(QMainWindow):
         lang = self.export_language()
         w = txt_words(lang)
         suffix = f"_{w['translated_file']}" if self.show_translated else ""
-        # 合并导出遇到"高光成品拼起来的合并视频"就自动升级成按素材分段（分界见 pieces_spans）
-        pieces = self.pieces_spans() if kind == "merged" else []
         kind_word = {"speech": w["speech_file"], "events": w["events_file"],
-                     "merged": w["pieces_file"] if pieces else w["merged_file"]}[kind]
+                     "merged": w["merged_file"]}[kind]
         srt_ok = kind in ("speech", "events")
         ext = ".srt" if srt_ok else ".txt"
         filters = "字幕文件 (*.srt);;文本文件 (*.txt)" if srt_ok else "文本文件 (*.txt)"
@@ -4144,14 +5140,6 @@ class MainWindow(QMainWindow):
             elif kind == "events":
                 count = write_events_txt(path, self.video_path.name, self._events_for_export(),
                                         self.show_translated, lang)
-            elif pieces:
-                # 动作轨/表情轨来自 timeline.json；老结果里没有就让导出层从事件现算动作轨
-                count = write_grouped_merged_txt(
-                    path, self.video_path.name, pieces, self.speech,
-                    self._events_for_export(), self.show_translated, lang,
-                    actions=self.timeline_doc.get("action_track"),
-                    emotions=self.timeline_doc.get("expression_track"),
-                    duration=float(self.timeline_doc.get("duration") or 0.0))
             else:
                 # 动作轨/表情轨来自 timeline.json；老结果里没有就让导出层从事件现算动作轨
                 count = write_merged_txt(path, self.video_path.name, self.speech,
@@ -4162,65 +5150,9 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "导出失败", f"{type(exc).__name__}: {exc}")
             return
-        note = f"，按 {len(pieces)} 段素材分段" if pieces else ""
-        self.append_log(f"[导出] {path}（{count} 条{note}）")
+        self.append_log(f"[导出] {path}（{count} 条）")
         self.statusBar().showMessage(f"已导出 {count} 条到 {path.name}")
         self.remember_export_dir(path)
-
-    # ------------------------------------------------------------- 合并素材分界
-    def _pieces_file(self) -> Path | None:
-        """素材分界缓存文件：跟分析结果放一起，扫一次就够。"""
-        out = self.output_dir()
-        return None if out is None else out / "red_pieces.json"
-
-    def pieces_spans(self, force: bool = False) -> list[tuple[float, float]]:
-        """这个视频按片尾红屏切出来的素材区间，没有分界就返回空表。
-
-        合并视频（把若干高光成品拼起来的那种）每段之间都夹着 1 秒纯红画面，
-        扫出来就能把导出按素材归类。扫一遍缓存到 output/<视频名>/red_pieces.json，
-        分析完会主动重扫一次，所以正常用起来导出不额外等。
-        """
-        if self.video_path is None:
-            return []
-        if not force and self.piece_spans is not None:
-            return self.piece_spans
-        cache = self._pieces_file()
-        if not force and cache is not None and cache.is_file():
-            try:
-                with open(cache, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                self.piece_spans = [(float(a), float(b)) for a, b in data.get("pieces") or []]
-                return self.piece_spans
-            except Exception as exc:  # noqa: BLE001 - 缓存坏了就当没扫过，重扫一遍
-                self.append_log(f"[素材] 分界缓存读不出来，重新扫：{exc}")
-        duration = float(self.timeline_doc.get("duration") or 0.0) or self.player.duration()
-        if duration <= 0:
-            self.piece_spans = []
-            return []
-        from ..timeline import red_split  # noqa: PLC0415
-
-        self.append_log(f"[素材] 扫片尾红屏分界（{self.video_path.name}，{duration:.2f}s）…")
-        try:
-            spans = [(float(a), float(b))
-                     for a, b in red_split.segments_of(self.video_path, duration,
-                                                       self.append_log)]
-        except Exception as exc:  # noqa: BLE001 - 扫不了就按普通视频走，不挡导出
-            self.append_log(f"[素材] 扫不了红屏分界，按普通视频导出：{exc}")
-            self.piece_spans = []
-            return []
-        self.piece_spans = spans if len(spans) > 1 else []
-        if len(spans) > 1:
-            self.append_log(f"[素材] 这是合并视频：{len(spans)} 段素材，导出会自动按素材分段")
-        else:
-            self.append_log("[素材] 没有红屏分界，按普通视频导出")
-        if cache is not None:
-            try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                write_json(cache, {"video": self.video_path.name, "duration": duration,
-                                   "pieces": [list(span) for span in self.piece_spans]})
-            except Exception as exc:  # noqa: BLE001 - 存不下就下次再扫，不算错误
-                self.append_log(f"[素材] 分界缓存没存下：{exc}")
-        return self.piece_spans
 
     def export_words(self) -> None:
         """逐词导出：一个词一条，时间用 whisper 的 word_timestamps。

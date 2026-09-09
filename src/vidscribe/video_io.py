@@ -22,7 +22,7 @@ logger = get_logger(__name__)
 
 __all__ = [
     "PIXEL_FACTOR", "VIDEO_SUFFIXES", "VideoInfo", "FrameBatch", "list_videos", "probe_video",
-    "is_complete_video",
+    "is_complete_video", "has_audio_track",
     "smart_size", "plan_frame_indices", "sample_frames", "detect_scene_cuts", "plan_windows",
 ]
 
@@ -156,6 +156,49 @@ def _has_audio_fallback(path: Path) -> bool:
         return bool(proc.stdout.strip())
     except Exception:
         return True
+
+
+def has_audio_track(path: str | Path) -> bool:
+    """这个视频文件里有没有音轨。**判不出来一律当「有」**。
+
+    只开容器读流清单，不解码音频——自动剪辑排队前要对整个目录问一遍，
+    解码级别的音量检测在这里太贵。
+
+    保守方向是刻意的，而且比 `probe_video().has_audio` 更严：那一头拿
+    `_has_audio_fallback` 兜底，而它把「ffprobe 读不懂这个文件」和
+    「读懂了、里面没有音频流」混成同一个答案。这里必须分清楚——
+    `清空无声音视频` 会真删文件，一个读不出来的坏文件绝不能被当成「没声音」。
+    """
+    target = Path(path)
+    if not target.is_file():
+        return True
+    meta = _probe_with_av(target)
+    if "has_audio" in meta:      # 容器打开了、流清单读出来了：这个答案可信
+        return bool(meta["has_audio"])
+    return _ffprobe_has_audio(target)
+
+
+def _ffprobe_has_audio(path: Path) -> bool:
+    """ffprobe 版的音轨判定：只有 ffprobe **真读懂了**这个文件才敢说「没有音轨」。
+
+    ffprobe 跑失败、跑不起来、或者一条流都没列出来，都算「判不出来」→ 返回 True。
+    """
+    try:
+        proc = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    except Exception:
+        return True
+    if proc.returncode != 0:
+        return True
+    kinds = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    if not kinds:                # 一条流都没读出来 = 没读懂这个文件
+        return True
+    return "audio" in kinds
+
+
 
 
 def is_complete_video(path: str | Path) -> bool:

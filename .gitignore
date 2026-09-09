@@ -39,6 +39,7 @@ input/*
 assets/sfx/
 
 # 工具与编辑器
+.aie/
 .comate/
 .idea/
 .vscode/

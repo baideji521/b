@@ -46,7 +46,36 @@ from vidscribe.db.lock import RuntimeLock, queue_lock_path   # noqa: E402
 from vidscribe.db.schema import TASK_ACTIVE              # noqa: E402
 from vidscribe.gui import main_window as mw              # noqa: E402
 
-GOOD_JSON = {"clip": {"start": 4.0, "end": 13.0, "score": 0.87, "type": "hook", "reason": "r"}}
+def highlight_json(sa: float = 4.0, end: float = 13.0, *, score: float | None = 0.87,
+                   kind: str = "hook", reason: str = "r", video: str = "",
+                   duration: float | None = None, trim: dict | None = None,
+                   overlays: list | None = None) -> dict:
+    """一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）。
+
+    `sa` / `end` 是原视频时间（剪辑只看这两个）；`duration` / `dst` / `o` 是成片时间域；
+    `trim` 就是 `t` 那块纯描述——它整份会被存进 clips 表的 evaluation 列。
+    """
+    span = round(duration if duration is not None else end - sa, 3)
+    timeline: dict = {"duration": span}
+    if score is not None:
+        timeline["score"] = score
+    if kind:
+        timeline["type"] = kind
+    if reason:
+        timeline["reason"] = reason
+    out: dict = {}
+    if video:
+        out["video"] = video
+    out["timeline"] = timeline
+    out["segments"] = [{"sa": sa, "end": end, "dst": [0.0, span]}]
+    if overlays is not None:
+        out["o"] = overlays
+    if trim is not None:
+        out["t"] = trim
+    return out
+
+
+GOOD_JSON = highlight_json(4.0, 13.0, score=0.87)
 LONG_AGO = "2000-01-01T00:00:00"
 FAR_AHEAD = "2999-01-01T00:00:00"
 
@@ -111,6 +140,14 @@ class Win:
     _auto_step = mw.MainWindow._auto_step
     _resume_existing_ai_json = mw.MainWindow._resume_existing_ai_json
     _save_ai_result = mw.MainWindow._save_ai_result
+    # `_save_ai_result` 现在先过这一步：老协议照旧，结果清单（只给两个时间点）也认
+    _payloads_from_reply = mw.MainWindow._payloads_from_reply
+    # 清单不带文件名时视频由这一步补（主界面当前视频 / 库里那条没跑完的任务）
+    _moments_video = mw.MainWindow._moments_video
+    # 方案 / 清单自己写的 `video` 优先：库里认得这个名字就按它归属
+    _video_of_source = mw.MainWindow._video_of_source
+    _video_by_name = mw.MainWindow._video_by_name
+    _video_for_rows = mw.MainWindow._video_for_rows
     _auto_save_script = mw.MainWindow._auto_save_script
     _auto_text_file = mw.MainWindow._auto_text_file
     _auto_script_file = mw.MainWindow._auto_script_file
@@ -119,11 +156,16 @@ class Win:
     _skip_because_done = mw.MainWindow._skip_because_done
     skip_done_products = mw.MainWindow.skip_done_products
     _language_blocked = mw.MainWindow._language_blocked
+    # 分析完一句语音都没有的视频不发 AI（没人说话 = 没互动，也算不出区间）
+    _silent_video = mw.MainWindow._silent_video
+    # 文件里根本没音轨的视频连队都不排（没声音 = 没剧本）
+    _mute_video = mw.MainWindow._mute_video
     _reusable_highlight_json = mw.MainWindow._reusable_highlight_json
     script_payload = mw.MainWindow.script_payload
     _db_video_id = mw.MainWindow._db_video_id
     _register_artifact = mw.MainWindow._register_artifact
     _register_final_video = mw.MainWindow._register_final_video
+    _asset_result_id = mw.MainWindow._asset_result_id         # 这次那份 JSON 是哪次 AI 结果
     _link_final_video = mw.MainWindow._link_final_video       # 成品挂方案 / PRM
     _asset_json_for_render = mw.MainWindow._asset_json_for_render
     highlight_source = mw.MainWindow.highlight_source
@@ -503,16 +545,15 @@ def test_error_reply_is_not_marked_validated(tmp_path: Path) -> None:
     db.close()
 
 
-def test_overlay_evaluation_lands_in_clips(tmp_path: Path) -> None:
-    """现行提示词把中文评价放在 clip.overlays.evaluation，落库时不能丢。"""
+def test_trim_block_lands_in_clips_evaluation(tmp_path: Path) -> None:
+    """新协议没有 overlays.evaluation 了：clips.evaluation 存的是整个 `t` 块的 JSON。"""
     cfg, db = make_project(tmp_path)
     video = fake_video(cfg, "eva.mp4")
-    evaluation = "情绪反差鲜明，信息完整"
-    payload = {"video": video.name,
-               "clip": {"start": 31.89, "end": 39.99, "duration": 8.1, "score": 92,
-                        "type": "搞笑", "reason": "赌注揭晓后的反应最强",
-                        "overlays": {"comment": {"time": 35.0, "text": "wow", "kind": "comment"},
-                                     "evaluation": evaluation}}}
+    trim = {"Scene": "赌桌前", "Action": "揭晓赌注",
+            "Speech text": "情绪反差鲜明，信息完整"}
+    payload = highlight_json(31.89, 39.99, duration=8.1, score=92, kind="搞笑",
+                             reason="赌注揭晓后的反应最强", video=video.name,
+                             overlays=[[3.11, "comment", "wow"]], trim=trim)
     win = Win(cfg, db)
     win._auto_video = video
     win._save_ai_result(payload, json.dumps(payload, ensure_ascii=False))
@@ -524,10 +565,13 @@ def test_overlay_evaluation_lands_in_clips(tmp_path: Path) -> None:
     clips = db_repo.get_clips(db, vid)
     assert len(clips) == 1, clips
     clip = clips[0]
-    assert clip["evaluation"] == evaluation, "中文评价必须原样落库，不许变 NULL"
+    assert clip["evaluation"], "t 那块不许丢，更不许变 NULL"
+    assert json.loads(clip["evaluation"]) == trim, \
+        "evaluation 列存的是整个 t 块的 JSON 文本：%s" % (clip["evaluation"],)
     assert clip["reason"] == "赌注揭晓后的反应最强" and clip["clip_type"] == "搞笑"
     assert float(clip["start_time"]) == 31.89 and float(clip["end_time"]) == 39.99
     db.close()
+
 
 
 class _FakeClipWorker:
@@ -541,11 +585,10 @@ def test_rendered_clip_keeps_the_real_cut_range(tmp_path: Path) -> None:
     """引擎把边界挪过之后，clips 里必须是实际剪的区间，不是 AI 的原值。"""
     cfg, db = make_project(tmp_path)
     video = fake_video(cfg, "cut.mp4")
-    payload = {"video": video.name,
-               "clip": {"start": 32.58, "end": 45.30, "duration": 12.72, "score": 93,
-                        "type": "搞笑", "reason": "赌注揭晓",
-                        "overlays": {"comment": {"time": 40.0, "text": "no way", "kind": "comment"},
-                                     "evaluation": "节奏明快"}}}
+    trim = {"Scene": "赌桌前", "Action": "揭晓赌注", "Speech text": "节奏明快"}
+    payload = highlight_json(32.58, 45.30, duration=12.72, score=93, kind="搞笑",
+                             reason="赌注揭晓", video=video.name,
+                             overlays=[[7.42, "comment", "no way"]], trim=trim)
     win = Win(cfg, db)
     win._auto_video = video
     win._save_ai_result(payload, json.dumps(payload, ensure_ascii=False))
@@ -561,17 +604,17 @@ def test_rendered_clip_keeps_the_real_cut_range(tmp_path: Path) -> None:
     assert float(clip["start_time"]) == 31.84, "起点要按实际剪的回写"
     assert float(clip["end_time"]) == 45.30
     assert float(clip["duration"]) == 13.46, "时长跟着一起算，不留 AI 的 12.72"
-    assert clip["reason"] == "赌注揭晓" and clip["evaluation"] == "节奏明快", "文案不许被改"
+    assert clip["reason"] == "赌注揭晓", "文案不许被改"
+    assert json.loads(clip["evaluation"]) == trim, "t 那块照旧原样进 evaluation 列"
     db.close()
 
 
 def test_mismatched_segment_count_leaves_times_alone(tmp_path: Path) -> None:
-    """一条 clip 却剪出两段（或反过来）：只标状态，绝不瞎配对时间。"""
+    """一段 segments 却剪出两段（或反过来）：只标状态，绝不瞎配对时间。"""
     cfg, db = make_project(tmp_path)
     video = fake_video(cfg, "mismatch.mp4")
-    payload = {"video": video.name,
-               "clip": {"start": 10.0, "end": 18.0, "duration": 8.0,
-                        "overlays": {"comment": {"time": 12.0, "text": "hi", "kind": "comment"}}}}
+    payload = highlight_json(10.0, 18.0, score=None, kind="", reason="",
+                             video=video.name, overlays=[[2.0, "comment", "hi"]])
     win = Win(cfg, db)
     win._auto_video = video
     win._save_ai_result(payload, "")
@@ -607,7 +650,7 @@ TESTS = (
     test_recovery_runs_even_when_auto_resume_off,
     test_close_releases_current_task,
     test_error_reply_is_not_marked_validated,
-    test_overlay_evaluation_lands_in_clips,
+    test_trim_block_lands_in_clips_evaluation,
     test_rendered_clip_keeps_the_real_cut_range,
     test_mismatched_segment_count_leaves_times_alone,
 )

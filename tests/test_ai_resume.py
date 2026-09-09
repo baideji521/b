@@ -40,7 +40,20 @@ from vidscribe.db import repo as db_repo                # noqa: E402
 from vidscribe.gui.main_window import MainWindow        # noqa: E402
 
 MAIN_WINDOW_SRC = ROOT / "src" / "vidscribe" / "gui" / "main_window.py"
-GOOD_JSON = {"clip": {"start": 3.0, "end": 12.5, "score": 0.88, "type": "hook", "reason": "r"}}
+
+
+def highlight_json(sa: float = 3.0, end: float = 12.5, score: float = 0.88) -> dict:
+    """一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）。
+
+    剪辑区间在 `segments[0].sa` / `.end`（原视频时间），文案在 `timeline`。
+    """
+    span = round(end - sa, 3)
+    return {"timeline": {"duration": span, "score": score, "type": "hook", "reason": "r"},
+            "segments": [{"sa": sa, "end": end, "dst": [0.0, span]}]}
+
+
+GOOD_JSON = highlight_json()
+
 
 
 # ------------------------------------------------------------------ 夹具
@@ -147,7 +160,7 @@ def test_broken_json_falls_back_to_ai(tmp_path: Path) -> None:
         conn.execute(
             "INSERT INTO ai_results(task_id, video_id, raw_response, json_data, validated, "
             "created_at) VALUES(?, ?, ?, ?, 0, datetime('now'))",
-            (task_id, vid, "raw", '{"clip": {"start": 1'))
+            (task_id, vid, "raw", '{"segments": [{"sa": 1'))
     host = FakeWindow(db, task_id)
     assert resume(host) is None, "坏 JSON 不能复用"
     assert any("解不开" in line for line in host.logs), "必须留一行明确日志：%s" % host.logs
@@ -181,9 +194,9 @@ def test_task_isolation(tmp_path: Path) -> None:
 def test_latest_result_wins(tmp_path: Path) -> None:
     cfg, db = make_project(tmp_path)
     vid, task_id = claimed_task(cfg, db, "many.mp4")
-    old = {"clip": {"start": 1.0, "end": 2.0, "score": 0.1}}
-    mid = {"clip": {"start": 5.0, "end": 6.0, "score": 0.5}}
-    new = {"clip": {"start": 9.0, "end": 11.0, "score": 0.9}}
+    old = highlight_json(1.0, 2.0, 0.1)
+    mid = highlight_json(5.0, 6.0, 0.5)
+    new = highlight_json(9.0, 11.0, 0.9)
     for payload in (old, mid, new):
         db_repo.save_ai_result(db, vid, task_id=task_id, json_data=payload, validated=True)
     got = json.loads(resume(FakeWindow(db, task_id)) or "{}")
@@ -274,7 +287,11 @@ def test_resume_path_goes_straight_to_render() -> None:
     step = _calls(_function("_auto_step"))
     assert step.index("_reusable_highlight_json") < step.index("_auto_text_file")
     assert step.index("_reusable_highlight_json") < step.index("send_file_to_ai")
-    assert step.index("_reusable_highlight_json") < step.index("on_analyze")
+    # on_analyze 在 _auto_step 里出现两次：「只解析视频」那一档在最前面就直接分析完事
+    # （跟高光 JSON 压根没关系，不该被复用分支挡住），⑤ 才是"库里啥都没有先重跑分析"。
+    # 这里盯的是后者，所以取**最后一次** on_analyze 比。
+    last_analyze = len(step) - 1 - step[::-1].index("on_analyze")
+    assert step.index("_reusable_highlight_json") < last_analyze
 
     # _auto_save_script 只许写文件 + 登记产物，不许有别的副作用
     saver = _calls(_function("_auto_save_script"))

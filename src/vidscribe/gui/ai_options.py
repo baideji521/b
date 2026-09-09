@@ -46,22 +46,22 @@ from PyQt5.QtWidgets import (
 
 from ..bridge import providers
 from ..db import open_db
+from ..db import assets as db_assets
 from ..db import repo as db_repo
 from ..db.importer import refresh_from_disk
 
 # 任务表里每一步的记号：干完了 / 正在干 / 还没轮到 / 砸了
 DONE, RUNNING, WAITING, FAILED = "✓", "●", "—", "✕"
 
-VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi", ".flv", ".webm", ".m4v",
-                  ".ts", ".mpg", ".mpeg", ".wmv")
 
-# 三种串各自的开关键。`ai_job` 仍旧是状态机唯一认的那个值，这三个是它的布尔映射：
+# 每一串各自的开关键。`ai_job` 仍旧是状态机唯一认的那个值，这几个是它的布尔映射：
 # 配置文件里一眼能看出干的是哪一串，老配置只有 ai_job 也照旧能读（见 _job_from_config）
-JOB_FLAGS = {"full": "ai_clip_video", "collect": "ai_collect_script", "script": "ai_script_clip"}
+JOB_FLAGS = {"full": "ai_clip_video", "collect": "ai_collect_script", "script": "ai_script_clip",
+             "analyze": "ai_analyze_only"}
 
 # 「处理范围」一个下拉说完全部：**干哪一串 + 跑哪些视频**。
 # 以前是「三张模式卡片 × 三档范围」，九种组合里一半是矛盾的（比如「脚本剪辑 + 只跑没有
-# JSON 的视频」＝每一条都注定失败）。这里只留下有意义的四档，每一档直接对应
+# JSON 的视频」＝每一条都注定失败）。这里只留下有意义的那几档，每一档直接对应
 # (ai_job, highlight_source) 一对值——底下的状态机一个字都没改。
 SCOPES = (
     ("clip_all", "全部视频：有 JSON 的直接剪，没有的问 AI 再剪", "full", "all",
@@ -77,14 +77,20 @@ SCOPES = (
     ("collect_missing", "只收 JSON 不剪辑：问 AI 拿 JSON 入库就算完", "collect", "missing",
      "同「问 AI 拿 JSON 再剪」，但高光 JSON 入库就算这一条干完，不剪辑。"
      "只跑还没有 JSON 的视频——已经有 JSON 的再问一次 AI 是白花钱"),
+    ("analyze_all", "只解析视频：本地分析入库就算完，不问 AI 不剪辑", "analyze", "all",
+     "只跑本地分析：按主界面配置做语音识别 / 视觉 / 表情，结果进库这一条就算干完。"
+     "一次 AI 都不调、也不剪辑，AI_输出目录不会多出任何东西。"
+     "适合先把一批视频的分析结果攒起来（显卡闲着的时候连着跑），"
+     "之后再单独跑「只收 JSON 不剪辑」或者「只跑已有 JSON 的视频：直接剪」"),
 )
+
 
 SCOPE_JOB = {key: job for key, _label, job, _source, _tip in SCOPES}
 SCOPE_SOURCE = {key: source for key, _label, _job, source, _tip in SCOPES}
 
 
 def _job_from_config(bridge: dict[str, Any]) -> str:
-    """配置里存的是哪一种模式。ai_job 优先，没有就看三个布尔开关，都没有＝剪辑成片。"""
+    """配置里存的是哪一种模式。ai_job 优先，没有就看几个布尔开关，都没有＝剪辑成片。"""
     job = str(bridge.get("ai_job") or "").strip()
     if job in JOB_FLAGS:
         return job
@@ -104,7 +110,8 @@ def _scope_from_config(bridge: dict[str, Any]) -> str:
     for key, _label, want_job, want_source, _tip in SCOPES:
         if job == want_job and source == want_source:
             return key
-    fallback = {"full": "clip_all", "script": "clip_existing", "collect": "collect_missing"}
+    fallback = {"full": "clip_all", "script": "clip_existing", "collect": "collect_missing",
+                "analyze": "analyze_all"}
     return fallback.get(job, "clip_all")
 
 
@@ -320,7 +327,8 @@ class AiPanel(QDialog):
         self.cmb_source.setCurrentIndex(max(0, self.cmb_source.findData(self._scope)))
         self.cmb_source.setToolTip("这一个下拉说完「干哪一串 + 跑哪些视频」："
                                    "「直接剪」那两档一次 AI 都不调，"
-                                   "「收 JSON」那档拿到 JSON 就算完、不剪辑。选完即存")
+                                   "「收 JSON」那档拿到 JSON 就算完、不剪辑，"
+                                   "「只解析视频」那档只跑本地分析、既不问 AI 也不剪。选完即存")
         self.cmb_source.currentIndexChanged.connect(lambda _=0: self._pick_scope())
 
         # 「不跑成品」：成品库里已经有这个视频的有效成品就整条跳过（默认勾上）。
@@ -331,6 +339,8 @@ class AiPanel(QDialog):
                                       "不重新分析、不重新问 AI、不重新剪。"
                                       "取消勾选＝已有成品也照样重跑一遍。勾完即存")
         self.chk_skip_done.stateChanged.connect(lambda _=0: self._pick_skip_done())
+
+
 
         # PRM 不再在这里挑一份：发哪几份完全看使用状况，这里只显示现在会发什么
         self.lbl_prm = QLabel("—")
@@ -486,7 +496,8 @@ class AiPanel(QDialog):
     def _build_table(self) -> QWidget:
         """任务表：文件 + 业务链上的六步 + 一句人话。每一列都只来自数据库。
 
-        右边挂整批的操作按钮：现在只有「清空非中英视频」。
+        右边挂整批的操作按钮：「清空非中英视频」和「清空无声音视频」。
+        两个都是**按预检结论**清（语言 / 音轨），判据各自一列，谁也不碰谁的账。
         """
         self.table = QTableWidget(0, 8)
         self.table.setHorizontalHeaderLabels(
@@ -506,9 +517,20 @@ class AiPanel(QDialog):
             "清的是：原视频文件 + 它自己产出的附带文件（合并 TXT / 剧本 / 高光 JSON / "
             "片段 / 成品）+ 库里的全部记录。没有非中英视频时这个按钮是灰的。**不可恢复**")
         self.btn_clear_video.clicked.connect(self.on_clear_video)
+        self.btn_clear_silent = QPushButton("清空无声音视频")
+        self.btn_clear_silent.setToolTip(
+            "只清**文件里没有音轨**的视频（`videos.no_audio = 1`）。没声音就没剧本、"
+            "没高光，自动剪辑排队时就已经跳过它们了。\n"
+            "按钮上的数字 = 已经探出来有几个没声音的；显示「检测并清」= 还有没探过的，"
+            "点一下会先探一遍（只开容器读流清单，不解码），再列清单问你。\n"
+            "全都探过而且每个都有声音时，这个按钮是灰的。\n"
+            "探不出来的一律当「有声音」，绝不误删。\n"
+            "清的东西和上面那个一样：原视频 + 附带文件 + 库里的全部记录。**不可恢复**")
+        self.btn_clear_silent.clicked.connect(self.on_clear_silent)
         side = QVBoxLayout()
         side.setContentsMargins(0, 0, 0, 0)
         side.addWidget(self.btn_clear_video)
+        side.addWidget(self.btn_clear_silent)
         side.addStretch(1)
 
         box = QWidget()
@@ -537,10 +559,31 @@ class AiPanel(QDialog):
                 for r in rows]
 
     def _sync_row_buttons(self) -> None:
-        """「清空非中英视频」只在真有非中英视频时才亮（没有就没什么可清的）。"""
+        """两个「清空…」按钮该灰的灰（没什么可清的时候不该让人点）。
+
+        - 「清空非中英视频」：真有非中英视频才亮；
+        - 「清空无声音视频」：有**已经探出没音轨的**、或者还有**没探过的**才亮。
+          留着「没探过也亮」这一半是因为探测得开文件，不能每次刷新任务表都做——
+          所以按钮承担「点一下先探、再清」。全都探过而且每个都有声音时它就是灰的。
+
+        两条判据都只查库（各一条 SQL），不碰文件。
+        """
         button = getattr(self, "btn_clear_video", None)
         if button is not None:
             button.setEnabled(bool(self._foreign_videos()))
+        button = getattr(self, "btn_clear_silent", None)
+        if button is not None:
+            marked = self._marked_silent_videos()
+            todo = self._unprobed_audio_videos()
+            button.setEnabled(bool(marked) or bool(todo))
+            if marked:
+                button.setText(f"清空无声音视频（{len(marked)}）")
+            elif todo:
+                button.setText("检测并清无声音视频")
+            else:
+                button.setText("清空无声音视频")
+
+
 
     def _attached_files(self, db, video_id: int) -> list[Path]:
         """这个视频自己产出的附带文件：登记在 artifacts 里的合并 TXT / 剧本 / JSON /
@@ -564,16 +607,6 @@ class AiPanel(QDialog):
                                     "AI_输入目录里没有非中英视频（语言预检没拦下谁），"
                                     "没什么要清的")
             return
-        running = getattr(self._window, "auto_running", None)
-        if callable(running) and running():
-            QMessageBox.information(self, "AI 面板",
-                                    "自动剪辑正在跑，先点「停止」再清非中英视频"
-                                    "（正在读的文件删不掉，也容易把手上这条搞乱）")
-            return
-        db = self._db()
-        if db is None:
-            QMessageBox.warning(self, "AI 面板", "数据库打不开，什么都没动")
-            return
         listed = "\n".join(f"· {video.name}（语言 {code or '未知'}）"
                            for _vid, video, code in foreign[:12])
         if len(foreign) > 12:
@@ -589,8 +622,131 @@ class AiPanel(QDialog):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if ask != QMessageBox.Yes:
             return
+        self._wipe_videos(foreign, "非中英视频")
+
+    def _marked_silent_videos(self) -> list[tuple[int, Path, str]]:
+        """库里**已经探出没音轨**的视频：(id, 路径, 说明)。纯查库，一个文件都不开。
+
+        按钮的灰/亮要靠它（每次刷新任务表都会问一遍），所以这里绝不能触发探测。
+        """
+        db = self._db()
+        if db is None:
+            return []
+        try:
+            rows = db_repo.no_audio_videos(db, self._in_dir())
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[AI 面板] 查不出无声音视频：{exc}")
+            return []
+        return [(int(r["id"]), Path(r["file_path"]), "没有音轨") for r in rows]
+
+    def _unprobed_audio_videos(self) -> list[Any]:
+        """AI_输入目录里**还没做过音轨预检**的视频。纯查库。
+
+        「清空无声音视频」亮不亮要看它：还有没探过的就该让人点（点了先探再清）。
+        """
+        db = self._db()
+        if db is None:
+            return []
+        folder = self._in_dir()
+        if folder is None:
+            return []
+        try:
+            return db_repo.unprobed_audio_videos(db, folder)
+        except Exception as exc:  # noqa: BLE001
+            self.append_log(f"[AI 面板] 查不出还没探过音轨的视频：{exc}")
+            return []
+
+    def _silent_videos(self) -> list[tuple[int, Path, str]]:
+        """AI_输入目录里**没有音轨**的视频：(id, 路径, 说明)。还没探过的当场探一遍。
+
+        判据只有一个：`videos.no_audio = 1`，也就是自动剪辑排队时探出来的那一列。
+        这里之所以还要当场探：用户想「随时清理」，不该被迫先跑一轮自动剪辑。
+        探一个视频只是开容器读一遍流清单（不解码），一个文件只探一次（结论落库），
+        所以第二次点就是纯查库。
+
+        探不出来的一律算「有声音」（`has_audio_track` 自己就是这么保守的）——
+        这个清单会被真删，宁可漏清也不能误删。
+        """
+        db = self._db()
+        if db is None:
+            return []
+        self._probe_missing_audio(db)
+        return self._marked_silent_videos()
+
+    def _probe_missing_audio(self, db) -> None:
+        """把 AI_输入目录里**还没探过音轨**的视频探一遍，结论落 `videos.no_audio`。
+
+        只探这个目录下、盘上还在、`no_audio IS NULL` 的那些，所以点第二次几乎不干活。
+        没填 AI_输入目录就什么都不探——不能拿整个视频库当作用域，那是别的目录的事。
+        """
+        from ..video_io import has_audio_track  # noqa: PLC0415 - 只有点这个按钮才用得上
+
+        todo = self._unprobed_audio_videos()
+        if not todo:
+            return
+        self.append_log(f"[AI 面板] 正在探 {len(todo)} 个视频有没有音轨…")
+        found = 0
+        for row in todo:
+            path = Path(str(row["file_path"]))
+            if not path.is_file():
+                continue
+            try:
+                missing = not has_audio_track(path)
+                db_repo.set_no_audio(db, int(row["id"]), missing)
+            except Exception as exc:  # noqa: BLE001 - 一个探不动不该拖垮整批
+                self.append_log(f"[AI 面板] {path.name} 音轨探不出来（当成有声音）：{exc}")
+                continue
+            found += int(missing)
+        self.append_log(f"[AI 面板] 音轨探完：{len(todo)} 个里有 {found} 个没声音")
+
+    def on_clear_silent(self) -> None:
+        """整批清掉没有音轨的视频：原视频 + 它的附带文件 + 库里的全部记录。不可恢复。
+
+        没声音的素材对这条产线没用（没语音就没剧本、没高光），自动剪辑排队时就已经
+        跳过它们了；这个按钮只是把它们从盘上和库里一起清干净。
+        """
+        silent = self._silent_videos()
+        if not silent:
+            QMessageBox.information(self, "AI 面板",
+                                    "AI_输入目录里没有无声音视频（每个都探到了音轨），"
+                                    "没什么要清的")
+            self._sync_row_buttons()      # 探完了、一个都没有：这个按钮该灰下去
+            return
+        listed = "\n".join(f"· {video.name}（{why}）" for _vid, video, why in silent[:12])
+        if len(silent) > 12:
+            listed += f"\n· …另外还有 {len(silent) - 12} 个"
+        ask = QMessageBox.question(
+            self, "清空无声音视频",
+            f"要清掉这 {len(silent)} 个无声音视频吗？\n\n"
+            f"{listed}\n\n"
+            "一起没掉的还有：它们自己产出的附带文件（合并 TXT / 剧本 / 高光 JSON / "
+            "片段 / 成品），以及库里的分析 / AI 任务 / 高光 JSON / 片段 / 文件登记。\n"
+            "有声音的视频一个都不动。\n"
+            "文件删了不进回收站，找不回来。",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if ask != QMessageBox.Yes:
+            return
+        self._wipe_videos(silent, "无声音视频")
+
+    def _wipe_videos(self, items: list[tuple[int, Path, str]], label: str) -> None:
+        """把这几个视频连文件带记录一起清掉（两个「清空…」按钮共用这一段）。
+
+        自动剪辑正在跑就不动手：正在读的文件删不掉，也容易把手上那条任务搞乱。
+        原视频删不掉的那个整条留着（附带文件和库里的数据都不动），免得留下
+        「文件还在、库里没记录」这种查不出来的孤儿。
+        """
+        running = getattr(self._window, "auto_running", None)
+        if callable(running) and running():
+            QMessageBox.information(self, "AI 面板",
+                                    f"自动剪辑正在跑，先点「停止」再清{label}"
+                                    "（正在读的文件删不掉，也容易把手上这条搞乱）")
+            return
+        db = self._db()
+        if db is None:
+            QMessageBox.warning(self, "AI 面板", "数据库打不开，什么都没动")
+            return
         removed = kept = files = 0
-        for vid, video, code in foreign:
+        for vid, video, why in items:
             attached = self._attached_files(db, vid)
             if video.is_file():
                 try:
@@ -613,11 +769,12 @@ class AiPanel(QDialog):
             except Exception as exc:  # noqa: BLE001
                 self.append_log(f"[AI 面板] {video.name} 库里的数据没清干净：{exc}")
             removed += 1
-            self.append_log(f"[AI 面板] 已清空非中英视频 {video.name}（语言 {code or '未知'}）")
-        self.append_log(f"[AI 面板] 清空非中英视频完成：清掉 {removed} 个视频、"
+            self.append_log(f"[AI 面板] 已清空{label} {video.name}（{why or '未知'}）")
+        self.append_log(f"[AI 面板] 清空{label}完成：清掉 {removed} 个视频、"
                         f"{files} 个附带文件"
                         + (f"，{kept} 个删不掉（原样留着）" if kept else ""))
         self.refresh_tasks()
+
 
     def _build_log(self) -> QWidget:
         """日志：子进程、渲染、AI 对接的每一行都往这儿贴，出问题不用切回主界面翻。"""
@@ -689,23 +846,29 @@ class AiPanel(QDialog):
         return out
 
     def _row_marks(self, video: Path, states: dict[str, bool],
-                   task: str = "") -> tuple[list[str], str]:
+                   task: str = "",
+                   progress: tuple[int, int] = (0, 0)) -> tuple[list[str], str]:
         """把库里的状态翻成表里的六个记号和一句人话。跑着的那一步 ●，砸了的那一步 ✕。
 
         六步就是业务链本身，每一步各自独立判定，**全部来自数据库**：
         分析（analysis_runs）、剧本（库里能不能生成完整剧本）、高光分析（问过 AI 没有）、
         高光 JSON（库里那份能不能直接开剪）、剪辑（clips 里剪过）、成品（final_video 还在盘上）。
         `task` 是这条视频当前任务的状态，只用来把"在等谁"说清楚，不会反过来推翻产物。
+        `progress` 是「出了几个成品 / 该出几个」：一份 JSON 一个成品，所以有 3 份 JSON
+        只剪出 1 个时「成品」那格写 `1/3`，也不许报「成品完成」。
         文件在不在盘上（states 里的 txt / json）绝不参与这里的判断。
         """
         running = video.stem == self._active_stem
+        made, need = progress
+        full = made >= need if need else bool(states.get("clipped"))
+        product = DONE if full else (f"{made}/{need}" if need else WAITING)
         marks = [DONE if states.get("analysed") else WAITING,
                  DONE if states.get("script") else WAITING,
                  DONE if states.get("attempted") else WAITING,
                  DONE if states.get("json_ok") else WAITING,
                  DONE if states.get("rendered") else WAITING,
-                 DONE if states.get("clipped") else WAITING]
-        if states.get("clipped"):
+                 product]
+        if states.get("clipped") and full:
             return marks, "成品完成"
         if running:
             step = self._active_step or "跑着"
@@ -734,6 +897,12 @@ class AiPanel(QDialog):
             return marks, "剪辑失败"
         if task == "cancelled" and not states.get("json_ok"):
             return marks, "跳过"
+        if self._job == "analyze" and states.get("analysed"):
+            # 「只解析视频」这一档：本地分析入库就算这一条干完，后面那几步压根不跑，
+            # 别再报「等待高光分析」把人吓着
+            return marks, "解析完成"
+        if need and made < need:
+            return marks, f"还剩 {need - made} 份 JSON 没剪"
         if states.get("json_ok"):
             return marks, "高光 JSON 就绪"
         if states.get("attempted"):
@@ -746,13 +915,19 @@ class AiPanel(QDialog):
 
     # ------------------------------------------------------------ 对外接口
     def _db(self):
-        """数据库句柄。开不起来就记一句，界面不崩（状态会显示为全空）。"""
-        if self._db_handle is None and not self._db_failed:
+        """数据库句柄。开不起来就记一句，界面不崩（状态会显示为全空）。
+
+        失败**不闭锁**：下一次刷新照旧再试一遍（库被占用/网络盘掉线这类是一时的，
+        一次失败就永远空表比什么都不显示更糟）。日志只记第一次，不刷屏。
+        """
+        if self._db_handle is None:
             try:
                 self._db_handle = open_db(self.cfg)
+                self._db_failed = False
             except Exception as exc:
+                if not self._db_failed:
+                    self.append_log(f"[AI 面板] 数据库打不开，状态无法显示：{exc}")
                 self._db_failed = True
-                self.append_log(f"[AI 面板] 数据库打不开，状态无法显示：{exc}")
         return self._db_handle
 
     def _sync_disk(self) -> None:
@@ -775,6 +950,9 @@ class AiPanel(QDialog):
         sync=True（打开面板、点刷新）时先登记新文件并对账；跑批过程中每一步只查库，
         40 个视频也就是几条 SQL，不会每个视频再去翻目录。每一步的进度回调都会叫到这儿，
         所以四个头号数字是跟着任务自己动的，不用手点刷新。
+
+        每次都会顺手对一遍**成品**的在盘状态：成品是用户会在资源管理器里直接删的，
+        不对账的话文件都没了「成品」这一列还打勾。只 stat 成品那几个文件，很便宜。
         """
         db = self._db()
         if db is None:
@@ -782,19 +960,33 @@ class AiPanel(QDialog):
             return
         if sync:
             self._sync_disk()
+        try:
+            db_assets.sync_product_presence(db)
+        except Exception as exc:  # noqa: BLE001 - 对账失败不该让整张表画不出来
+            self.append_log(f"[AI 面板] 成品在盘状态对账失败：{exc}")
         rows = db_repo.videos_under(db, self._in_dir())
         videos = [Path(r["file_path"]) for r in rows]
         ids = [int(r["id"]) for r in rows]
         states_by_id = db_repo.states_for_videos(db, ids)
-        # 收取脚本这一串拿到 JSON 就算完事，其余两串要出成品才算
-        done_key = "json" if self._job == "collect" else "clipped"
+        # 每一串各自的"干完了"口径：收 JSON 那串拿到 JSON 就算完，只解析视频那串本地分析
+        # 入库就算完，其余两串要出成品才算。注意 video_queue_statistics 现在只对 "json"
+        # 单独特判，别的值都按成品算，所以「只解析视频」这一档的「已完成」桶暂时还是成品数，
+        # 真实进度看头号数字里的「已分析」（analysed 是横切指标，跟桶无关）
+        if self._job == "analyze":
+            done_key = "analysed"
+        elif self._job == "collect":
+            done_key = "json"
+        else:
+            done_key = "clipped"
         stats = db_repo.video_queue_statistics(db, ids, mode=self._job, done_key=done_key)
-        made = len(db_repo.artifact_videos(db, ids, "final_video"))
+        # 一份 JSON 一个成品：成品进度按「出了几个 / 该出几个」算，不是「有没有成品」
+        progress = db_assets.product_progress(db, ids)
         tasks = self._task_states(db, ids)
         self.table.setRowCount(len(videos))
         for row, (video, vid) in enumerate(zip(videos, ids)):
             states = states_by_id.get(vid, {})
-            marks, status = self._row_marks(video, states, tasks.get(vid, ""))
+            marks, status = self._row_marks(video, states, tasks.get(vid, ""),
+                                            progress.get(vid, (0, 0)))
             cells = [video.name, *marks, status]
             for col, text in enumerate(cells):
                 item = QTableWidgetItem(text)
@@ -803,10 +995,14 @@ class AiPanel(QDialog):
                 if col == 0:
                     item.setToolTip(str(video))
                 self.table.setItem(row, col, item)
-        # 头号七格＝业务链每一步做到哪儿了，全部查库；成品一律看 final_video（跟模式无关）
+        # 头号七格＝业务链每一步做到哪儿了，全部查库；成品那格是「已出 / 该出」
+        done = sum(m for m, _ in progress.values())
+        need = sum(n for _, n in progress.values())
         head = {"total": stats["total"], "analysed": stats["analysed"],
                 "script": stats["script"], "attempted": stats["attempted"],
-                "json": stats["json"], "rendered": stats["rendered"], "made": made}
+                "json": stats["json"], "rendered": stats["rendered"],
+                "made": f"{done}/{need}" if need else str(
+                    len(db_repo.artifact_videos(db, ids, "final_video")))}
         for key, label in self._head_labels.items():
             label.setText(str(head[key]))
         self._sync_row_buttons()
@@ -924,7 +1120,7 @@ class AiPanel(QDialog):
 
         改完即存的唯一入口——目录、范围一改就（防抖后）自动调到这儿，
         不需要点任何「保存配置」。一档处理范围会写成 `ai_job` + `highlight_source` 两个键，
-        再加三个布尔映射（配置文件里一眼看出干的是哪一串），互斥由这里保证。
+        再加 `JOB_FLAGS` 那几个布尔映射（配置文件里一眼看出干的是哪一串），互斥由这里保证。
         AI_输入目录 / AI_输出目录 只写 `ai_input_dir` / `ai_output_dir`，
         绝不碰 `paths.input_dir` / `paths.output_dir`（那是主界面的导入/导出目录）。
         写盘失败只记一句日志：正在跑的活不该被它打断。
@@ -963,6 +1159,8 @@ class AiPanel(QDialog):
         """关窗前把防抖里压着的那次改动写掉，别让最后一下白改。"""
         self._flush_settings()
         super().closeEvent(event)
+
+
 
 
 

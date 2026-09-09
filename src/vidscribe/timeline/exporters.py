@@ -33,6 +33,16 @@ def fmt_secs(seconds: float) -> str:
     return f"{max(0.0, float(seconds)):.2f}"
 
 
+def _span(start: float, end: float) -> str:
+    """`[  0.00 -   1.86]`：秒数右对齐补空格，让上下几十行的小数点对齐成一列。
+
+    等宽对齐纯粹为了给模型读 —— 数字不对齐时它更容易把上一行的时间当成这一行的。
+    宽度按 6 位留（三位整数 + 小数点 + 两位小数），99% 的短视频用不满。
+    """
+    return f"[{fmt_secs(start):>6} - {fmt_secs(end):>6}]"
+
+
+
 def fmt_srt_time(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     millis = int(round(seconds * 1000))
@@ -46,6 +56,20 @@ def write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, ensure_ascii=False, indent=2)
+
+
+def legacy_score(data: dict[str, Any], key: str, legacy: str) -> Any:
+    """取置信度，同时认旧键名；两个键都没有才返回 None。
+
+    `intensity` / `emotion_intensity` 是 `confidence` / `emotion_confidence` 的旧名，
+    存的一直是"模型有多确定"，改名只是因为 intensity 会被读成"表情多强烈"。改名那次
+    只动了代码和数据库列，**没有重写已经落盘的 JSON**：`output/*/timeline.json` 里
+    23 份的 `expression_track` 和 27 份的时间线条目至今是旧名，库里 101 条老视觉事件
+    也是。读侧不认旧名，`.get(新键, 0)` 就会静默兜底成 `0.00` 印进剧本——而剧本是喂给
+    大模型的输入，0.00 在提示词里的含义是"模型完全不确定"，等于主动给下游喂假证据。
+    """
+    value = data.get(key)
+    return value if value is not None else data.get(legacy)
 
 
 def write_timeline_txt(path: Path, video_name: str, duration: float, language: str | None,
@@ -82,7 +106,8 @@ def write_timeline_txt(path: Path, video_name: str, duration: float, language: s
         if entry.get("visual"):
             # 画面行跟画面情绪，语音行跟语音情绪，两路各自标注不混
             tag = emotion_tag(entry.get("visual_emotion_en"),
-                              entry.get("visual_emotion_intensity"), output_language,
+                              legacy_score(entry, "visual_emotion_confidence",
+                                           "visual_emotion_intensity"), output_language,
                               entry.get("visual_emotion"))
             head = f"{labels['visual']}{tag}"
             lines.append(f"{head}：" if lang == "zh" else f"{head}:")
@@ -123,8 +148,11 @@ def write_timeline_txt(path: Path, video_name: str, duration: float, language: s
         lines.append("")
         for span in emotions:
             name = display_name(span.get("emotion_en"), None, output_language) or span.get("emotion_en")
+            score = legacy_score(span, "confidence", "intensity")
+            # 两个键都没有就不打数字：印 0.00 等于告诉下游"模型完全不确定"，那是假证据
+            tail = f" {float(score):.2f}" if isinstance(score, (int, float)) else ""
             lines.append(f"[{fmt_time(span['start'])} - {fmt_time(span['end'])}]"
-                         f"{sep}{name} {span.get('intensity', 0):.2f}")
+                         f"{sep}{name}{tail}")
         lines.append("")
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -163,6 +191,20 @@ MIN_SPEECH_EMOTION_SCORE = 0.30
 MIN_WORD_GAP_SECONDS = 1.5
 # 表情轨里超过这个秒数的空档会显式标一行（没检到人脸，不是 neutral）
 MIN_FACE_GAP_SECONDS = 1.0
+# 句末标点：前一片不以这些收尾，就说明这一句被 ASR 切断了，还没说完
+SENTENCE_END = ".?!。？！…\"'”’)）"
+# 被切断的两片之间超过这个秒数就不再拼：再远只能是两句话，拼起来是造假
+MAX_SENTENCE_JOIN_GAP = 5.0
+# 合并行里句内静音超过这个秒数才标出来（更短的是正常呼吸）
+MIN_INNER_SILENCE = 0.8
+# 同一段画面文字最多打印几次：重复的 OCR 只是刷版面，还会被当成新证据
+OCR_MAX_TIMES = 1
+# 短于这个字数的画面文字直接不打（基本都是误识别的碎片）
+OCR_MIN_CHARS = 3
+# SECTION 5 候选对：结果句的发声上限、铺垫句的发声下限、两句之间的最大间隔
+PAIR_RESULT_MAX_VOICED = 1.5
+PAIR_SETUP_MIN_VOICED = 1.0
+PAIR_MAX_GAP = 3.0
 
 # 导出文本里的固定用词：整份文件跟着内容语言走，不能中文表头配英文正文
 _TXT_WORDS: dict[str, dict[str, str]] = {
@@ -176,26 +218,48 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "action_section": "动作轨（逐动作时间戳，事件粒度归并）",
            "expression_section": "表情轨（逐表情时间戳，人脸模型 2fps 归并）",
            "timeline_section": "交错时间线（画面事件 + 语音，按时间排序）",
-           "sections_index": "本文件共 4 段：1 交错时间线 | 2 动作轨 | 3 表情轨 | 4 逐词时间轴",
+           "pairs_section": "铺垫 → 结果候选对（程序按客观特征挑出，区间已算好）",
+           "sections_index": "本文件共 5 段：1 交错时间线 | 2 动作轨 | 3 表情轨 | "
+                             "4 逐词时间轴 | 5 铺垫→结果候选对",
            "authority_note": "时间基准 = SECTION 4；情绪基准 = SECTION 3（人脸模型）；"
-                             "语音行括号里的情绪来自音频模型，仅作参考。",
+                             "语音行括号里的情绪来自音频模型，且只在 SECTION 3 同一时间"
+                             "给出同一标签时才打印（单靠音频的情绪一律不给）。",
            "timestamp_note": "所有时间戳都是从视频开头算起的绝对秒数（十进制秒，不是 mm:ss），"
                              "取值范围 0 到上面那个时长；直接照抄，不要做任何换算。",
-           "legend_visual": "行格式：[起 - 止] 画面（表情 置信度）[重要度]：描述",
-           "legend_ocr": "行格式：    画面文字：…（缩进行，属于上面那条画面行）",
-           "legend_speech": "行格式：[起 - 止] 语音（说话人 N）（音频情绪 置信度，仅参考；"
-                            "置信度低于 0.30 的直接不打）：内容",
+           "legend_visual": "行格式：V01  [起 - 止] 画面（表情 置信度）[重要度]：描述",
+           "legend_ocr": "行格式：    画面文字：…（缩进行，属于上面那条画面行；"
+                         "重复出现的同一段文字只在第一次出现时打印）",
+           "legend_speech": "行格式：S01  [起 - 止] 语音（说话人 N）（音频情绪 强度）：内容"
+                            "——行首 S01 是这句话的编号，SECTION 4 和 SECTION 5 都用它指认；"
+                            "被静音切断的同一句话已经拼回一行，句内静音在括号里注明；"
+                            "说话人不一致的合并句不打说话人",
+           "inner_silence": "（句内静音 {count} 处，共 {total:.2f}s）",
            "legend_action": "行格式：[起 - 止]：动作 @ 场景",
-           "legend_expression": "行格式：[起 - 止]：表情 强度(0-1) —— 情绪判定以本段为准；"
+           "legend_expression": "行格式：[起 - 止]：表情 置信度(0-1) —— 情绪判定以本段为准；"
+                                "置信度是人脸模型对这个表情标签的确信程度，不是表情强弱；"
                                 "只代表画面里最大的那张脸",
            "face_gap": "--- 中间 {gap:.2f}s 没检到人脸（不等于 neutral）---",
            "expression_none": "--- 全片没有检测到有效人脸，表情轨为空（不等于 neutral）---",
            "expression_legacy": "--- 这次分析在表情落库之前完成，数据库里没有表情轨数据；"
                                 "重新分析该视频后本段才会有内容（不要当成没有表情）---",
-           "legend_words": "行格式：[起 - 止] 词 —— clip.start / clip.end 一律取自本段",
+           "legend_words": "按句分组：组头是「S01  [起 - 止] 整句原文」，"
+                           "下面缩进的每一行是这句话里的一个词。"
+                           "clip.start / clip.end 一律取自本段的词",
            "word_gap": "--- 中间 {gap:.2f}s 没有说话 ---",
+           "legend_pairs": "行格式：S01 -> S02   setup_at / result_at   clip 起 - 止（时长），"
+                           "下面三行是铺垫句原文、结果句原文、几个客观数字。"
+                           "S01 / S02 就是 SECTION 1 里那两句的编号",
+           "pairs_numbers": "    数字  ：铺垫发声 {setup_voiced:.2f}s | "
+                            "结果发声 {result_voiced:.2f}s | 两句间隔 {gap:.2f}s | "
+                            "区间内静音合计 {silence:.2f}s",
+           "pairs_note": "这一段是程序按可计算特征（结果句发声短、紧跟一句更长的铺垫、"
+                         "两句间隔够近）挑出来的候选，区间用的是入库时同一个算法，"
+                         "所以 setup_at / result_at 可以直接照抄。"
+                         "**这是候选不是全集**：纯画面、纯动作的高光不会出现在这里，"
+                         "该给还得给；候选里不成立的也可以不要。",
+           "pairs_none": "--- 没有符合客观判据的候选对（不代表这条视频没有高光）---",
            "pieces_file": "合并素材",
-           "pieces_count": "共 {count} 段素材（相邻素材之间的 1 秒纯红画面只作分界，"
+           "pieces_count": "共 {count} 段素材（素材之间的空隙只作分界，"
                            "不属于任何一段）",
            "pieces_item": "  素材 {order}：{start} - {end}（{span:.2f}s）",
            "pieces_note": "下面按素材逐段给数据，每段内部就是一份完整的合并导出（4 个 SECTION）。"
@@ -215,34 +279,63 @@ _TXT_WORDS: dict[str, dict[str, str]] = {
            "action_section": "Action track (one timestamp per action, event granularity)",
            "expression_section": "Expression track (one timestamp per expression, face model @2fps)",
            "timeline_section": "Interleaved timeline (visual events + speech, sorted by time)",
-           "sections_index": "This file has 4 sections: 1 interleaved timeline | 2 action track "
-                             "| 3 expression track | 4 word-by-word timeline",
+           "pairs_section": "Setup -> result candidates (picked by objective features; "
+                            "the clip range is already computed)",
+           "sections_index": "This file has 5 sections: 1 interleaved timeline | 2 action track "
+                             "| 3 expression track | 4 word-by-word timeline "
+                             "| 5 setup->result candidates",
            "authority_note": "Timing authority = SECTION 4. Emotion authority = SECTION 3 "
-                             "(face model). The emotion on Speech lines is audio-based: "
-                             "reference only.",
+                             "(face model). The emotion on Speech lines comes from the audio "
+                             "model and is printed only when SECTION 3 reports the same label "
+                             "over the same time (audio-only emotions are dropped).",
            "timestamp_note": "All timestamps are absolute seconds from the start of the video "
                              "(decimal seconds, NOT mm:ss), between 0 and the Duration above. "
                              "Copy them verbatim; never convert them.",
-           "legend_visual": "Row: [start - end] Visual (expression score) [importance]: "
+           "legend_visual": "Row: V01  [start - end] Visual (expression score) [importance]: "
                             "description",
            "legend_ocr": "Row:     On-screen text: ... (indented, belongs to the Visual row "
-                         "above)",
-           "legend_speech": "Row: [start - end] Speech (speaker N) (audio emotion score, "
-                            "reference only; omitted when the score is below 0.30): text",
+                         "above; repeated text is printed only the first time)",
+           "legend_speech": "Row: S01  [start - end] Speech (speaker N) (audio emotion "
+                            "intensity): text - the leading S01 is this sentence's id, used by "
+                            "SECTION 4 and SECTION 5 to point at it; a sentence split by silence "
+                            "is already joined back into one row, with the inner silence noted "
+                            "in brackets; joined rows with disagreeing speakers carry no speaker "
+                            "tag",
+           "inner_silence": " ({count} inner silence(s), {total:.2f}s total)",
            "legend_action": "Row: [start - end]: action @ scene",
-           "legend_expression": "Row: [start - end]: expression intensity(0-1) - decisive "
-                                "emotional evidence; largest face on screen only",
+           "legend_expression": "Row: [start - end]: expression confidence(0-1) - decisive "
+                                "emotional evidence; the number is how sure the face model is "
+                                "about the label, NOT how strong the expression is; "
+                                "largest face on screen only",
            "face_gap": "--- {gap:.2f}s with no face detected (this is NOT neutral) ---",
            "expression_none": "--- No valid face detected anywhere in this video; the "
                               "expression track is empty (this is NOT neutral) ---",
            "expression_legacy": "--- This analysis predates expression persistence, so the "
                                 "database holds no expression track; re-analyse the video to "
                                 "fill this section (do NOT read it as 'no expression') ---",
-           "legend_words": "Row: [start - end] word - clip.start / clip.end must come from here",
+           "legend_words": "Grouped per sentence: the group head is "
+                           "\"S01  [start - end] full sentence\", and each indented row below it "
+                           "is one word of that sentence. clip.start / clip.end must come from "
+                           "the words here",
            "word_gap": "--- {gap:.2f}s with no speech ---",
+           "legend_pairs": "Row: S01 -> S02   setup_at / result_at   clip start - end (span), "
+                           "followed by the setup line, the result line and a few objective "
+                           "numbers. S01 / S02 are the sentence ids from SECTION 1",
+           "pairs_numbers": "    numbers: setup voiced {setup_voiced:.2f}s | "
+                            "result voiced {result_voiced:.2f}s | gap {gap:.2f}s | "
+                            "silence inside the clip {silence:.2f}s",
+           "pairs_note": "This section is picked by computable features only (a short-voiced "
+                         "result line right after a longer setup line, close enough in time). "
+                         "The clip range comes from the same routine used at import time, so "
+                         "setup_at / result_at can be copied verbatim. "
+                         "**These are candidates, not the full set**: purely visual or "
+                         "action-based highlights never show up here, so still report them; "
+                         "and a candidate you disagree with can be dropped.",
+           "pairs_none": "--- no candidate matched the objective rules (this does NOT mean the "
+                         "video has no highlight) ---",
            "pieces_file": "pieces",
-           "pieces_count": "{count} source pieces (the 1-second pure red frames between "
-                           "neighbouring pieces are boundaries only and belong to no piece)",
+           "pieces_count": "{count} source pieces (the gaps between neighbouring "
+                           "pieces are boundaries only and belong to no piece)",
            "pieces_item": "  Piece {order}: {start} - {end} ({span:.2f}s)",
            "pieces_note": "The data below is grouped per piece; each block is a complete merged "
                           "export (4 sections). Timestamps stay absolute seconds of the merged "
@@ -321,9 +414,12 @@ def event_text_of(event: dict[str, Any], translated: bool = False) -> str:
     return str(event.get("description") or event.get("event") or "")
 
 
-def emotion_tag(emotion_en: Any, intensity: Any, language: str = "zh",
+def emotion_tag(emotion_en: Any, score: Any, language: str = "zh",
                 stored: Any = None) -> str:
     """情绪后缀：`（开心 0.80）` / ` (happy 0.80)`。没判到情绪就返回空串。
+
+    score 是这一路自己的数值：画面情绪传置信度（emotion_confidence），
+    语音情绪传强度（emotion_intensity）。这里只负责排版，不解释语义。
 
     按当前文本语言现渲显示名，所以切到译文视图导出时情绪也跟着变；老结果没有
     英文标签时从存下来的显示名反查（认中英两种写法）。
@@ -336,8 +432,8 @@ def emotion_tag(emotion_en: Any, intensity: Any, language: str = "zh",
     if not name:
         return ""
     body = str(name)
-    if isinstance(intensity, (int, float)):
-        body = f"{body} {float(intensity):.2f}"
+    if isinstance(score, (int, float)):
+        body = f"{body} {float(score):.2f}"
     return f"（{body}）" if (normalize_code(language) or "zh") == "zh" else f" ({body})"
 
 
@@ -414,6 +510,168 @@ def write_words_txt(path: Path, video_name: str, segments: list[dict[str, Any]],
     return len(items)
 
 
+# ---------------------------------------------------- 给 AI 看的句子整理与配对
+def _ends_sentence(text: str) -> bool:
+    """这一片是不是把一句话说完了（以句末标点收尾）。"""
+    body = text.rstrip()
+    return bool(body) and body[-1] in SENTENCE_END
+
+
+def _glue(left: str, right: str) -> str:
+    """拼两片文本：有拉丁字母就补空格，中日韩原样接。"""
+    latin = any("a" <= ch.lower() <= "z" for ch in left + right)
+    return f"{left} {right}" if latin else left + right
+
+
+def join_broken_speech(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把被 ASR 切断的同一句话拼回一条，返回新的段列表（不改入参）。
+
+    为什么必须拼：库里这句话是三条记录 ——
+    `[32.22-32.58] If`、`[34.64-34.96] this is green,`、`[35.00-36.02] I'm falling pregnant next year.`
+    分三行摆给 AI，它就会把「条件说完」（32.58 或 34.96）当成结果时刻。
+    实测这是它最常犯的错，而错因在**数据呈现**，不在提示词。
+
+    判据只看标点：前一片不以句末标点收尾 → 还没说完，和下一片是同一句。
+    不用时间阈值当主判据（句内静音能长到 4 秒，正常句间也能只隔 0.16 秒），
+    但仍设一个上限 `MAX_SENTENCE_JOIN_GAP`：隔太远只可能是两句话，拼起来是造假。
+
+    说话人**不参与判断**：分离结果本身不可靠（实测两三个人被判成四个），
+    拿它拦合并会把同一句话继续切碎。作为代价，一组里说话人不一致时
+    合并行干脆不打说话人标签 —— 宁可不给，也不给假证据。
+
+    每条结果带两个内部字段供排版用：`_parts`（各片的起止）、`_speakers`（涉及的说话人）。
+    """
+    out: list[dict[str, Any]] = []
+    for seg in sorted(segments or (), key=lambda s: float(s.get("start") or 0.0)):
+        item = dict(seg)
+        text = str(item.get("text") or "").strip()
+        start = float(item.get("start") or 0.0)
+        end = float(item.get("end") or 0.0)
+        prev = out[-1] if out else None
+        joinable = (prev is not None and text and str(prev.get("text") or "").strip()
+                    and not _ends_sentence(str(prev["text"]))
+                    and start - float(prev.get("end") or 0.0) <= MAX_SENTENCE_JOIN_GAP)
+        if not joinable:
+            item["_parts"] = [(start, end)]
+            item["_speakers"] = [item["speaker"]] if item.get("speaker") else []
+            out.append(item)
+            continue
+        prev["text"] = _glue(str(prev["text"]).strip(), text)
+        prev["end"] = end
+        prev["words"] = list(prev.get("words") or []) + list(item.get("words") or [])
+        prev["_parts"].append((start, end))
+        if item.get("speaker") and item["speaker"] not in prev["_speakers"]:
+            prev["_speakers"].append(item["speaker"])
+        # 译文只在两边都有的时候拼；缺一半就整句丢掉译文，不半译半原文
+        if prev.get("text_translated") and item.get("text_translated"):
+            prev["text_translated"] = _glue(str(prev["text_translated"]).strip(),
+                                            str(item["text_translated"]).strip())
+        else:
+            prev.pop("text_translated", None)
+        # 情绪取组里强度最高的那一片：拼起来的句子只能有一个情绪标
+        if _num_or_none(item.get("emotion_intensity")) is not None and (
+                _num_or_none(prev.get("emotion_intensity")) is None
+                or float(item["emotion_intensity"]) > float(prev["emotion_intensity"])):
+            for key in ("emotion", "emotion_en", "emotion_intensity"):
+                prev[key] = item.get(key)
+    return out
+
+
+def _num_or_none(value: Any) -> float | None:
+    """能当数字用就返回 float，否则 None（bool 不算数字）。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def inner_silence(seg: dict[str, Any]) -> tuple[int, float]:
+    """合并回来的这一句里有几处句内静音、合计多久（只算 >= 0.8 秒的）。"""
+    parts = seg.get("_parts") or []
+    count, total = 0, 0.0
+    for (_, left_end), (right_start, _) in zip(parts, parts[1:]):
+        gap = float(right_start) - float(left_end)
+        if gap >= MIN_INNER_SILENCE:
+            count += 1
+            total += gap
+    return count, round(total, 2)
+
+
+def expression_agrees(emotions: list[dict[str, Any]] | None, start: float, end: float,
+                      label: Any) -> bool:
+    """这段时间里人脸模型是不是也给出了同一个情绪标签。
+
+    音频情绪噪声很大（实测 "this is green," 判成 disgusted 0.87，而真正的
+    "Thank God." 一个标都没有），光靠置信度门槛拦不住 —— 噪声本身就是高分。
+    所以改成要双证据：表情轨在同一段时间给出同一个标签才打印，否则整条不给。
+    """
+    name = str(label or "").strip().lower()
+    if not name:
+        return False
+    for span in emotions or ():
+        try:
+            left, right = float(span["start"]), float(span["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if right <= start or left >= end:
+            continue
+        if str(span.get("emotion_en") or "").strip().lower() == name:
+            return True
+    return False
+
+
+def pair_candidates(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """程序按客观特征挑出的「铺垫 → 结果」候选对，每条附算好的区间和几个数字。
+
+    判据全是可计算的，不含任何语义理解：
+
+      * 结果句发声很短（`PAIR_RESULT_MAX_VOICED`）—— 结果多是一声反应；
+      * 铺垫句发声够长（`PAIR_SETUP_MIN_VOICED`）—— 太短的是碎片不是铺垫；
+      * 铺垫比结果说得多；
+      * 两句之间的间隔不超过 `PAIR_MAX_GAP`。
+
+    区间用 `plan_from_span` 算，和 `assets --import-moments` 入库时**同一个函数**，
+    所以这里印出来的 start / end 就是将来真剪出来的区间，不是估算。
+    区间重叠的后来者丢掉。
+
+    附带的数字（结果发声 / 铺垫发声 / 间隔 / 区间内静音）只**摆给 AI 当依据**，
+    不写进高光 JSON —— 判断归 AI，程序只负责把它看不到的东西摊开。
+
+    这是**候选**不是全集：非「铺垫 + 反应」型的高光（纯画面、纯动作）不会出现在这里。
+    """
+    from ..highlight.clip_engine import (plan_from_span, segments_from_payload,  # noqa: PLC0415
+                                        silent_gaps, voiced_seconds)
+
+    raw = segments_from_payload(segments)
+    joined = segments_from_payload(join_broken_speech(segments))
+    out: list[dict[str, Any]] = []
+    taken: list[tuple[float, float]] = []
+    for setup, result in zip(joined, joined[1:]):
+        said, reply = voiced_seconds(setup), voiced_seconds(result)
+        if reply > PAIR_RESULT_MAX_VOICED or said < PAIR_SETUP_MIN_VOICED or said <= reply:
+            continue
+        if result.start - setup.end > PAIR_MAX_GAP:
+            continue
+        plan = plan_from_span(raw, setup.start, result.start)
+        if plan is None:
+            continue
+        start, end, _ = plan
+        if any(start < old_end and end > old_start for old_start, old_end in taken):
+            continue
+        taken.append((start, end))
+        out.append({"setup_at": setup.start, "result_at": result.start,
+                    "start": start, "end": end,
+                    "setup": setup.text.strip(), "result": result.text.strip(),
+                    "setup_voiced": round(said, 2), "result_voiced": round(reply, 2),
+                    "gap": round(max(0.0, result.start - setup.end), 2),
+                    "silence": round(sum(b - a for a, b in silent_gaps(raw, start, end)), 2)})
+    return out
+
+
+
+
 def write_speech_txt(path: Path, video_name: str, segments: list[dict[str, Any]],
 
                      translated: bool = False, language: str = "zh") -> int:
@@ -481,33 +739,55 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
 
     w = txt_words(language)
     labels = labels_for(language)
+    joined = join_broken_speech(segments)
     multi = multi_speaker(segments)
     rows: list[tuple[float, float, str, str, list[str]]] = []
+    seen_ocr: dict[str, int] = {}
     for ev in events:
         text = event_text_of(ev, translated).strip()
         if text:
             kind = labels["visual"] + emotion_tag(ev.get("emotion_en"),
-                                                 ev.get("emotion_intensity"), language,
+                                                 legacy_score(ev, "emotion_confidence",
+                                                              "emotion_intensity"), language,
                                                  ev.get("emotion"))
             # importance 是判定用的既有标签（摔倒/碰撞/场景剧变 -> high/critical），带出来省得下游重推
             if ev.get("importance"):
                 kind += f" [{ev['importance']}]"
-            extra = [f"    {labels['ocr']}{w['sep']}{ev['ocr_text']}"] if ev.get("ocr_text") else []
-            rows.append((float(ev["start"]), float(ev["end"]), kind, text, extra))
-    for seg in segments:
+            # 画面文字：太短的是误识别碎片，重复的只在第一次出现时打
+            # （实测同一个包装上的字会在 8 条事件里出现 3 次，刷版面还会被当成新证据）
+            ocr = str(ev.get("ocr_text") or "").strip()
+            extra: list[str] = []
+            if len(ocr) >= OCR_MIN_CHARS:
+                seen = seen_ocr.get(ocr.lower(), 0)
+                if seen < OCR_MAX_TIMES:
+                    seen_ocr[ocr.lower()] = seen + 1
+                    extra = [f"    {labels['ocr']}{w['sep']}{ocr}"]
+            rows.append((float(ev["start"]), float(ev["end"]), "", kind, text, extra))
+    speech_id: dict[float, str] = {}
+    for seg in joined:
         text = speech_text_of(seg, translated).strip()
         if text:
-            who = speaker_tag(seg.get("speaker"), language) if multi else ""
-            # 置信度太低的音频情绪不打出来：emotion2vec 逐句判，低分那批基本是噪声
-            # （"Yeah, it's green" 判 sad 0.99 这种错也有，但 0.0x 的更是纯干扰），
-            # 而高光判定本来就以表情轨为准，少给模型一堆假证据。
+            speakers = seg.get("_speakers") or ([seg["speaker"]] if seg.get("speaker") else [])
+            # 合并句里说话人不一致就不打标签：分离本来就不可靠，宁可不给也不给假证据
+            who = speaker_tag(speakers[0], language) if (multi and len(speakers) == 1) else ""
+            # 音频情绪要双证据：表情轨在同一段时间给出同一个标签才打。
+            # 光靠置信度门槛拦不住噪声——实测 "this is green," 判成 disgusted 0.87，
+            # 而真正的 "Thank God." 一个标都没有，高分噪声比低分噪声更害人。
             score = seg.get("emotion_intensity")
             weak = isinstance(score, (int, float)) and float(score) < MIN_SPEECH_EMOTION_SCORE
-            mood = "" if weak else emotion_tag(seg.get("emotion_en"), score, language,
-                                               seg.get("emotion"))
-            rows.append((float(seg["start"]), float(seg["end"]),
-                         labels["speech"] + who + mood, text, []))
-    rows.sort(key=lambda r: (r[0], r[2]))
+            agreed = expression_agrees(emotions, float(seg["start"]), float(seg["end"]),
+                                       seg.get("emotion_en"))
+            mood = "" if (weak or not agreed) else emotion_tag(seg.get("emotion_en"), score,
+                                                               language, seg.get("emotion"))
+            count, total = inner_silence(seg)
+            hush = w["inner_silence"].format(count=count, total=total) if count else ""
+            # 每句一个稳定编号：SECTION 4 的分组头和 SECTION 5 的候选对都引用它，
+            # AI 不用靠时间戳在几百行里对号，指错行的机会少一大截
+            tag = f"S{len(speech_id) + 1:02d}"
+            speech_id[round(float(seg["start"]), 3)] = tag
+            rows.append((float(seg["start"]), float(seg["end"]), tag,
+                         labels["speech"] + who + mood + hush, text, []))
+    rows.sort(key=lambda r: (r[0], r[3]))
 
     lines = [
         f"{w['video']}{w['sep']}{video_name}",
@@ -517,7 +797,7 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
     lines += [
         w["merged_count"].format(events=len(events), speech=len(segments))
         + (w["translated"] if translated else ""),
-        # 表头先把四段结构和"谁说了算"讲清楚：下游的高光筛选提示词按 SECTION 编号引用本文件
+        # 表头先把五段结构和"谁说了算"讲清楚：下游的高光筛选提示词按 SECTION 编号引用本文件
         w["sections_index"],
         w["authority_note"],
         w["timestamp_note"],
@@ -530,9 +810,14 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
         "=" * 60,
         "",
     ]
-    for start, end, kind, text, extra in rows:
-        lines.append(f"[{fmt_secs(start)} - {fmt_secs(end)}] {kind}{w['sep']}{text}")
+    visual_seen = 0
+    for start, end, tag, kind, text, extra in rows:
+        if not tag:
+            visual_seen += 1
+            tag = f"V{visual_seen:02d}"
+        lines.append(f"{tag}  {_span(start, end)} {kind}{w['sep']}{text}")
         lines += extra
+
 
     # 两条独立时间戳轨：动作（事件粒度归并）和表情（人脸模型 2fps 归并）。
     # actions 没传就从事件里现算；表情段只能由调用方给（来自 visual meta 的 face.segments）。
@@ -544,7 +829,7 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
                   w["legend_action"], "=" * 60, ""]
         for span in spans:
             scene = f" @ {span['scene']}" if span.get("scene") else ""
-            lines.append(f"[{fmt_secs(span['start'])} - {fmt_secs(span['end'])}]"
+            lines.append(f"{_span(span['start'], span['end'])}"
                          f"{w['sep']}{span['action']}{scene}")
     if emotions:
         lines += ["", "=" * 60, f"SECTION 3 - {w['expression_section']}",
@@ -556,8 +841,10 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
             if prev_face_end is not None and float(span["start"]) - prev_face_end > MIN_FACE_GAP_SECONDS:
                 lines.append(w["face_gap"].format(gap=float(span["start"]) - prev_face_end))
             name = display_name(span.get("emotion_en"), None, language) or span.get("emotion_en")
-            lines.append(f"[{fmt_secs(span['start'])} - {fmt_secs(span['end'])}]"
-                         f"{w['sep']}{name} {span.get('intensity', 0):.2f}")
+            score = legacy_score(span, "confidence", "intensity")
+            # 缺值就不打数字（见 write_timeline_txt 里同一处判断）：0.00 是假证据
+            tail = f" {float(score):.2f}" if isinstance(score, (int, float)) else ""
+            lines.append(f"{_span(span['start'], span['end'])}{w['sep']}{name}{tail}")
             prev_face_end = float(span["end"])
     elif expression_state in ("no_face", "legacy_missing"):
         # 没有表情段也要把 SECTION 3 摆出来，并说清是"真没脸"还是"库里没这份数据"。
@@ -567,7 +854,9 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
                   w["expression_none"] if expression_state == "no_face"
                   else w["expression_legacy"]]
 
-    # 末尾附一段逐词时间轴：一个词一个时间戳。说明文字跟着内容语言走（英文内容出英文表头），
+    # 末尾附一段逐词时间轴：一个词一个时间戳，**按句分组**。
+    # 分组头用的就是 SECTION 1 那句的编号（S07 之类），所以两段能对着看；
+    # 不分组的话两百多行词平铺，AI 得自己数到哪一行才是某句话的最后一个词。
     # 逐词只出原文——逐词翻译是词表不是句子。
     items = words_of(segments)
     if items:
@@ -575,14 +864,64 @@ def merged_lines(video_name: str, segments: list[dict[str, Any]],
                   f"{w['word_count']}{w['sep']}{len(items)}",
                   w["legend_words"], "=" * 60, ""]
         prev_end: float | None = None
-        for start, end, body in items:
-            # 词与词之间的静音显式标出来：ASR 的对齐会在一句话中间留洞
-            # （实测 "If" 105.50 -> "this" 114.06，中间 8.5s），
-            # 下游按"第一个词的 start 到最后一个词的 end"取边界就会把静音包进片段。
-            if prev_end is not None and start - prev_end > MIN_WORD_GAP_SECONDS:
-                lines.append(w["word_gap"].format(gap=start - prev_end))
-            lines.append(f"[{fmt_secs(start)} - {fmt_secs(end)}] {body}")
-            prev_end = end
+        for seg in joined:
+            words = [item for item in (seg.get("words") or ())
+                     if item.get("start") is not None and item.get("end") is not None]
+            body = str(seg.get("text") or "").strip()
+            if not words and not body:
+                continue
+            tag = speech_id.get(round(float(seg.get("start") or 0.0), 3), "")
+            head = f"{tag or '--'}  {_span(seg.get('start') or 0.0, seg.get('end') or 0.0)}"
+            if prev_end is not None:
+                first = float(words[0]["start"]) if words else float(seg.get("start") or 0.0)
+                if first - prev_end > MIN_WORD_GAP_SECONDS:
+                    lines.append(w["word_gap"].format(gap=first - prev_end))
+                    # 这个空档已经在组头前面标过了，往下走到第一个词时别再标一遍
+                    prev_end = first
+            lines.append(f"{head} {body}")
+            if not words:            # 没有词级时间的段（time_estimated 那类）：只出句级
+                prev_end = float(seg.get("end") or 0.0)
+                continue
+            if len(words) == 1 and str(words[0].get("word") or "").strip() == body:
+                # 单词成句：组头已经把这个词和它的时间写完了，再来一行是纯重复
+                prev_end = float(words[0]["end"])
+                continue
+            for word in words:
+                start, end = float(word["start"]), float(word["end"])
+                text = str(word.get("word") or "").strip()
+                if not text:
+                    continue
+                # 句内静音显式标出来：ASR 的对齐会在一句话中间留洞
+                # （实测 "If" 32.22 -> "this" 34.64，中间 2.06s），
+                # 下游按"第一个词的 start 到最后一个词的 end"取边界就会把静音包进片段。
+                if prev_end is not None and start - prev_end > MIN_WORD_GAP_SECONDS:
+                    lines.append(w["word_gap"].format(gap=start - prev_end))
+                lines.append(f"      {_span(start, end)} {text}")
+                prev_end = end
+
+
+    # 最后附「铺垫 → 结果」候选对：AI 最容易犯的错是把条件说完当成结果，
+    # 而"哪句是短反应"完全可以由程序判。判据和区间都在 pair_candidates 里，
+    # 这里只负责排版。有语音就出这一段，一条候选都没有也要写明原因。
+    if segments:
+        pairs = pair_candidates(segments)
+        lines += ["", "=" * 60, f"SECTION 5 - {w['pairs_section']}",
+                  w["legend_pairs"], w["pairs_note"], "=" * 60, ""]
+        if not pairs:
+            lines.append(w["pairs_none"])
+        for pair in pairs:
+            span = pair["end"] - pair["start"]
+            left = speech_id.get(round(float(pair["setup_at"]), 3), "--")
+            right = speech_id.get(round(float(pair["result_at"]), 3), "--")
+            lines.append(f"{left} -> {right}   setup_at {fmt_secs(pair['setup_at'])}"
+                         f" / result_at {fmt_secs(pair['result_at'])}"
+                         f"   clip {fmt_secs(pair['start'])} - {fmt_secs(pair['end'])}"
+                         f" ({span:.2f}s)")
+            lines.append(f"    setup {w['sep']}{pair['setup']}")
+            lines.append(f"    result{w['sep']}{pair['result']}")
+            lines.append(w["pairs_numbers"].format(
+                setup_voiced=pair["setup_voiced"], result_voiced=pair["result_voiced"],
+                gap=pair["gap"], silence=pair["silence"]))
     return lines, len(rows)
 
 
@@ -654,7 +993,7 @@ def grouped_merged_lines(video_name: str, spans: list[tuple[float, float]],
                          expression_state: str = "ok") -> tuple[list[str], int]:
     """按素材分段的合并导出，返回 (行列表, 时间线总条数)。
 
-    内容跟 write_merged_txt 完全一致，只是按 spans（红屏分界切出来的素材区间）
+    内容跟 write_merged_txt 完全一致，只是按 spans（调用方给的素材区间）
     分组：先给一份素材清单，然后每段素材一份完整的四段式合并导出。
     每段的时间戳都还是合并视频的绝对秒数，块头会写明「本段 0.00 对应哪个绝对秒」。
     """
@@ -732,17 +1071,10 @@ def export_events(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
             # 画面事件只带画面情绪，语音情绪由语音段自己带，导出时不会串行
             "emotion": e.get("visual_emotion"),
             "emotion_en": e.get("visual_emotion_en"),
-            "emotion_intensity": e.get("visual_emotion_intensity"),
+            "emotion_confidence": legacy_score(e, "visual_emotion_confidence",
+                                               "visual_emotion_intensity"),
         })
     return out
-
-
-def _rebuild(cls: Any, data: dict[str, Any], **extra: Any) -> Any:
-    """按 dataclass 现有字段过滤后再构造：老库里的行可能多字段也可能少字段。"""
-    from dataclasses import fields  # noqa: PLC0415
-
-    names = {f.name for f in fields(cls)} - set(extra)
-    return cls(**{k: v for k, v in data.items() if k in names}, **extra)
 
 
 def script_lines(payload: dict[str, Any], *,
@@ -755,14 +1087,14 @@ def script_lines(payload: dict[str, Any], *,
     时间线仍旧由 build_timeline / filter_timeline 合并、动作轨仍旧由 action_track 归并、
     正文仍旧由 merged_lines 排版——三处都是原来那份实现，这里只负责把库里的形状喂进去。
 
-    pieces 给了（这个视频是拼起来的合并视频，红屏分界见 timeline.red_split）就按素材分段排版，
-    正文内容不变，只是多一层归类。
+    pieces 给了（调用方知道这个视频是拼起来的合并视频，而且拿得到每段素材的区间）
+    就按素材分段排版，正文内容不变，只是多一层归类。
 
     过滤参数一律用当次分析存下来的 render_config：用户后来改了 GUI 配置，
     同一个视频重新生成的剧本也必须和当初逐行一致。老记录（v5 之前跑的）没有存过
     render_config / output_language，这时才退回默认值和调用方给的 language。
     """
-    from ..events import SpeechEvent, SpeechWord, VisualEvent  # noqa: PLC0415
+    from ..events import SpeechEvent, VisualEvent  # noqa: PLC0415
     from .engine import action_track, build_timeline, filter_timeline  # noqa: PLC0415
 
     segments = payload.get("segments") or []
@@ -771,10 +1103,10 @@ def script_lines(payload: dict[str, Any], *,
         raise ValueError("译文未落库，请使用内存结果导出或重新翻译。")
 
     cfg = payload.get("render_config") or {}
-    visual = [_rebuild(VisualEvent, e) for e in (payload.get("events") or [])]
-    speech = [_rebuild(SpeechEvent, s,
-                       words=[_rebuild(SpeechWord, w) for w in (s.get("words") or [])])
-              for s in segments]
+    # 一律走 from_cache：它认字段别名（老库里画面情绪的键是 emotion_intensity），
+    # 按 dataclass 字段名硬过滤会把旧键当"不认识的键"直接丢掉，情绪数字就整个消失了。
+    visual = [VisualEvent.from_cache(e) for e in (payload.get("events") or [])]
+    speech = [SpeechEvent.from_cache(s) for s in segments]
     entries = build_timeline(visual, speech,
                              min_overlap=float(cfg.get("min_overlap_seconds", 0.2)))
     filtered = filter_timeline(entries,

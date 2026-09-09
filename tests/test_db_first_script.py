@@ -41,6 +41,7 @@ from vidscribe.db import migrations, open_db             # noqa: E402
 from vidscribe.db import repo as db_repo                 # noqa: E402
 from vidscribe.db import schema                          # noqa: E402
 from vidscribe.events import VisualEvent                 # noqa: E402
+from vidscribe.highlight import clip_engine               # noqa: E402
 from vidscribe.timeline import exporters                 # noqa: E402
 from vidscribe.timeline.engine import (                  # noqa: E402
     action_track,
@@ -89,19 +90,19 @@ def visual_events() -> list[dict]:
                     confidence=0.82, importance="normal", timestamp_source="frame_based",
                     source_frames=[1, 2], ocr_text="早餐时间",
                     action="walking", scene="kitchen", subjects=["person"],
-                    emotion="平静", emotion_en="neutral", emotion_intensity=0.41,
+                    emotion="平静", emotion_en="neutral", emotion_confidence=0.41,
                     emotion_source="face").to_dict(),
         VisualEvent(id=2, start=6.0, end=14.0, event="", description="他打翻了杯子",
                     confidence=0.91, importance="high", timestamp_source="frame_based",
                     source_frames=[3], ocr_text=None,
                     action="dropping", scene="kitchen", subjects=["person", "cup"],
-                    emotion="惊讶", emotion_en="surprise", emotion_intensity=0.88,
+                    emotion="惊讶", emotion_en="surprise", emotion_confidence=0.88,
                     emotion_source="face").to_dict(),
         VisualEvent(id=3, start=14.0, end=22.0, event="", description="他弯腰去擦地",
                     confidence=0.66, importance="normal", timestamp_source="hybrid",
                     source_frames=[4, 5], ocr_text=None,
                     action="cleaning", scene="kitchen", subjects=["person"],
-                    emotion="平静", emotion_en="neutral", emotion_intensity=0.35,
+                    emotion="平静", emotion_en="neutral", emotion_confidence=0.35,
                     emotion_source="face").to_dict(),
     ]
 
@@ -128,10 +129,29 @@ def speech_segments() -> list[dict]:
 def face_spans() -> list[dict]:
     """人脸表情轨：2fps 采样归并出来的独立时间轴，中间故意留一个没检到脸的缺口。"""
     return [
-        {"start": 0.5, "end": 5.5, "emotion_en": "neutral", "intensity": 0.44, "samples": 10},
-        {"start": 6.0, "end": 12.5, "emotion_en": "surprise", "intensity": 0.91, "samples": 13},
-        {"start": 19.0, "end": 22.0, "emotion_en": "angry", "intensity": 0.77, "samples": 6},
+        {"start": 0.5, "end": 5.5, "emotion_en": "neutral", "confidence": 0.44, "samples": 10},
+        {"start": 6.0, "end": 12.5, "emotion_en": "surprise", "confidence": 0.91, "samples": 13},
+        {"start": 19.0, "end": 22.0, "emotion_en": "angry", "confidence": 0.77, "samples": 6},
     ]
+
+
+def expression_lines(lines: list[str]) -> list[str]:
+    """切出 SECTION 3 的正文行（只要带时间戳那些，图例和分隔线不算）。
+
+    断言必须绑定到这一段：全文找子串的写法（`any("0.91" in line for line in all)`）
+    在别的段落里也可能命中，置信度整段退化成 0.00 都能照样通过。
+    """
+    out: list[str] = []
+    inside = False
+    for line in lines:
+        if line.startswith("SECTION 3 - "):
+            inside = True
+            continue
+        if inside and line.startswith("SECTION "):
+            break
+        if inside and line.startswith("["):
+            out.append(line)
+    return out
 
 
 def seed_analysis(cfg, db, *, video: Path | None = None, spans: list[dict] | None = None,
@@ -185,7 +205,7 @@ def memory_baseline(video_name: str, segments: list[dict], events: list[dict],
         "speech_emotion_en": e["speech_emotion_en"],
         "speech_emotion_intensity": e["speech_emotion_intensity"],
         "visual_emotion": e["visual_emotion"], "visual_emotion_en": e["visual_emotion_en"],
-        "visual_emotion_intensity": e["visual_emotion_intensity"], "quality": e["quality"],
+        "visual_emotion_confidence": e["visual_emotion_confidence"], "quality": e["quality"],
     } for e in filtered]
     lines, _ = exporters.merged_lines(
         video_name, segments, exporters.export_events(json_like), False, language,
@@ -205,7 +225,7 @@ def test_expression_spans_roundtrip(tmp_path: Path) -> None:
         assert float(row["start_time"]) == span["start"]
         assert float(row["end_time"]) == span["end"]
         assert row["emotion_en"] == span["emotion_en"]
-        assert abs(float(row["intensity"]) - span["intensity"]) < 1e-9
+        assert abs(float(row["confidence"]) - span["confidence"]) < 1e-9
         assert int(row["samples"]) == span["samples"]
         assert json.loads(row["raw_json"]) == span, "raw_json 必须是原样，字段一个不少"
 
@@ -220,7 +240,7 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
     def v4_statements() -> list[str]:
         """把 schema.TABLES 退回 v5 之前：没有 expression_spans，analysis_runs 没有三个新列，
         prm_profiles 还没有 v6 的 enabled 列和 v8 的 content 列、videos 还没有 v7 的
-        blocked_language 列（不然升级脚本的 ADD COLUMN 会撞重名）。"""
+        blocked_language 列和 v10 的 no_audio 列（不然升级脚本的 ADD COLUMN 会撞重名）。"""
         out: list[str] = []
         for statement in schema.TABLES:
             if "expression_spans" in statement:
@@ -232,6 +252,7 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
             if "CREATE TABLE IF NOT EXISTS videos" in statement:
                 out.append("\n".join(line for line in statement.splitlines()
                                      if "blocked_language" not in line
+                                     and "no_audio" not in line
                                      and not line.strip().startswith("--")))
                 continue
             if "CREATE TABLE IF NOT EXISTS analysis_runs" in statement:
@@ -263,8 +284,8 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
     names = lambda: [r[1] for r in old.execute("PRAGMA table_info(analysis_runs)")]
     assert "face_available" not in names(), "造出来的老库不该有 v5 的列"
 
-    assert migrations.apply(old) == 8, "v4 能一路升到 v8"
-    assert int(old.execute("PRAGMA user_version").fetchone()[0]) == 8
+    assert migrations.apply(old) == 10, "v4 能一路升到 v10"
+    assert int(old.execute("PRAGMA user_version").fetchone()[0]) == 10
 
     tables = {r[0] for r in old.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "expression_spans" in tables, "新表要有"
@@ -272,6 +293,7 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
     assert "enabled" in prm_cols, "v6 的「PRM 使用状况」列要升上来"
     video_cols = [r[1] for r in old.execute("PRAGMA table_info(videos)")]
     assert "blocked_language" in video_cols, "v7 的「语言拦截」列要升上来"
+    assert "no_audio" in video_cols, "v10 的「音轨预检」列要升上来"
     assert "content" in prm_cols, "v8 的「PRM 正文」列要升上来"
     for col in ("output_language", "render_config", "face_available"):
         assert col in names(), f"analysis_runs 缺列 {col}"
@@ -337,8 +359,132 @@ def test_script_survives_deleting_output_and_cache(tmp_path: Path) -> None:
     assert count > 0
     text = "\n".join(rebuilt)
     assert "SECTION 3 - " in text, "表情轨必须来自库，不是来自被删掉的文件"
-    assert any("0.91" in line for line in rebuilt), "表情强度是真数据，不是默认值"
+    assert any("0.91" in line for line in rebuilt), "表情置信度是真数据，不是默认值"
     db.close()
+
+
+# ---------------------------------------------------------------- T10/T11/T12
+def test_legacy_intensity_key_still_exports_real_confidence(tmp_path: Path) -> None:
+    """v9 改名之前落库的表情段：列里是真值，`raw_json` 里还是旧键 `intensity`。
+
+    `ALTER TABLE ... RENAME COLUMN` 不会动 JSON 正文，所以只读 raw_json 重建时
+    `confidence` 整个缺失，导出端一兜底就把真值印成 `0.00`——而 0.00 在 PRM 里的含义是
+    "模型完全不确定"，等于主动给下游 AI 喂假证据。这条链路必须有测试守着。
+    """
+    cfg, db = make_project(tmp_path)
+    _video, vid, analysis = seed_analysis(cfg, db, spans=face_spans())
+
+    # 把库退回"改名前"的形状：列保留真值，raw_json 换回旧键
+    with db.tx() as conn:
+        rows = conn.execute("SELECT id, raw_json FROM expression_spans WHERE analysis_id = ?",
+                            (analysis,)).fetchall()
+        assert rows, "夹具本身要先把表情段写进去"
+        for row in rows:
+            span = json.loads(row[1])
+            span["intensity"] = span.pop("confidence")
+            conn.execute("UPDATE expression_spans SET raw_json = ? WHERE id = ?",
+                         (json.dumps(span, ensure_ascii=False), row[0]))
+
+    payload = db_repo.script_inputs(db, vid)
+    assert payload is not None
+    spans = payload["emotions"]
+    assert [s.get("confidence") for s in spans] == [0.44, 0.91, 0.77], \
+        "列是权威：raw_json 里是旧键，也必须还原出真实置信度"
+    assert not any("intensity" in s for s in spans), "旧键不许继续往下游流"
+
+    section3 = expression_lines(exporters.script_lines(payload)[0])
+    assert len(section3) == 3, f"SECTION 3 该有三行：{section3}"
+    assert not any(line.endswith("0.00") for line in section3), \
+        f"置信度被兜底成 0.00 就是把真数据丢了：{section3}"
+    assert any("0.91" in line for line in section3), "真值要原样印出来"
+    db.close()
+
+
+def test_saving_legacy_shaped_span_fills_the_confidence_column(tmp_path: Path) -> None:
+    """旧形状的 span 落库不许把 confidence 列写成 NULL。
+
+    `pipeline._annotate_face_emotion` 复用缓存的闸门只看有没有 segments、不看键名，
+    所以旧缓存里的 `intensity` 形状完全可能一路走到落库。写成 NULL 比印成 0.00 更糟：
+    那是把唯一一份好数据也丢了，只能重新分析。
+    """
+    cfg, db = make_project(tmp_path)
+    _video, _vid, analysis = seed_analysis(cfg, db, spans=face_spans())
+
+    legacy = [{"start": 1.0, "end": 2.5, "emotion_en": "happy", "intensity": 0.8, "samples": 3}]
+    assert db_repo.save_expression_spans(db, analysis, legacy) == 1
+    row = db.one("SELECT confidence, raw_json FROM expression_spans WHERE analysis_id = ?",
+                 (analysis,))
+    assert row["confidence"] == 0.8, "旧键也要填进 confidence 列，不能是 NULL"
+    stored = json.loads(row["raw_json"])
+    assert stored.get("confidence") == 0.8 and "intensity" not in stored, \
+        "raw_json 也要归一化，别让旧形状继续扩散"
+    assert legacy[0] == {"start": 1.0, "end": 2.5, "emotion_en": "happy",
+                         "intensity": 0.8, "samples": 3}, "不许改调用方传进来的 dict"
+    db.close()
+
+
+def test_derived_files_with_legacy_keys_still_print_real_numbers(tmp_path: Path) -> None:
+    """老 `output/*/timeline.json`：表情段是 `intensity`，条目情绪是 `visual_emotion_intensity`。
+
+    这条路不经过数据库（GUI 直接把 timeline.json 透传给导出函数），所以列权威那招救不了它，
+    只能靠读侧认旧名。仓库里现存 23 份旧表情轨 + 27 份旧条目情绪都走这条路。
+    """
+    entries = [{"start": 1.0, "end": 2.5, "visual": "她突然笑出来", "speech": "",
+                "importance": "normal", "timestamp_source": "word_anchored",
+                "visual_emotion": "开心", "visual_emotion_en": "happy",
+                "visual_emotion_intensity": 0.83}]
+    spans = [{"start": 1.0, "end": 2.5, "emotion_en": "happy", "intensity": 0.83, "samples": 4}]
+
+    target = tmp_path / "timeline.txt"
+    exporters.write_timeline_txt(target, "a.mp4", 5.0, "zh", entries,
+                                 output_language="zh", emotions=spans)
+    text = target.read_text(encoding="utf-8")
+    expression = [ln for ln in text.splitlines() if ln.startswith("[") and "开心" in ln]
+    assert expression, f"表情轨那行都没了：\n{text}"
+    # 断言绑定到表情行本身：全文找 "0.00" 会被时间戳（00:10.00 这种）误伤
+    assert expression[-1].endswith("开心 0.83"), f"旧键的置信度要照样印出来：{expression}"
+    assert "（开心 0.83）" in text, "画面行的情绪数字不许消失"
+
+
+def test_legacy_visual_emotion_key_survives_db_roundtrip(tmp_path: Path) -> None:
+    """画面情绪置信度的旧名是 `emotion_intensity`：写侧要归一化，读侧也要认。
+
+    visual_events 这张表**没有情绪置信度列**（`confidence` 列是事件置信度，
+    filter_timeline 拿它当阈值），`raw_json` 是这个数的唯一副本。
+    按 dataclass 字段名硬过滤重建（曾经的 `_rebuild`）会把旧键当"不认识的键"丢掉，
+    于是 SECTION 1 画面行的情绪数字**整个消失**——不是印 0.00，是不显示，比 0.00 更难发现。
+    """
+    cfg, db = make_project(tmp_path)
+    _video, vid, analysis = seed_analysis(cfg, db, spans=face_spans())
+
+    # 写侧：旧形状喂进来，落库必须统一成新键
+    legacy = []
+    for event in visual_events():
+        event = dict(event)
+        event["emotion_intensity"] = event.pop("emotion_confidence")
+        legacy.append(event)
+    db_repo.save_visual_events(db, analysis, legacy)
+    stored = [json.loads(row["raw_json"]) for row in db_repo.get_visual_events(db, analysis)]
+    assert all("emotion_intensity" not in s for s in stored), "写侧要把旧键归一化掉"
+    assert [s.get("emotion_confidence") for s in stored] == [0.41, 0.88, 0.35]
+
+    # 读侧：把 raw_json 退回旧形状，模拟改名之前就落好的库
+    with db.tx() as conn:
+        rows = conn.execute("SELECT id, raw_json FROM visual_events WHERE analysis_id = ?",
+                            (analysis,)).fetchall()
+        assert rows
+        for row in rows:
+            data = json.loads(row[1])
+            data["emotion_intensity"] = data.pop("emotion_confidence")
+            conn.execute("UPDATE visual_events SET raw_json = ? WHERE id = ?",
+                         (json.dumps(data, ensure_ascii=False), row[0]))
+
+    lines, _ = exporters.script_lines(db_repo.script_inputs(db, vid))
+    # 时间戳是右对齐补空格的（见 exporters._span），所以别按整段前缀匹配
+    row = [ln for ln in lines if "6.00 -" in ln and "14.00]" in ln and "画面" in ln]
+    assert row, f"SECTION 1 里该有这条画面行：\n{chr(10).join(lines[:20])}"
+    # 显示名按 emotions 表现渲（中英都可能），这里只盯数字：数字消失才是那个 bug
+    assert "0.88" in row[0], f"画面行的情绪置信度不许消失：{row[0]}"
 
 
 # ------------------------------------------------------------------ T5
@@ -544,16 +690,83 @@ def test_ai_attachments_are_two_txt_files(tmp_path: Path) -> None:
     db.close()
 
 
+def test_broken_sentences_join_and_pairs_are_offered(tmp_path: Path) -> None:
+    """给 AI 看的剧本：断句拼回一行、噪声不进来、SECTION 5 给出算好的候选对。
+
+    这三件事一起验：AI 反复把「条件说完」当成结果，错因在数据呈现——
+    同一句话被 ASR 切成三条摆在三行上。
+    """
+    def word(start: float, end: float, text: str) -> dict:
+        return {"word": text, "start": start, "end": end}
+
+    segments = [
+        # 一句话被静音切成两片：前一片不以句末标点收尾
+        {"start": 10.0, "end": 10.4, "text": "If", "speaker": 1,
+         "emotion_en": "disgusted", "emotion_intensity": 0.87,
+         "words": [word(10.0, 10.4, "If")]},
+        {"start": 13.0, "end": 14.0, "text": "this is green, I'm out.", "speaker": 1,
+         "words": [word(13.0, 13.5, "this"), word(13.5, 14.0, "green,")]},
+        # 短反应：结果句
+        {"start": 14.4, "end": 14.8, "text": "Yellow.", "speaker": 2,
+         "emotion_en": "happy", "emotion_intensity": 0.90,
+         "words": [word(14.4, 14.8, "Yellow.")]},
+    ]
+    events = [{"start": 0.0, "end": 12.0, "description": "two people talk",
+               "ocr_text": "MILAN", "importance": "normal"},
+              {"start": 12.0, "end": 20.0, "description": "one reacts",
+               "ocr_text": "MILAN", "importance": "normal"},
+              {"start": 20.0, "end": 22.0, "description": "close up", "ocr_text": "ab"}]
+    # 表情轨只在 14.4 那一段给 happy：音频的 disgusted 没有旁证，不许打
+    emotions = [{"start": 14.0, "end": 15.0, "emotion_en": "happy", "confidence": 0.7}]
+
+    lines, _ = exporters.merged_lines("v.mp4", segments, events, language="en",
+                                     emotions=emotions, duration=22.0)
+    text = "\n".join(lines)
+    section1 = text.split("SECTION 1 - ")[1].split("SECTION 2")[0]
+
+    # 拼回一行：不再有单独的 "If" 那一行，句内静音要注明
+    assert "If this is green, I'm out." in section1, section1
+    assert "Speech (speaker 1): If\n" not in section1, "被切断的半句不许单独成行"
+    assert "inner silence" in section1, "句内静音必须标出来，否则下游以为一直在说"
+    # 每句一个编号，画面行也各有编号：SECTION 4 / 5 靠它指认，不用数时间戳
+    assert "S01  [" in section1 and "S02  [" in section1, section1
+    assert "V01  [" in section1, section1
+    # 音频情绪要双证据：disgusted 没有表情轨支持 -> 不打；happy 有 -> 打
+    assert "disgusted" not in section1, "只有音频这一路的情绪是噪声，不许进来"
+    assert "happy" in section1
+    # OCR：重复的只打一次，过短的不打
+    assert section1.count("MILAN") == 1, section1
+    assert "On-screen text: ab" not in section1, "两个字的画面文字是误识别碎片，不许打"
+
+    # SECTION 5：候选对存在，区间和 plan_from_span 算的一致，并引用句子编号
+    section5 = text.split("SECTION 5 - ")[1]
+    assert "setup_at 10.00 / result_at 14.40" in section5, section5
+    assert "S01 -> S02" in section5, section5
+    plan = clip_engine.plan_from_span(
+        clip_engine.segments_from_payload(segments), 10.0, 14.4)
+    assert plan is not None
+    assert f"{plan[0]:.2f} - {plan[1]:.2f}" in section5, section5
+    # 表头必须说清这是候选不是全集，否则 AI 只会在候选里挑
+    assert "not the full set" in text
+    # 客观数字摆在剧本里给 AI 当依据，而不是写进高光 JSON 替它做判断
+    assert "result voiced" in section5 and "silence inside the clip" in section5, section5
+
+
 TESTS = [
     test_expression_spans_roundtrip,
     test_v4_upgrades_to_v7_without_losing_data,
     test_script_from_db_matches_memory_line_by_line,
     test_script_survives_deleting_output_and_cache,
+    test_legacy_intensity_key_still_exports_real_confidence,
+    test_saving_legacy_shaped_span_fills_the_confidence_column,
+    test_derived_files_with_legacy_keys_still_print_real_numbers,
+    test_legacy_visual_emotion_key_survives_db_roundtrip,
     test_expression_states_never_get_confused,
     test_rebuild_uses_the_render_config_of_that_analysis,
     test_expression_is_saved_before_finish,
     test_missing_translation_is_reported_not_faked,
     test_ai_attachments_are_two_txt_files,
+    test_broken_sentences_join_and_pairs_are_offered,
 ]
 
 

@@ -125,6 +125,11 @@ class FramePlayer(QWidget):
         sound = self._winsound()
         if sound is None or self._audio_wav is None or not self._audio_on:
             return
+        if not self._audio_wav.is_file():
+            # 预览音轨被缓存清理删了。这条消息主界面认得，会自动重新解一次音轨
+            self._audio_on = False
+            self.audioFailed.emit("预览音轨已被清理，重新解一次")
+            return
         cut = self._audio_cut or self._audio_wav.with_name(self._audio_wav.stem + "_cut.wav")
         if slice_wav(self._audio_wav, cut, position) is None:
             self._audio_on = False

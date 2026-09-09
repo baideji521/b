@@ -26,7 +26,7 @@ from .config import Config
 from .db import open_db
 from .db import repo as db_repo
 from .emotions import label_for as emotion_label
-from .events import SpeechEvent, SpeechWord, VisualEvent, finalize
+from .events import SpeechEvent, VisualEvent, finalize
 from .language import LanguageRenderer, decide_output_language, labels_for
 from .logging_setup import get_logger
 from .progress import report as report_progress
@@ -412,6 +412,10 @@ class Pipeline:
         # 放在语言判定之后：情绪显示名要跟 output_language 一致（英文视频出 happy，中文出开心）。
         self._annotate_emotion(info, speech_payload, ckpt, timer, decision.output_language)
         speech_payload["language_decision"] = decision.to_dict()
+        # 句子边界到这儿就定稿了：ASR 按停顿分句 → `split_on_turns` 按说话人切换点切开。
+        # 打个标记，界面加载时就不用再切一刀——再切会把刚按换人切开的句子合回去，
+        # 段数一变，这次翻译好的译文就有几行对不上，白白重译。
+        speech_payload["sentences_final"] = True
         _ensure_speech_originals(speech_payload)
         write_json(out_dir / "speech_events.json", speech_payload)
         speech_events = _speech_events_from_payload(speech_payload)
@@ -439,7 +443,7 @@ class Pipeline:
 
         if skip_visual and cached_visual is not None:
             # "只重跑语音"这种用法不该把已有画面结果清掉：有缓存就照常复用
-            visual_events = [VisualEvent(**e) for e in cached_visual["events"]]
+            visual_events = [VisualEvent.from_cache(e) for e in cached_visual["events"]]
             visual_meta = cached_visual.get("meta", {})
             logger.info("跳过视觉分析，复用已有结果：%d 个事件", len(visual_events))
             report_progress("visual", 1.0,
@@ -448,7 +452,7 @@ class Pipeline:
             logger.warning("按要求跳过视觉分析")
             report_progress("visual", 1.0, "已跳过画面分析", video=info.name)
         elif cached_visual is not None:
-            visual_events = [VisualEvent(**e) for e in cached_visual["events"]]
+            visual_events = [VisualEvent.from_cache(e) for e in cached_visual["events"]]
             visual_meta = cached_visual.get("meta", {})
             logger.info("复用已有视觉分析结果：%d 个事件", len(visual_events))
             report_progress("visual", 1.0, f"复用已有画面结果（{len(visual_events)} 事件）", video=info.name)
@@ -502,8 +506,18 @@ class Pipeline:
             # 两条独立时间戳轨：动作按事件归并，表情来自人脸模型的 2fps 采样。
             # 都是已算好的结果重排一遍，不额外推理。
             actions = action_track(visual_events)
-            face_spans = ((visual_meta.get("face") or {}).get("segments") or []) \
-                if isinstance(visual_meta.get("face"), dict) else []
+            cached_face = visual_meta.get("face")
+            raw_spans = (cached_face.get("segments") or []) if isinstance(cached_face, dict) else []
+            # 旧缓存里段级置信度叫 intensity（改名的来由见 exporters.legacy_score）。
+            # 写进 timeline.json 之前统一成新名：派生文件是下游各处的输入，
+            # 不在这儿收口就会一直有新文件带着旧形状生出来。
+            face_spans = []
+            for span in raw_spans:
+                if isinstance(span, dict) and span.get("confidence") is None \
+                        and span.get("intensity") is not None:
+                    span = dict(span)
+                    span["confidence"] = span.pop("intensity")
+                face_spans.append(span)
             timeline_doc = {
                 "video": info.name,
                 "video_path": info.path,
@@ -545,7 +559,7 @@ class Pipeline:
                         "speech_emotion_intensity": e["speech_emotion_intensity"],
                         "visual_emotion": e["visual_emotion"],
                         "visual_emotion_en": e["visual_emotion_en"],
-                        "visual_emotion_intensity": e["visual_emotion_intensity"],
+                        "visual_emotion_confidence": e["visual_emotion_confidence"],
                         "quality": e["quality"],
                     }
                     for e in filtered
@@ -758,7 +772,7 @@ class Pipeline:
                 key = key_of(idx, start, end)
                 if key in cache:
                     cached = cache[key]
-                    events = [VisualEvent(**e) for e in cached["events"]]
+                    events = [VisualEvent.from_cache(e) for e in cached["events"]]
                     all_events.extend(events)
                     window_metas.append(cached["meta"])
                     total_frames += int(cached["meta"].get("frames", 0))
@@ -1067,9 +1081,5 @@ def _ensure_speech_originals(payload: dict[str, Any]) -> None:
 
 
 def _speech_events_from_payload(payload: dict[str, Any]) -> list[SpeechEvent]:
-    events = []
-    for item in payload.get("segments", []):
-        words = [SpeechWord(**w) for w in item.get("words", [])]
-        data = {k: v for k, v in item.items() if k != "words"}
-        events.append(SpeechEvent(words=words, **data))
-    return events
+    """缓存里的句子还原成 SpeechEvent：不认识的键一律忽略（见 events._known_only）。"""
+    return [SpeechEvent.from_cache(item) for item in payload.get("segments", [])]

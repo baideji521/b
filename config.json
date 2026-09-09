@@ -1,6 +1,6 @@
 {
   "paths": {
-    "input_dir": "F:\\工具\\视频音频转文字\\input",
+    "input_dir": "input",
     "output_dir": "output",
     "video_dir": "",
     "cache_dir": "cache",
@@ -185,7 +185,11 @@
         "neutral": "ding",
         "calm": "ding"
       }
-    }
+    },
+    "freeze_tail_seconds": 0.0,
+    "clip_engine": true,
+    "silence_keep": 0.8,
+    "silence_target": 10.0
   },
   "bridge": {
     "enabled": true,
@@ -207,20 +211,21 @@
     "task_type": "gemini_json",
     "ai_url": "https://gemini.google.com/app",
     "prompt_file": "prm/prm_en.txt",
-    "ai_input_dir": "F:/视频_工作目录/下载目录/预测器挑战/能活多久",
-    "ai_output_dir": "F:/视频_工作目录/成片素材/能活多久",
-    "ai_job": "full",
+    "ai_input_dir": "F:/视频_工作目录/下载目录/预测器挑战/2027Prediction",
+    "ai_output_dir": "F:/视频_工作目录/成片素材/2027Prediction",
+    "ai_job": "script",
     "upload_mode": "auto",
     "focus_browser": true,
     "side_window": true,
     "keep_merged_file": false,
     "message": "Follow the rules in prm_en.txt and analyze the attached *_merged.txt. Reply with the JSON object only.",
     "auto_clip": true,
-    "highlight_source": "all",
-    "ai_clip_video": true,
+    "highlight_source": "existing",
+    "ai_clip_video": false,
     "ai_collect_script": false,
-    "ai_script_clip": false,
-    "skip_done_products": true
+    "ai_script_clip": true,
+    "skip_done_products": true,
+    "ai_analyze_only": false
   },
   "runtime": {
     "max_auto_retries": 3,
@@ -279,7 +284,7 @@
   "assets": {
     "input_dir": "F:/视频_工作目录/下载目录",
     "output_dir": "F:/视频_工作目录/成片素材",
-    "filter_video_dir": "F:\\视频_工作目录\\下载目录\\预测器挑战\\能活多久",
-    "filter_product_dir": "F:\\视频_工作目录\\成片素材\\能活多久"
+    "filter_video_dir": "F:\\视频_工作目录\\下载目录\\预测器挑战\\2027Prediction\\tiktok",
+    "filter_product_dir": "F:\\视频_工作目录\\成片素材\\2027Prediction"
   }
 }

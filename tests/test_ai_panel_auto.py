@@ -93,6 +93,9 @@ def make_project(tmp_path: Path):
     bridge["ai_output_dir"] = str(tmp_path / "ai_out")
     bridge["ai_job"] = "full"
     bridge["highlight_source"] = "all"
+    # 「不跑成品」按出厂默认（勾上）钉死：这个夹具是拷仓库根 config.json 来的，
+    # 不钉的话开发机上在界面把这个勾取消过，一堆测试就跟着一起红
+    bridge["skip_done_products"] = True
     bridge["prm_id"] = 0
     bridge["mode"] = "extension"
     cfg_file = tmp_path / "config.json"
@@ -155,12 +158,24 @@ def artifact(db, vid: int, kind: str, path: Path) -> int:
     return db_repo.register_artifact(db, vid, kind, path)
 
 
+def highlight_json(sa: float = 1.0, end: float = 9.0, *, score: float = 0.9,
+                   video: str = "v.mp4") -> dict:
+    """一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）。
+
+    剪辑区间在 `segments[0].sa` / `.end`（原视频时间），文案在 `timeline`。
+    """
+    span = round(end - sa, 3)
+    return {"video": video,
+            "timeline": {"duration": span, "score": score, "type": "hook", "reason": "r"},
+            "segments": [{"sa": sa, "end": end, "dst": [0.0, span]}]}
+
+
 def ai_json(db, vid: int, *, clips: bool = True, task_id: int | None = None) -> None:
-    payload = {"video": "v.mp4",
-               "clip": {"start": 1.0, "end": 9.0, "score": 0.9,
-                        "type": "hook", "reason": "r"}} if clips else {"clips": []}
+    # clips=False 就是"AI 回了话但一段都没给"：新协议里 segments 是空列表
+    payload = highlight_json() if clips else {"timeline": {}, "segments": []}
     db_repo.save_ai_result(db, vid, task_id=task_id, json_data=payload,
                            raw_response=json.dumps(payload))
+
 
 
 def analysis(db, vid: int, *, events: bool = True) -> int:
@@ -209,6 +224,10 @@ class Win:
     _skip_because_done = mw.MainWindow._skip_because_done
     skip_done_products = mw.MainWindow.skip_done_products
     _language_blocked = mw.MainWindow._language_blocked
+    # 分析完一句语音都没有的视频不发 AI（没人说话 = 没互动，也算不出区间）
+    _silent_video = mw.MainWindow._silent_video
+    # 文件里根本没音轨的视频连队都不排（没声音 = 没剧本）
+    _mute_video = mw.MainWindow._mute_video
     _set_video_progress = mw.MainWindow._set_video_progress
     _auto_product_ready = mw.MainWindow._auto_product_ready
     _ai_files_ok = mw.MainWindow._ai_files_ok
@@ -791,8 +810,7 @@ def test_clear_foreign_videos_removes_files_and_rows(tmp_path: Path) -> None:
     keep_txt = cfg.root / "ai_in" / "en_merged.txt"
     keep_txt.write_text("x", encoding="utf-8")
     artifact(db, keep_id, "merged_txt", keep_txt)
-    db_assets.create_asset(db, vid, {"video": "id.mp4",
-                                     "clip": {"start": 1.0, "end": 4.0, "score": 0.9}})
+    db_assets.create_asset(db, vid, highlight_json(1.0, 4.0, video="id.mp4"))
     view = panel(cfg)
     view.refresh_tasks(sync=True)
     assert view.btn_clear_video.text() == "清空非中英视频"
@@ -940,14 +958,21 @@ def test_collect_only_saves_json(tmp_path: Path) -> None:
     window = Win(cfg, db)
     window._auto_job = "collect"
     window._auto_video = video
-    window._last_highlight_json = json.dumps({"clip": {"start": 1, "end": 5}})
+    window._last_highlight_json = json.dumps(highlight_json(1.0, 5.0))
     assert window._auto_chain_done(video) is False, "还没入库就不算干完"
     assert window._auto_save_script() is True
     target = cfg.root / "ai_out" / "a_脚本.json"
     assert target.is_file(), "导出的高光 JSON 落在 AI_输出目录"
     assert window._auto_chain_done(video) is False, "**光有文件不算干完**，得库里有可复用 JSON"
     ai_json(db, vid)
-    assert window._auto_chain_done(video) is True, "库里有可复用高光 JSON 才算干完"
+    assert window._auto_chain_done(video) is False, \
+        "只有 ai_results 还不算干完：方案没入库，这一份就该重新收"
+    asset = db_assets.create_asset(db, vid, highlight_json(1.0, 5.0), source_type="ai")
+    assert window._auto_chain_done(video) is True, "AI 结果 + 方案都在库里才算干完"
+    # 在资产中心把收来的方案删掉就是明摆着要重收一份：队列必须立刻认，
+    # 不能因为 ai_results 还留着就说「都已经有成品，没活可干」
+    assert db_assets.delete_asset(db, asset) is True
+    assert window._auto_chain_done(video) is False, "方案被删了就不算干完（软删也算删）"
     assert window.calls["run_highlight"] == 0, "收取高光 JSON 不许渲染"
 
 
@@ -956,7 +981,7 @@ def test_script_mode_never_calls_ai(tmp_path: Path) -> None:
     cfg.bridge["ai_job"] = "script"
     video, vid = video_row(cfg, db, "a.mp4")
     script = cfg.root / "ai_in" / "a_脚本.json"
-    script.write_text(json.dumps({"clip": {"start": 1.0, "end": 6.0}}), encoding="utf-8")
+    script.write_text(json.dumps(highlight_json(1.0, 6.0)), encoding="utf-8")
     db_repo.register_artifact(db, vid, "ai_script", script)
     window, view = wired(cfg, db)
     before = counts(db)

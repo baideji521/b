@@ -47,11 +47,17 @@ const RESEND_AFTER_MS = 12000;
 
 
 
+
+
 const ANSWER_TIMEOUT_MS = 600000;
 
-// 回答连续这么久没有变化就算写完了
-const STABLE_MS = 3000;
+// 回答连续这么久没有变化就算写完了。没见过「停止生成」键时才用这个上限——
+// 思考停顿三五秒很常见，短了会把停顿当成写完。
+const STABLE_MS = 8000;
+// 见过「停止生成」键之后就有准信号了：它一消失说明已经写完，再确认这么久就够
+const STABLE_AFTER_STOP_MS = 1500;
 const POLL_ANSWER_MS = 1500;
+
 
 let polling = false;
 let busy = false;
@@ -196,6 +202,13 @@ const SITES = {
             "button[aria-label*='发送']", "button[aria-label*='Send']",
             "button.mat-mdc-icon-button[aria-label*='发送']",
             "button[mattooltip*='发送']"],
+    // 判「附件传完了」时会拿发送键的亮/灰当依据，所以这些长得像按钮的一律排掉，
+    // 免得随便一个亮着的工具键就被当成发送键
+    sendSkip: "停止|stop|取消|录音|麦克风|mic|语音|图片生成|制作|canvas|research|学习|上传|attach|添加|新对话|new chat",
+    // 附件卡片：文件全名一般在卡片的 title 里（页面上显示的是截断后的短名）。
+    // data-test-id=file-name 这条是 Gemini 自己在用的（gem 知识库那边也是同一个）。
+    cards: ["[data-test-id='file-name']", "uploader-file-preview", "[data-test-id='file-preview']",
+            ".file-preview", "xap-uploader-file-preview"],
     spinners: "mat-progress-bar, mat-spinner, mat-progress-spinner, [role='progressbar']",
     // Gemini 只有一处收 drop，一口气砸整页反而最稳（实测过的老路子，不会重复收）
     dropAll: true,
@@ -207,7 +220,9 @@ const SITES = {
             "file-drop-indicator .overlay-container", "file-drop-indicator",
             "fieldset.input-area-container", "rich-textarea"],
     // 实测有效的那一条：带 files 的 ClipboardEvent 派给 .ql-editor，一次就挂上
-    pasteFirst: true,
+    // （日志「2 个文件塞完了 方式=paste 一次拖」）。就只用这一手：拖放、拖放覆盖层、
+    // file 控件那几种在这个站点只会互相打断、白等卡片，一概不试。
+    pasteOnly: true,
     // 它有正规发送键，绝不许走「输入框旁边最后一个图标键」那条兜底：
     // 旁边就是建议卡片和图片生成那排工具，误点一下就变成它替你出题。
     nearFallback: false,
@@ -226,7 +241,14 @@ const SITES = {
     editors: ["textarea#chat-input", "textarea[placeholder]", "textarea", "[contenteditable='true']"],
     // 回答块挂 ds-markdown；类名带哈希的那些一律用前缀匹配兜住
     answers: [".ds-markdown", "[class*='ds-markdown']", "[class*='_md_']", "[class*='markdown']"],
+    // DeepSeek 的发送键没有任何文字标签，只能靠「输入区里的纯图标键」认，
+    // 所以选择器可以宽，靠 sendSkip + 纯图标这两条把开关排掉
     sends: ["div[role='button'][aria-disabled]", "button[type='submit']"],
+    // 「深度思考 / 联网搜索」也是 div[role=button][aria-disabled]，它们一亮就被当成
+    // 「附件传完了」——附件还在传就把消息发出去，AI 拿不到附件。按文字把它们排掉。
+    sendSkip: "深度思考|联网搜索|deepthink|搜索|search|上传|attach|添加|新对话|new chat|停止|stop|语音|录音|mic|r1",
+    cards: ["[class*='file-card']", "[class*='fileCard']", "[class*='file-item']",
+            "[class*='attachment']"],
     spinners: "[role='progressbar'], [class*='loading'], [class*='uploading']",
     // DeepSeek 输入框那几层和 body 各挂了一个 drop 监听，砸多了会被收好几遍
     dropAll: false,
@@ -499,63 +521,166 @@ function pageCloseOverlays() {
 
 
 /**
- * 数页面上这个文件出现了几次。Gemini 的附件卡片只写主名（prm_en.txt 显示成 prm_en，
- * 后缀是单独的 TXT 角标），名字太长还会截断，所以按「全名 → 去后缀 → 名字前缀」
- * 三级放宽去数，哪一级数到就用哪一级。复用的窗口里可能有上一轮的同名附件，
- * 所以只看「有没有」会误判，必须比塞之前后的次数。
+ * 扫一遍页面上的附件卡片，回一份「哪些文件挂上了、一共几张卡」。
  *
- * siblings 是这一轮同批的其它文件名。一次可能发好几份 PRM，名字常常同前缀
- * （都以同一串时间戳开头），这时候「前缀」这级会把别人的卡片也数进来，
- * 一份挂上就显得全挂上了。所以凡是别的文件也命中的前缀一律不用，宁可数不出来
- * 走角标兜底，也不能把没挂上的算成挂上了。
+ * 老办法是数整页 innerText 里出现过几次文件名：正文里的历史对话、我们自己那句
+ * 提问、侧栏标题都会被算进去，时间戳前缀的几份 PRM 更是互相撞车；兜底那条
+ * 「数 TXT 这三个字符」在全页文本里数，压根不可信——上传判断失误基本都出在这儿。
+ *
+ * 现在只认结构化的东西，两道：
+ *   1. 属性：文件全名基本都写在卡片的 title / aria-label 里（页面上显示的是截断后
+ *      的短名），按属性认人不受截断影响，而且正文里不会有这些属性。
+ *   2. 卡片选择器：属性里也没全名时，按站点档案给的卡片选择器数，卡片上显示的
+ *      短名和要挂的名字做双向 includes；同批别的文件也认这张卡就算不清，直接跳过。
+ *
+ * 返回 hits[文件名] = 命中的卡片数（跟塞之前的基线比），total = 卡片总数
+ * （换上传方式之前拿它判断「上一次其实已经挂上了」，比数字符靠得住）。
  */
-function pageCountAttachment(name, siblings) {
-  // 后台标签页可能不做布局，innerText 会是空的，退回 textContent
-  const body = document.body;
-  const text = body ? body.innerText || body.textContent || "" : "";
+function pageScanAttachments(cardSelectors, names) {
+  const lc = (value) => String(value || "").toLowerCase();
+  const targets = (Array.isArray(names) ? names : []).filter(Boolean).map((name) => ({
+    name, low: lc(name), stem: lc(name.replace(/\.[^.]+$/, "")),
+  }));
 
-  const count = (needle) => {
-    if (!needle) return 0;
-    let hit = 0;
-    for (let i = text.indexOf(needle); i >= 0; i = text.indexOf(needle, i + needle.length)) hit += 1;
-    return hit;
+  // 后台标签页可能不做布局，那时候所有 rect 都是 0，拿尺寸当条件会一张卡都数不出来
+  const body = document.body;
+  const pageRect = body ? body.getBoundingClientRect() : null;
+  const laidOut = Boolean(pageRect && pageRect.width > 0 && pageRect.height > 0);
+  const shown = (el) => {
+    if (!laidOut) return true;
+    try {
+      if (el.closest("[hidden], [aria-hidden='true']")) return false;
+      const style = getComputedStyle(el);
+      if (style.display === "none" || style.visibility === "hidden" || style.opacity === "0") {
+        return false;
+      }
+      const rect = el.getBoundingClientRect();
+      return rect.width >= 2 && rect.height >= 2;
+    } catch {
+      return false;
+    }
   };
-  const stem = name.replace(/\.[^.]+$/, "");
-  // 卡片上的名字会被截断成「2026082619....」，所以前缀要短一点才认得出
-  const others = (Array.isArray(siblings) ? siblings : []).filter((other) => other && other !== name);
-  const ambiguous = (needle) => others.some((other) => other.includes(needle));
-  const needles = [name, stem, stem.slice(0, 10), stem.slice(0, 8)];
-  let matched = 0;
-  let used = "";
-  for (const needle of needles) {
-    // 同批别的文件也含这段的话，数出来的次数分不清是谁，跳过这一级
-    if (ambiguous(needle)) continue;
-    matched = count(needle);
-    if (matched > 0) {
-      used = needle;
+
+  const hits = {};
+  const found = {};
+  for (const target of targets) {
+    hits[target.name] = 0;
+    found[target.name] = [];
+  }
+
+  // 第一道：按 title / aria-label 认全名
+  for (const el of document.querySelectorAll("[title], [aria-label], [alt], [data-file-name]")) {
+    if (!shown(el)) continue;
+    const label = lc(`${el.getAttribute("title") || ""} ${el.getAttribute("aria-label") || ""} `
+      + `${el.getAttribute("alt") || ""} ${el.getAttribute("data-file-name") || ""}`);
+    if (!label.trim()) continue;
+    for (const target of targets) {
+      if (!label.includes(target.low) && !label.includes(target.stem)) continue;
+      const seen = found[target.name];
+      // 里外几层挂着同一个 title 时只算最里面那个，免得一张卡数成好几张
+      const outer = seen.findIndex((prev) => prev.contains(el));
+      if (outer >= 0) {
+        seen[outer] = el;
+        continue;
+      }
+      if (seen.some((prev) => el.contains(prev))) continue;
+      seen.push(el);
+    }
+  }
+  for (const target of targets) hits[target.name] = found[target.name].length;
+
+  // 第二道：按站点给的卡片选择器数，对付「属性里也没有全名、页面只显示截断短名」
+  const cards = [];
+  for (const selector of (Array.isArray(cardSelectors) ? cardSelectors : [])) {
+    let list = [];
+    try {
+      list = Array.from(document.querySelectorAll(selector));
+    } catch {
+      continue;
+    }
+    for (const el of list) {
+      if (!shown(el) || cards.some((card) => card.el === el)) continue;
+      cards.push({
+        el,
+        text: lc((el.getAttribute("title") || el.innerText || el.textContent || "")
+          .trim().replace(/\s+/g, " ")),
+      });
+    }
+  }
+  for (const target of targets) {
+    if (hits[target.name]) continue;
+    for (const card of cards) {
+      if (card.text.length < 6) continue;
+      const same = card.text.includes(target.stem) || target.stem.includes(card.text)
+        || card.text.includes(target.low) || target.low.includes(card.text);
+      if (!same) continue;
+      // 同批别的文件也认这张卡（同前缀）就分不清是谁，宁可数不出来走卡片张数兜底
+      const ambiguous = targets.some((other) => other.name !== target.name
+        && (card.text.includes(other.stem) || other.stem.includes(card.text)));
+      if (ambiguous) continue;
+      hits[target.name] += 1;
+    }
+  }
+
+  const named = Object.keys(hits).reduce((sum, name) => sum + hits[name], 0);
+  const text = body ? body.innerText || body.textContent || "" : "";
+  const failed = /上传失败|上传出错|failed to upload|unsupported file/i.test(text);
+  return {
+    hits,
+    total: Math.max(cards.length, named),
+    cards: cards.map((card) => card.text.slice(0, 40)),
+    failed,
+    laidOut,
+  };
+}
+
+
+/**
+ * 同一个文件挂出好几张卡时（上一次判定漏了、又塞了一遍），把多出来的点掉。
+ * 只点卡片里明确写着「移除 / 删除 / remove」的那个键，离得远的、名字不对的一概不碰。
+ */
+function pageDropExtraCards(name) {
+  const low = String(name || "").toLowerCase();
+  if (!low) return { removed: 0, cards: 0 };
+  const stem = low.replace(/\.[^.]+$/, "");
+  const want = /移除|删除|去掉|remove|clear|discard/i;
+  const avoid = /发送|send|停止|stop|新对话|new chat|上传|upload|attach/i;
+
+  const nodes = [];
+  for (const el of document.querySelectorAll("[title], [aria-label], [data-file-name]")) {
+    const label = `${el.getAttribute("title") || ""} ${el.getAttribute("aria-label") || ""} `
+      + `${el.getAttribute("data-file-name") || ""}`;
+    const low2 = label.toLowerCase();
+    if (!low2.includes(low) && !low2.includes(stem)) continue;
+    const outer = nodes.findIndex((prev) => prev.contains(el));
+    if (outer >= 0) {
+      nodes[outer] = el;
+      continue;
+    }
+    if (nodes.some((prev) => el.contains(prev))) continue;
+    nodes.push(el);
+  }
+
+  let removed = 0;
+  for (const el of nodes.slice(1)) {
+    let node = el;
+    for (let up = 0; node && up < 4; up += 1, node = node.parentElement) {
+      const button = Array.from(node.querySelectorAll("button, [role='button']")).find((el2) => {
+        const label = `${el2.getAttribute("aria-label") || ""} ${el2.getAttribute("mattooltip") || ""} `
+          + `${el2.getAttribute("title") || ""}`;
+        return want.test(label) && !avoid.test(label);
+      });
+      if (!button) continue;
+      try {
+        button.click();
+        removed += 1;
+      } catch {}
       break;
     }
   }
-  // DeepSeek 这类站点把全名放在 title / aria-label 里，页面上只显示截断后的短名，
-  // 光数正文会漏；漏判的代价是又拖一遍（页面上多出重复附件），所以顺带数一遍属性
-  if (!matched) {
-    let attrs = 0;
-    for (const el of document.querySelectorAll("[title], [aria-label], [alt]")) {
-      const label = `${el.getAttribute("title") || ""} ${el.getAttribute("aria-label") || ""} `
-        + `${el.getAttribute("alt") || ""}`;
-      if (label.includes(name) || label.includes(stem)) attrs += 1;
-    }
-    if (attrs) {
-      matched = attrs;
-      used = "属性";
-    }
-  }
-  // 兜底信号：卡片左上角那个类型角标（TXT），数它有几个
-  const ext = (name.match(/\.([^.]+)$/) || ["", ""])[1].toUpperCase();
-  const chips = ext ? count(ext) : 0;
-  const failed = /上传失败|上传出错|failed to upload|unsupported file/i.test(text);
-  return { count: matched, used, chips, failed };
+  return { removed, cards: nodes.length };
 }
+
 
 
 
@@ -638,7 +763,7 @@ function pageStartNewChat(labels) {
 
 
 /** 附件是不是都加载完了：还在转圈 / 还写着「上传中」就不算完，这时候按回车会白发。 */
-function pageUploadSettled(spinnerSelector, sendSelectors) {
+function pageUploadSettled(spinnerSelector, sendSelectors, editorSelector, skipSource) {
   const body = document.body;
   const text = body ? body.innerText || body.textContent || "" : "";
 
@@ -652,27 +777,62 @@ function pageUploadSettled(spinnerSelector, sendSelectors) {
     if (rect.width > 0 && rect.height > 0) spinner += 1;
   }
   // 最靠得住的判据（你指出来的）：附件没传完，发送键是灰的；传完了它才变亮。
-  // 所以只要发送键亮了就算传完，不用再盯着转圈猜。
-  let sendFound = false;
-  let sendEnabled = false;
+  //
+  // 但「哪个才是发送键」得挑清楚。DeepSeek 的「深度思考 / 联网搜索」跟发送键一样是
+  // div[role=button][aria-disabled]，老写法「命中的任意一个不是 disabled 就算亮」
+  // 等于随便一个开关亮着就判定附件传完了——附件还在传就把消息发出去。
+  // 现在两条才认：① 标签里明写着发送；② 输入区里的纯图标键（发送键没有文字标签）。
+  const editor = editorSelector ? document.querySelector(editorSelector) : null;
+  let box = null;
+  for (let node = editor, up = 0; node && up < 4; node = node.parentElement, up += 1) {
+    if (node === document.body || node === document.documentElement) break;
+    box = node;
+  }
+  const skip = new RegExp(skipSource
+    || "停止|stop|上传|attach|添加|新对话|new chat|录音|mic|语音", "i");
+
   const buttons = [];
   for (const selector of sendSelectors || []) {
-    buttons.push(...document.querySelectorAll(selector));
+    try {
+      buttons.push(...document.querySelectorAll(selector));
+    } catch {}
   }
   buttons.push(...document.querySelectorAll(
     "button[aria-label*='发送'], button[aria-label*='Send']"
   ));
+
+  let sendFound = false;
+  let sendEnabled = false;
+  let sendLabel = "";
   for (const el of buttons) {
-    if (!el) continue;
+    if (!el || el.nodeType !== 1) continue;
+    const attrs = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("mattooltip") || ""} `
+      + `${el.getAttribute("title") || ""} ${el.getAttribute("data-test-id") || ""}`;
+    const own = (el.innerText || el.textContent || "").trim();
+    if (skip.test(`${attrs} ${own}`)) continue;
+    const named = /发送|send/i.test(attrs);
+    // 纯图标那条得是个真按钮：选择器有时会命中包在外面的容器 DIV，
+    // 容器上没有 aria-disabled，拿它当发送键会永远判成「亮着」
+    const control = el.tagName === "BUTTON" || el.getAttribute("role") === "button"
+      || el.getAttribute("type") === "submit";
+    const iconOnly = !own && control && Boolean(box) && box.contains(el);
+    if (!named && !iconOnly) continue;
+
     sendFound = true;
-    if (!(el.disabled || el.getAttribute("aria-disabled") === "true")) {
+    const off = el.disabled || el.getAttribute("aria-disabled") === "true"
+      || el.getAttribute("disabled") !== null;
+    if (!sendLabel) sendLabel = (attrs.trim() || own || el.tagName).slice(0, 24);
+    if (!off) {
       sendEnabled = true;
+      sendLabel = (attrs.trim() || own || el.tagName).slice(0, 24);
       break;
     }
   }
   const quiet = !pending && spinner === 0;
-  return { settled: quiet || (sendEnabled && !pending), pending, spinner, sendFound, sendEnabled };
+  return { settled: quiet || (sendEnabled && !pending), pending, spinner,
+           sendFound, sendEnabled, sendLabel };
 }
+
 
 
 /**
@@ -739,6 +899,21 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
   }
 
   const enabled = (el) => !(el.disabled || el.getAttribute("aria-disabled") === "true");
+  // 「停止回答」键长得跟发送键在同一个位置：Gemini 生成期间就是把 send-button-container
+  // 里那颗键换成停止键（mat-icon fonticon=stop、aria-label=停止回答）。所以凡是按结构
+  // 找键的那几条路，都得先过这道筛——不然回答稍慢一点，补发那一下点的就是停止，
+  // 生成被自己掐断，日志里只看得到「点了 BUTTON[发送]」。
+  const stopish = (el) => {
+    const icon = el.querySelector ? el.querySelector("mat-icon") : null;
+    const label = `${el.getAttribute("aria-label") || ""} ${el.getAttribute("mattooltip") || ""} `
+      + `${el.getAttribute("title") || ""} ${String(el.className || "")} `
+      + `${icon?.getAttribute("fonticon") || ""} ${(icon?.textContent || "").trim()}`;
+    if (/录音|麦克风|mic|语音|voice|分享|share/i.test(label)) return false;
+    return /停止|stop|取消生成|cancel/i.test(label);
+  };
+  // 页面正在写回答（有一颗亮着的停止键）。这时候任何一次点击都可能落在停止键上
+  const generating = () => Array.from(document.querySelectorAll("button, [role='button']"))
+    .some((b) => enabled(b) && stopish(b));
   const findSend = () => {
     const buttons = Array.from(document.querySelectorAll(
       "button.send-button, button, [role='button']"
@@ -752,7 +927,8 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
     if (labelled) return labelled;
     // 站点档案给的选择器：DeepSeek 那种按钮没有文字标签，只能按结构找
     for (const selector of sendSelectors || []) {
-      const hit = Array.from(document.querySelectorAll(selector)).filter(enabled).pop();
+      const hit = Array.from(document.querySelectorAll(selector))
+        .filter((el) => enabled(el) && !stopish(el)).pop();
       if (hit) return hit;
     }
     // 最后兜底：从输入框往上找几层，取容器里最后一个「只有图标的」按钮——发送键就是这种。
@@ -768,7 +944,8 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
           + `${b.className || ""}`;
         // 图标键自己没什么文字；有一长串文字的是工具条或建议卡片，绝对不能点
         const own = (b.innerText || b.textContent || "").trim();
-        return enabled(b) && own.length <= 4 && !trap.test(label) && !trap.test(own);
+        return enabled(b) && own.length <= 4 && !stopish(b)
+          && !trap.test(label) && !trap.test(own);
       });
       if (near.length) return near[near.length - 1];
     }
@@ -809,11 +986,29 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
     ? `${el.tagName}[${el.getAttribute("aria-label") || el.getAttribute("mattooltip")
       || (el.innerText || "").trim().slice(0, 10) || String(el.className || "").slice(0, 20)}]`
     : "无");
+  let busyGen = false;
   for (let attempt = 1; attempt <= 6; attempt += 1) {
+    // 正在写回答时一次都不点：那颗停止键就摆在发送键的位置上，点下去等于自己掐断生成
+    busyGen = generating();
+    if (busyGen) {
+      await nap(250);
+      continue;
+    }
     button = findSend();
     if (button) {
       disabled = !enabled(button);
       if (!disabled) {
+        // 找到发送键先等一秒再点：附件刚挂上那会儿 Angular 还在收尾（发送键会先亮
+        // 后灰、附件也可能还没算完），立刻点容易发出一条不完整的消息。
+        await nap(1000);
+        // 这一秒里状况可能变了：页面开始写回答（那位置就换成停止键了）、按钮又变灰、
+        // 或者整块重渲染换了个节点。所以重新找一遍、重新判一遍，都过了才真点下去。
+        button = findSend();
+        disabled = button ? !enabled(button) : true;
+        if (!button || disabled || generating()) {
+          await nap(250);
+          continue;
+        }
         const clicked = nameOf(button);
         button.click();
         await nap(300);
@@ -827,6 +1022,16 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
     }
     await nap(250);
   }
+
+  // 一直在写回答：不点、也不按回车，如实说明。调用方看到 busy 就该继续等而不是当失败
+  if (busyGen) {
+    return {
+      ok: false, busy: true, how, focused, typed: message.length,
+      editorLen: content().trim().length, clicked: "没点",
+      error: "页面正在写回答，没敢点发送（那个位置是停止键）",
+    };
+  }
+
 
   // 按钮找到了却一直是灰的：这说明附件还没传完（你说的那个判据——传完发送键才变亮），
   // 这时候再去瞎按回车就是白发一条，宁可当场失败，让日志说清楚卡在哪。
@@ -866,11 +1071,37 @@ async function pageSendMessage(selector, text, sendSelectors, allowNear) {
  */
 function pageReadAnswer(groups, editorSelector, mine) {
   const needle = String(mine || "").slice(0, 24);
+
+  // 输入框：既要报它还剩多少字，也要在找锚点时把它排掉——补发会把那句话打回输入框，
+  // 它自己就含着提问，不排掉就会被当成「页面上有我们的提问气泡」（实测 问题=有
+  // 而 输入框=102，锚点其实是输入框），后面「回答变了」的判断就全跟着错。
+  const box = editorSelector ? document.querySelector(editorSelector) : null;
+  const inBox = (el) => Boolean(box) && (el === box || box.contains(el) || el.contains(box));
+
+  // 隐藏元素照样有 textContent。下面读文字统一走 innerText 优先、textContent 兜底
+  // （后台标签页不做布局时 innerText 是空的），可这个兜底会把藏起来的无障碍容器
+  // 一起捞上来：Angular 的 cdk-describedby-message-container / cdk-visually-hidden
+  // 里全是 aria 描述，读回来就是一段跟回答无关的短文字（实测当成回答回传过 44 字）。
+  const hiddenSelf = (el) => {
+    if (el.getAttribute && el.getAttribute("aria-hidden") === "true") return true;
+    const cls = String(el.className || "");
+    return /cdk-describedby-message|cdk-visually-hidden|visually-hidden|sr-only|screen-reader/i.test(cls);
+  };
+  const hidden = (el) => {
+    for (let node = el; node && node !== document.body; node = node.parentElement) {
+      if (hiddenSelf(node)) return true;
+    }
+    return false;
+  };
+  const readable = (el) => !hidden(el) && !inBox(el);
+  const textOf = (el) => (el.innerText || el.textContent || "").trim();
+
   let anchor = null;
   if (needle) {
     // 提问气泡：包含那句话、而且自身文字不长（长的是把整段对话都包起来的容器）
     for (const el of document.querySelectorAll("div, span, p, pre, li")) {
-      const own = (el.innerText || el.textContent || "").trim();
+      if (!readable(el)) continue;
+      const own = textOf(el);
       if (!own.includes(needle) || own.length > needle.length * 6) continue;
       anchor = el;
     }
@@ -881,7 +1112,8 @@ function pageReadAnswer(groups, editorSelector, mine) {
   let nodes = [];
   let used = "";
   for (const selector of groups) {
-    const hit = Array.from(document.querySelectorAll(selector)).filter(after);
+    const hit = Array.from(document.querySelectorAll(selector))
+      .filter((el) => readable(el) && after(el));
     if (hit.length) {
       nodes = hit;
       used = selector;
@@ -893,8 +1125,9 @@ function pageReadAnswer(groups, editorSelector, mine) {
   if (!nodes.length) {
     const leafs = [];
     for (const el of document.querySelectorAll("div, section, article, p, pre, li, td")) {
-      const own = (el.innerText || el.textContent || "").trim();
-      if (own.length < 40 || own.includes(needle) || !after(el)) continue;
+      if (!readable(el) || !after(el)) continue;
+      const own = textOf(el);
+      if (own.length < 40 || own.includes(needle)) continue;
       const sameInChild = Array.from(el.children).some(
         (c) => (c.innerText || c.textContent || "").trim().length >= own.length * 0.9
       );
@@ -905,15 +1138,24 @@ function pageReadAnswer(groups, editorSelector, mine) {
   }
   const last = nodes[nodes.length - 1] || null;
   // 后台标签页不做布局时 innerText 是空的，退回 textContent
-  const text = last ? (last.innerText || last.textContent || "").trim() : "";
+  const text = last ? textOf(last) : "";
 
-  // 还在生成时页面上有「停止」按钮
+  // 还在生成时页面上有「停止」按钮。这个信号比「文字几秒没变」准得多：思考停顿
+  // 超过几秒会被当成写完了。但「停止录音」这类键也带 stop，得排掉，不然永远算在写。
   const streaming = Array.from(document.querySelectorAll("button, [role='button']")).some((b) => {
-    const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""}`;
-    return /stop|停止/i.test(label);
+    const label = `${b.getAttribute("aria-label") || ""} ${b.getAttribute("mattooltip") || ""} `
+      + `${b.getAttribute("title") || ""}`;
+    if (!/stop|停止|取消生成/i.test(label)) return false;
+    if (/录音|麦克风|mic|语音|voice|分享|share/i.test(label)) return false;
+    if (b.disabled || b.getAttribute("aria-disabled") === "true") return false;
+    return true;
   });
-  // 一个块都没有时，报一下整页文本长度：0 说明页面被冻结/还没渲染，不是选择器写错
+
+  // 一个块都没有时，报一下整页文本长度：0 说明页面被冻结/还没渲染，不是选择器写错。
+  // innerText 只算「看得见的」，后台标签页不做布局时会缩水（实测整页只剩 277 字），
+  // 所以另外留一份 textContent，专门给下面扫 JSON 当备用源。
   const pageText = document.body ? document.body.innerText || document.body.textContent || "" : "";
+  const rawText = document.body ? document.body.textContent || "" : "";
   const bodyLen = pageText.length;
   // 命中的是哪个块：万一读错地方，日志里能直接看出来该改哪个选择器
   const hint = last
@@ -921,55 +1163,71 @@ function pageReadAnswer(groups, editorSelector, mine) {
     : "";
   // 输入框里还有没有字：还留着说明那句话压根没发出去，空了就是已经发走了。
   // 「要不要补发一次」只看这个，别拿「没等到回答」当理由——那样会重复发。
-  const box = editorSelector ? document.querySelector(editorSelector) : null;
-  const editorLen = box
-    ? (box.tagName === "TEXTAREA" ? box.value : box.textContent || "").trim().length
-    : -1;
+  const boxText = box
+    ? (box.tagName === "TEXTAREA" ? box.value : box.textContent || "").trim()
+    : "";
+  const editorLen = box ? boxText.length : -1;
 
   // 最后一道保险，也是最不挑站点的一道：我们要的就是一个 JSON 对象，
   // 那就直接在文字里找最长的、能解析的 {...}。选择器猜错、类名改版都不影响。
   // 找到锚点时只扫提问之后那一段，免得把上一轮的旧 JSON 又捡回来。
-  const cut = needle ? pageText.lastIndexOf(needle) : -1;
-  const scanText = cut >= 0 ? pageText.slice(cut + needle.length) : pageText;
-  let json = "";
-  let tried = 0;
-  for (let start = scanText.indexOf("{"); start >= 0 && tried < 200;
-       start = scanText.indexOf("{", start + 1)) {
-    tried += 1;
-    let depth = 0;
-    let inStr = false;
-    let esc = false;
-    for (let i = start; i < scanText.length; i += 1) {
-      const ch = scanText[i];
-      if (inStr) {
-        if (esc) esc = false;
-        else if (ch === "\\") esc = true;
-        else if (ch === '"') inStr = false;
-        continue;
-      }
-      if (ch === '"') inStr = true;
-      else if (ch === "{") depth += 1;
-      else if (ch === "}") {
-        depth -= 1;
-        if (depth === 0) {
-          const slice = scanText.slice(start, i + 1);
-          if (slice.length > json.length) {
-            for (const candidate of [slice, slice.replace(/[\r\n]+/g, " ")]) {
-              try {
-                const parsed = JSON.parse(candidate);
-                if (parsed && typeof parsed === "object") {
-                  json = candidate;
-                  break;
-                }
-              } catch {}
+  const pickJson = (source) => {
+    // 输入框排在对话下面，它里面那份提问要先抹掉：不抹的话「切到最后一次提问之后」
+    // 会把整段回答一起切没了（实测 输入框=102 时 JSON 恒为 0）。
+    const clean = boxText.length >= 8 ? source.split(boxText).join(" ") : source;
+    const cut = needle ? clean.lastIndexOf(needle) : -1;
+    const scanText = cut >= 0 ? clean.slice(cut + needle.length) : clean;
+    let found = "";
+    let tried = 0;
+    for (let start = scanText.indexOf("{"); start >= 0 && tried < 200;
+         start = scanText.indexOf("{", start + 1)) {
+      tried += 1;
+      let depth = 0;
+      let inStr = false;
+      let esc = false;
+      for (let i = start; i < scanText.length; i += 1) {
+        const ch = scanText[i];
+        if (inStr) {
+          if (esc) esc = false;
+          else if (ch === "\\") esc = true;
+          else if (ch === '"') inStr = false;
+          continue;
+        }
+        if (ch === '"') inStr = true;
+        else if (ch === "{") depth += 1;
+        else if (ch === "}") {
+          depth -= 1;
+          if (depth === 0) {
+            const slice = scanText.slice(start, i + 1);
+            if (slice.length > found.length) {
+              for (const candidate of [slice, slice.replace(/[\r\n]+/g, " ")]) {
+                try {
+                  const parsed = JSON.parse(candidate);
+                  if (parsed && typeof parsed === "object") {
+                    found = candidate;
+                    break;
+                  }
+                } catch {}
+              }
             }
+            break;
           }
-          break;
         }
       }
     }
-  }
-  return { text, streaming, blocks: nodes.length, used, bodyLen, hint,
+    return found;
+  };
+  let json = pickJson(pageText);
+  // innerText 缩水时回答就藏在 textContent 里，再扫一遍才捡得到
+  if (!json && rawText.length > pageText.length) json = pickJson(rawText);
+  // 生成被掐断的痕迹：Gemini「你已让系统停止这条回答」、DeepSeek「已停止生成」这类提示。
+  // 只看 innerText（看得见的那份），免得把停止键的 tooltip 文字当成提示。
+  // 报个数而不是报有没有：复用的对话里本来就可能留着上一轮的「已停止」，
+  // 调用方拿这个数跟发送前的底数比，多出来的那条才是这一轮被停掉的。
+  const marks = pageText.slice(-8000)
+    .match(/已停止|停止生成|停止回答|已中断|stopped generating|generation stopped/gi);
+  const stops = marks ? marks.length : 0;
+  return { text, streaming, stops, stopped: stops > 0, blocks: nodes.length, used, bodyLen, hint,
            json, jsonLen: json.length, editorLen, anchored: Boolean(anchor) };
 }
 
@@ -1244,22 +1502,26 @@ async function handleAiTask(task) {
       }
     }
 
-    // 记下每个文件名现在在页面上出现几次，之后靠「多了一次」判断挂没挂上。
+    // 记下每个文件名现在在页面上有几张卡，之后靠「多出来一张」判断挂没挂上。
     // 一次可能发好几份 PRM 加一份字幕（PRM 按「使用状况」来，启用几份就发几份），
     // 所以每一份都要单独数，不能只认第一份就当全挂上了：少挂一份 AI 就按残缺的
-    // 提示词答，回来的 JSON 是错的。名字被截断认不出的那份靠类型角标兜底。
+    // 提示词答，回来的 JSON 是错的。名字被截断认不出的那份靠卡片总张数兜底。
     const names = (payloads.length ? payloads : fileList).map((f) => f.name);
     // 文件越多，页面画卡片、传完的时间越长，等的上限跟着放宽
     const verifyMs = ATTACH_VERIFY_MS + Math.max(0, names.length - 2) * 2000;
 
+    // 一次调用把所有文件都判完（老写法是每个文件名各发一次 executeScript，
+    // N 个文件 × 多轮轮询 = 几十次往返，跟页面渲染赛跑，容易读到半成品）
+    const scanCards = () => runInTab(tabId, pageScanAttachments,
+                                    [site.cards || [], names]).catch(() => null);
+
     const baselines = {};
-    let chipsBase = 0;
-    for (const name of names) {
-      const seen = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
-      baselines[name] = Number(seen?.count || 0);
-      // 角标数是整页统计的，每次调都一样，取 max 只是防某次取不到值
-      chipsBase = Math.max(chipsBase, Number(seen?.chips || 0));
-    }
+    const base = await scanCards();
+    for (const name of names) baselines[name] = Number(base?.hits?.[name] || 0);
+    const cardsBase = Number(base?.total || 0);
+    log("塞之前的底数", `卡片 ${cardsBase} 张`,
+        base?.laidOut === false ? "（后台标签页没布局，不挑可见性）" : "");
+
 
 
 
@@ -1270,21 +1532,19 @@ async function handleAiTask(task) {
         const deadline = Date.now() + ms;
         let left = wanted.slice();
         while (Date.now() < deadline) {
+          const seen = await scanCards();
+          if (seen?.failed) throw new Error(`页面提示上传失败（${left.join("、")}）`);
           const still = [];
-          let chipsNow = 0;
           for (const name of left) {
-            const check = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
-            if (check?.failed) throw new Error(`页面提示上传失败（${name}）`);
-            chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
-            if (Number(check?.count || 0) > baselines[name]) log("已挂上", name, `匹配=${check?.used || ""}`);
+            if (Number(seen?.hits?.[name] || 0) > baselines[name]) log("已挂上", name);
             else still.push(name);
           }
           left = still;
           if (!left.length) return true;
-          // 名字被截断得认不出时，用类型角标数兜底：门槛按这一轮的文件总数来，
-          // 多出来的角标够全部文件才算数，够一个就认账等于放过「只挂上一份」
-          if (chipsNow - chipsBase >= names.length) {
-            log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`, `要 ${names.length} 个`);
+          // 名字被截断、属性里也拿不到全名时，用「卡片多了几张」兜底：门槛按这一轮
+          // 的文件总数来，多出来的够全部文件才算数，够一张就认账等于放过「只挂上一份」
+          if (Number(seen?.total || 0) - cardsBase >= names.length) {
+            log("按卡片张数认账", `${cardsBase} -> ${seen.total} 张`, `要 ${names.length} 个`);
             return true;
           }
           await sleep(300);
@@ -1292,6 +1552,7 @@ async function handleAiTask(task) {
         log("还没出卡片", left.join("、"));
         return false;
       };
+
 
 
 
@@ -1316,6 +1577,8 @@ async function handleAiTask(task) {
       plans.push({ mode: "drop", batch: false, target: site.dropAll ? -1 : 0 });
       if (!site.pasteFirst) plans.push({ mode: "paste", batch: true, target: 0 });
       plans.push({ mode: "input", batch: true, target: 0 });
+      // pasteOnly 的站点：把上面那一串全清掉，只留粘贴这一手
+      if (site.pasteOnly) plans.splice(0, plans.length, { mode: "paste", batch: true, target: 0 });
       for (let p = 0; p < plans.length; p += 1) {
         const plan = plans[p];
         // 卡片可能晚一点才冒出来，换下一种方式之前先复查一遍，别白塞第二遍
@@ -1369,8 +1632,21 @@ async function handleAiTask(task) {
         }
         if (autoDone) {
           log(`${payloads.length} 个文件塞完了`, `方式=${plan.mode}`, plan.batch ? "一次拖" : "逐个拖");
+          // 上一轮判定漏过一次就会重复塞（页面上冒出两张同名卡片，AI 看到两份同样的
+          // 提示词）。这里复查一遍，多出来的点掉。
+          const after = await scanCards();
+          const dupes = names.filter((name) => Number(after?.hits?.[name] || 0)
+            - baselines[name] > 1);
+          for (const name of dupes) {
+            const dropped = await runInTab(tabId, pageDropExtraCards, [name]).catch(() => null);
+            log("清掉重复附件", name, `点掉 ${dropped?.removed || 0} 张`);
+          }
+          if (!dupes.length && Number(after?.total || 0) - cardsBase > names.length) {
+            log("卡片比文件数多", `${cardsBase} -> ${after.total} 张`, "认不出是哪个重复了，先不动");
+          }
           break;
         }
+
 
         log("换下一种方式", plan.mode, plan.batch ? "一次拖" : "逐个拖");
       }
@@ -1395,24 +1671,38 @@ async function handleAiTask(task) {
       log("等你手动选文件", JSON.stringify(menu || {}));
 
       const manualDeadline = Date.now() + MANUAL_TIMEOUT_MS;
+      // 开始等之前先记下整页能扫到的 JSON，当底数用：下面靠它判断「你自己已经问出答案了」
+      const manualBase = await runInTab(tabId, pageReadAnswer,
+                                       [site.answers, editor.selector, message]).catch(() => null);
+      const manualBaseJson = String(manualBase?.json || "");
       for (;;) {
-        const missing = [];
-        let chipsNow = 0;
-        // 每一份都要数：发几份 PRM 就得几份都在，少一份 AI 就按残缺的提示词答
-        for (const name of names) {
-          const check = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
-          chipsNow = Math.max(chipsNow, Number(check?.chips || 0));
-          if (Number(check?.count || 0) <= baselines[name]) missing.push(name);
+        // 你把文件选好之后顺手自己把问题也发了，页面上已经有新回答：直接收下就完事。
+        // 不能只数卡片——消息一发出去，输入区那些附件卡片就跟着没了，再数只会数到 0，
+        // 于是永远差着文件，一直卡在「请手动选这些文件」（实测就是这么卡住的）。
+        const early = await runInTab(tabId, pageReadAnswer,
+                                    [site.answers, editor.selector, message]).catch(() => null);
+        const earlyJson = String(early?.json || "");
+        const earlyParsed = earlyJson && earlyJson !== manualBaseJson
+          ? extractJson(earlyJson) : null;
+        if (earlyParsed) {
+          log("页面上已经有回答了（你自己发的那一轮），直接收下", `JSON ${earlyJson.length} 字`);
+          await reportProgress(taskId, "reporting", "回传 JSON（你手动发的那一轮）");
+          return finish({ status: "completed", text: String(early?.text || earlyJson),
+                          json: earlyParsed });
         }
+        // 每一份都要数：发几份 PRM 就得几份都在，少一份 AI 就按残缺的提示词答
+        const seen = await scanCards();
+        const missing = names.filter((name) => Number(seen?.hits?.[name] || 0) <= baselines[name]);
         if (!missing.length) {
           log("文件已经在页面上了");
           break;
         }
-        // 名字截断认不出时用类型角标兜底，别把已经传好的又叫你传一遍
-        if (chipsNow - chipsBase >= names.length) {
-          log("按类型角标认账", `角标 ${chipsBase} -> ${chipsNow}`);
+        // 名字截断认不出时用卡片张数兜底，别把已经传好的又叫你传一遍
+        if (Number(seen?.total || 0) - cardsBase >= names.length) {
+          log("按卡片张数认账", `${cardsBase} -> ${seen.total} 张`);
           break;
         }
+
 
 
         if (Date.now() > manualDeadline) {
@@ -1440,11 +1730,15 @@ async function handleAiTask(task) {
     const settleDeadline = Date.now() + SETTLE_TIMEOUT_MS;
     for (;;) {
       const settle = await runInTab(tabId, pageUploadSettled,
-                                   [site.spinners, site.sends || []]).catch(() => null);
+                                   [site.spinners, site.sends || [], editor.selector,
+                                    site.sendSkip || ""]).catch(() => null);
       if (settle?.settled) {
-        log("附件加载完成", `发送键=${settle.sendFound ? (settle.sendEnabled ? "亮" : "灰") : "没找到"}`);
+        log("附件加载完成",
+            `发送键=${settle.sendFound ? (settle.sendEnabled ? "亮" : "灰") : "没找到"}`,
+            settle.sendLabel ? `键=${settle.sendLabel}` : "");
         break;
       }
+
       if (Date.now() > settleDeadline) {
         // 别在这儿判死刑：Gemini 页面上常年挂着看不见的进度条，发送键在没打字之前
         // 也可能是灰的——昨天能跑通的那条路就是「等一会儿照样往下走」。真正的门槛
@@ -1459,29 +1753,29 @@ async function handleAiTask(task) {
     // 再确认一遍卡片还在：上面那些方式里有的会把附件塞进去又被页面清掉，
     // 空着附件发出去等于白跑一趟
     if (uploadMode === "auto") {
-      let onPage = 0;
-      for (const name of names) {
-        const check = await runInTab(tabId, pageCountAttachment, [name, names]).catch(() => null);
-        if (Number(check?.count || 0) > baselines[name]
-            || Number(check?.chips || 0) - chipsBase >= names.length) onPage += 1;
-      }
-      if (!onPage) {
-        // 只是提个醒：Gemini 的卡片会把文件名截断，按名字数不一定数得出来，
+      const seen = await scanCards();
+      const onPage = names.filter((name) => Number(seen?.hits?.[name] || 0) > baselines[name]).length;
+      const byCards = Number(seen?.total || 0) - cardsBase;
+      if (!onPage && byCards < names.length) {
+        // 只是提个醒：卡片会把文件名截断，按名字数不一定数得出来，
         // 拿这个当失败条件会误杀。真门槛是后面的「提示语在不在」和「发送键亮不亮」。
-        log("发送前复查：按文件名没数出来（卡片名会截断），继续");
+        log("发送前复查：按文件名没数出来（卡片名会截断）", `卡片 ${cardsBase} -> ${seen?.total ?? "?"} 张`);
       } else {
-        log("发送前复查：附件还在", `命中 ${onPage}/${names.length}`);
+        log("发送前复查：附件还在", `命中 ${onPage}/${names.length}`, `卡片 +${byCards} 张`);
       }
     }
+
 
 
     // 复用的窗口里可能已经有旧回答，先记下条数、最后那块的文字、整页扫到的 JSON，
     // 别把上一轮的结果当成这次的
     const before = await runInTab(tabId, pageReadAnswer,
                                  [site.answers, editor.selector, message]).catch(() => null);
-    const baselineBlocks = Number(before?.blocks || 0);
-    const baselineText = String(before?.text || "");
-    const baselineJson = String(before?.json || "");
+    let baselineBlocks = Number(before?.blocks || 0);
+    let baselineText = String(before?.text || "");
+    let baselineJson = String(before?.json || "");
+    // 复用的对话里可能留着上一轮的「已停止」，先记条数，多出来的才算这一轮被停掉
+    const baselineStops = Number(before?.stops || 0);
     const sent = await runInTab(tabId, pageSendMessage,
                                [editor.selector, message, site.sends, Boolean(site.nearFallback)]);
 
@@ -1496,12 +1790,15 @@ async function handleAiTask(task) {
       focused: sent.focused, attempts: sent.attempts, button: sent.button,
     }));
 
-    // 等回答：文本连续 STABLE_MS 不变且没有「停止」按钮就算写完
+    // 等回答：见过「停止生成」键的话，它一消失就算写完（准）；从没见过就退回
+    // 「文字连续不变」那条（慢，但不会把思考停顿当成写完）
     let text = "";
     let stableSince = 0;
     let resent = false;
     let polls = 0;
-    const sentAt = Date.now();
+    let sawStreaming = false;
+
+    let sentAt = Date.now();
     const answerDeadline = Date.now() + ANSWER_TIMEOUT_MS;
     while (Date.now() < answerDeadline) {
       await sleep(POLL_ANSWER_MS);
@@ -1516,7 +1813,26 @@ async function handleAiTask(task) {
         + `blocks=${snapshot?.blocks ?? "?"}/${baselineBlocks} `
         + `选择器=${snapshot?.used || "无"} 块=${snapshot?.hint || "无"} `
         + `文字=${shot.length} JSON=${shotJson.length} 整页=${snapshot?.bodyLen ?? "?"} `
-        + `输入框=${snapshot?.editorLen ?? "?"}`;
+        + `输入框=${snapshot?.editorLen ?? "?"}`
+        + `${snapshot?.stopped ? " 页面=已停止" : ""}${snapshot?.streaming ? " 在写" : ""}`;
+      // 见过「停止生成」键就记下来：这是页面事实，跟「新回答出现了没」无关，
+      // 所以挪到 fresh 判断前面——下面判「这一轮被停掉了」也要用它
+      if (snapshot?.streaming) sawStreaming = true;
+
+      // 这一轮被停掉了：写过（见过停止键）、现在不写了、页面上比发送前多出一条「已停止」。
+      // 别再干等满 10 分钟——当场如实上报，AI_剪辑师 会把这条任务退回队列，
+      // 下一轮重新挂 txt 再问一遍。手上已经有完整 JSON 的话就照用，不算白跑。
+      if (sawStreaming && !snapshot?.streaming
+          && Number(snapshot?.stops || 0) > baselineStops) {
+        if (shotJson && extractJson(shotJson)) {
+          log("回答被停止，但整页扫到了完整 JSON，照用", diag);
+          text = shotJson;
+          break;
+        }
+        log("回答被停止（页面显示已停止），不等了", diag);
+        await dumpActions("reporting");
+        return finish({ status: "failed", error: `回答被停止，没拿到 JSON ${diag}` });
+      }
       // 新回答算不算冒出来。关键前提：页面上得找得到我们那句提问（锚点）。
       // 没锚点时「最后那块文字变了」这个信号完全不可信——打开 gemini.google.com/app
       // 会自动接着上一个对话，那段旧回答边渲染边变长，看起来跟正在写一模一样
@@ -1528,15 +1844,20 @@ async function handleAiTask(task) {
         || (shot && shot !== baselineText && !shot.includes(message.slice(0, 20)));
       const fresh = jsonChanged || (anchored && grew);
       if (!fresh) {
-        // 补发的两个理由：那句话还留在输入框里（压根没发出去），
-        // 或者页面上找不到我们的提问气泡（发出去了但没落到这个对话里）
+        // 补发只认一个理由：那句话还留在输入框里，说明压根没发出去。
+        // 别拿「页面上找不到提问气泡」当理由——后台标签页 innerText 会缩水，锚点
+        // 本来就时有时无，照这个补发等于把同一句话发两遍（实测第二遍还卡在输入框里）。
+        // 还在写回答时更是一步都不能动：发送键的位置这会儿是停止键（Gemini 想久一点
+        // 就会撞上这个，实测补发那一下把生成掐断了）。
         if (!resent && Date.now() - sentAt > RESEND_AFTER_MS
-            && (Number(snapshot?.editorLen || 0) > 0 || !snapshot?.anchored)) {
-          resent = true;
+            && !snapshot?.streaming && Number(snapshot?.editorLen || 0) > 0) {
           const again = await runInTab(tabId, pageSendMessage,
                                      [editor.selector, message, site.sends,
                                       Boolean(site.nearFallback)]).catch(() => null);
-          log("页面上没有我们的提问，补发一次", again?.sent || "失败", diag);
+          // 页面临时在写回答而没点的，不算补发过，等它写完还能再来一次
+          resent = !again?.busy;
+          log("那句话还在输入框里，补发一次",
+              again?.sent || (again?.busy ? "正在写回答，没点" : "失败"), diag);
         }
         if (polls % 10 === 0) log("还没等到新回答", diag);
         if (polls % 5 === 0) await dumpActions("waiting_answer");
@@ -1549,11 +1870,20 @@ async function handleAiTask(task) {
 
       if (current && current === text && !snapshot?.streaming) {
         if (!stableSince) stableSince = Date.now();
-        if (Date.now() - stableSince >= STABLE_MS) break;
+        // 见过「停止生成」键：它没了就是写完了，确认一下半秒多就够。
+        // 从没见过（页面没有这个键、或者被冻结读不到）：只能靠「文字不变」，
+        // 那就等久一点，免得把中间的思考停顿当成写完，截一半回答回去。
+        const need = sawStreaming ? STABLE_AFTER_STOP_MS : STABLE_MS;
+        if (Date.now() - stableSince >= need) {
+          // 选择器读到的那块里没 JSON，但整页扫到了一个能解析的：用整页那个
+          if (!extractJson(current) && shotJson && extractJson(shotJson)) text = shotJson;
+          break;
+        }
       } else {
         stableSince = 0;
         text = current;
       }
+
       if (await cancelled("waiting_answer", `已收到 ${current.length} 字｜${diag}`)) return;
     }
 

@@ -107,7 +107,7 @@ def _entry(ev: VisualEvent | None, speech: list[SpeechEvent]) -> dict[str, Any]:
         "speech_emotion_intensity": speech_intensity,
         "visual_emotion": ev.emotion if ev else None,
         "visual_emotion_en": ev.emotion_en if ev else None,
-        "visual_emotion_intensity": ev.emotion_intensity if ev else None,
+        "visual_emotion_confidence": ev.emotion_confidence if ev else None,
         "quality": confidence_level(ev.confidence if ev else speech_conf),
     }
 

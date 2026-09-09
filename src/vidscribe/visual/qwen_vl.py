@@ -760,7 +760,7 @@ def _to_float(value: Any) -> float | None:
 
 
 def _emotion(item: dict, output_language: str) -> tuple[str | None, str | None, float | None]:
-    """画面情绪：只认词表里的英文标签，返回 (显示名, 英文标签, 强度)。
+    """画面情绪：只认词表里的英文标签，返回 (显示名, 英文标签, 置信度)。
 
     显示名跟随 output_language（英文视频出 happy，中文视频出开心）。
     模型偶尔会写中文情绪或词表外的词，一律按 None 处理——宁可没有，不要脏数据。
@@ -769,11 +769,11 @@ def _emotion(item: dict, output_language: str) -> tuple[str | None, str | None, 
     label = _label(raw)
     if label not in prompts.VISUAL_EMOTIONS:
         return None, None, None
-    intensity = _to_float(item.get("emotion_intensity"))
-    if intensity is None:
-        intensity = 0.0
-    intensity = max(0.0, min(1.0, intensity))
-    return emotion_label(label, output_language), label, round(intensity, 3)
+    confidence = _to_float(item.get("emotion_confidence"))
+    if confidence is None:
+        confidence = 0.0
+    confidence = max(0.0, min(1.0, confidence))
+    return emotion_label(label, output_language), label, round(confidence, 3)
 
 
 def parse_events(raw_text: str, output_language: str = "zh") -> list[VisualEvent]:
@@ -816,7 +816,7 @@ def parse_events(raw_text: str, output_language: str = "zh") -> list[VisualEvent
         if isinstance(subjects_raw, str):
             subjects_raw = re.split(r"[,;/]| and ", subjects_raw)
         subjects = [s for s in (_label(x) for x in subjects_raw if x) if s][:5]
-        emotion_zh, emotion_en, emotion_intensity = _emotion(item, output_language)
+        emotion_zh, emotion_en, emotion_confidence = _emotion(item, output_language)
         events.append(
             VisualEvent(
                 id=i + 1,
@@ -832,7 +832,7 @@ def parse_events(raw_text: str, output_language: str = "zh") -> list[VisualEvent
                 subjects=subjects,
                 emotion=emotion_zh,
                 emotion_en=emotion_en,
-                emotion_intensity=emotion_intensity,
+                emotion_confidence=emotion_confidence,
             )
         )
     return events

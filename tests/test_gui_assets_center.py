@@ -64,9 +64,18 @@ def app() -> QApplication:
 
 def ai_payload(start: float = 8.23, end: float = 23.49, score: float = 0.91,
                video: str = "demo.mp4") -> dict:
+    """一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）。
+
+    `sa` / `end` 是原视频时间；`timeline` 放成片时长和文案；`t` 那块是纯描述
+    （入库时整份存进 clips.evaluation 列）。
+    """
+    span = round(end - start, 3)
     return {"video": video,
-            "clip": {"start": start, "end": end, "score": score,
-                     "type": "hook", "reason": "很炸", "evaluation": "好笑"}}
+            "timeline": {"duration": span, "score": score,
+                         "type": "hook", "reason": "很炸"},
+            "segments": [{"sa": start, "end": end, "dst": [0.0, span]}],
+            "t": {"Scene": "室内", "Action": "很炸的一下", "Speech text": "好笑"}}
+
 
 
 class FakeWindow(QWidget):
@@ -76,8 +85,8 @@ class FakeWindow(QWidget):
         super().__init__()
         self.calls: list[tuple] = []
 
-    def render_asset(self, asset_id, prm_id=None):
-        self.calls.append((int(asset_id), prm_id))
+    def render_asset(self, asset_id):
+        self.calls.append((int(asset_id),))
         return True
 
 
@@ -207,8 +216,8 @@ def test_render_goes_through_main_window(tmp_path: Path) -> None:
     view.videos.select_asset(ids[0])
     ad.RenderDialog.exec_ = lambda self: (self.on_start(), QDialog.Accepted)[1]
     view.on_render()
-    assert window.calls == [(ids[0], None)] or window.calls == [(ids[0], 1)], \
-        f"直接剪辑必须调 MainWindow.render_asset，实际={window.calls}"
+    assert window.calls == [(ids[0],)], \
+        f"直接剪辑必须调 MainWindow.render_asset（只传 JSON id，不传 PRM），实际={window.calls}"
 
 
 def test_render_never_calls_ai(tmp_path: Path) -> None:
@@ -278,12 +287,12 @@ def test_raw_json_is_never_edited_in_place(tmp_path: Path) -> None:
     panel = view.json_panel
     panel.on_edit()
     changed = json.loads(panel.view.toPlainText())
-    changed["clip"]["score"] = 0.5
+    changed["timeline"]["score"] = 0.5
     panel.view.setPlainText(json.dumps(changed, ensure_ascii=False))
     panel.on_save()
     raw = json.loads(db.value("SELECT raw_json FROM highlight_assets WHERE id = ?",
                               (asset_id,), "{}"))
-    assert raw["clip"]["score"] == 0.91, "raw_json 被改了，这是资产原则的红线"
+    assert raw["timeline"]["score"] == 0.91, "raw_json 被改了，这是资产原则的红线"
     rows = db_assets.list_assets(db, vid)
     assert len(rows) == 2, "编辑必须另存成新的高光 JSON"
     fresh = [r for r in rows if int(r["id"]) != asset_id][0]
@@ -603,8 +612,13 @@ def test_products_follow_the_selected_video_after_reload(tmp_path: Path) -> None
 
 
 # ------------------------------------------------------------------ T_GUI_25
-def test_dir_filter_is_saved_and_survives_clear(tmp_path: Path) -> None:
-    """原视频目录筛选：只看这个子目录、存进全局配置，而且「清掉筛选」不动它。"""
+def test_dir_filter_is_saved_and_cleared_with_filters(tmp_path: Path) -> None:
+    """原视频目录筛选：只看这个子目录、存进全局配置，「清掉筛选」连它一起清。
+
+    以前「清掉筛选」故意不动目录作用域，结果是：选过一次目录之后它被记进 config、
+    重启还在、点清筛选也清不掉，用户看到的就是"列表被硬锁在有成品的那个目录里"。
+    现在「看全部视频」就是真的全部。
+    """
     cfg, db, made, _window, view = center(tmp_path)
     page = view.videos
     inside, _vid, _ids = made[0]
@@ -631,10 +645,12 @@ def test_dir_filter_is_saved_and_survives_clear(tmp_path: Path) -> None:
     assert data["assets"]["filter_video_dir"] == picked, "目录筛选要落进全局配置"
 
     page.on_clear_filters()
-    assert str(page.cmb_video_dir.currentData()) == picked, \
-        "「清掉筛选」不许把手动挑的目录作用域清掉"
+    assert not page.cmb_video_dir.currentData(), \
+        f"「清掉筛选」要连目录作用域一起清掉：{page.cmb_video_dir.currentData()!r}"
     names = {str(row["file_name"]) for row in page._rows}
-    assert names == {"别处.mp4"}, f"清筛选之后目录作用域还在：{names}"
+    assert {inside.name, "别处.mp4"} <= names, f"清筛选之后要看得见全部视频：{names}"
+    data = json.loads((cfg.root / "config.json").read_text(encoding="utf-8"))
+    assert not data["assets"]["filter_video_dir"], "清筛选也要把配置里那份目录清空"
 
 
 def scripted_prm_dialog(prm, *, name=None, source=None, text=None, pick=None,
@@ -844,7 +860,7 @@ TESTS = (
     test_prm_text_is_edited_against_the_database,
     test_importing_a_file_fills_the_editor_without_writing_the_db,
     test_renaming_a_prm_has_its_own_button_and_keeps_the_text,
-    test_dir_filter_is_saved_and_survives_clear,
+    test_dir_filter_is_saved_and_cleared_with_filters,
 )
 
 

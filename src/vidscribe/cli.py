@@ -419,6 +419,11 @@ def _db_report_stats(stats: dict[str, Any], cache: dict[str, Any]) -> None:
                 "上面的「重复跑过」才是确凿的未命中次数")
 
 
+# 四串活儿的中文名，只给日志看着舒服用（值本身由 bridge.ai_job 定，见 gui/ai_options.JOB_FLAGS）
+JOB_NAMES = {"full": "剪辑成片", "collect": "收取高光 JSON", "script": "高光 JSON 剪辑",
+             "analyze": "只解析视频"}
+
+
 def _db_report_queue(cfg: Config, db: Any) -> None:
     """自动剪辑总览。和 GUI 那八格是同一个数：同一个函数、同一个目录、同一个 done_key。
 
@@ -434,12 +439,24 @@ def _db_report_queue(cfg: Config, db: Any) -> None:
         return
     ids = [int(row["id"]) for row in repo.videos_under(db, in_dir)]
     job = str(cfg.bridge.get("ai_job") or "full")
-    # 收取脚本这一串拿到 JSON 就算完事，其余两串要出成品才算——跟 AI 面板同一行判断
-    done_key = "json" if job == "collect" else "clipped"
+    # 每一串各自的"干完了"口径，跟 AI 面板同一行判断：收 JSON 那串拿到 JSON 就算完事，
+    # 只解析视频那串本地分析入库就算完事，其余两串要出成品才算。
+    # 注意 video_queue_statistics 现在只对 "json" 单独特判，别的值都按成品算，
+    # 所以 analyze 这一档的「已完成」桶暂时还是成品数，真实进度看下面单独打的「已分析」
+    if job == "analyze":
+        done_key = "analysed"
+    elif job == "collect":
+        done_key = "json"
+    else:
+        done_key = "clipped"
     st = repo.video_queue_statistics(db, ids, mode=job, done_key=done_key)
-    logger.info("自动剪辑总览（%s，干的是 %s）", in_dir, job)
+    logger.info("自动剪辑总览（%s，干的是 %s）", in_dir, JOB_NAMES.get(job, job))
     logger.info("  总视频 %d / 已获取 JSON %d（横切指标，和下面的桶会重叠）",
                 st["total"], st["json"])
+    if job == "analyze":
+        # 只解析视频这一档就看这一个数：本地分析进库的有多少条，剩下几步压根不跑
+        logger.info("  已分析 %d / 还没分析 %d（这一档分析入库就算干完，不问 AI 也不剪）",
+                    st["analysed"], st["total"] - st["analysed"])
     logger.info("  已完成 %d / 剪辑中 %d / 等待 AI %d / 待剪辑 %d / 失败 %d / 已取消 %d / "
                 "未获取 JSON %d",
                 st["done"], st["rendering"], st["waiting_ai"], st["pending_render"],
@@ -559,9 +576,9 @@ def cmd_db(cfg: Config, args: argparse.Namespace) -> int:
 
 # ------------------------------------------------------------------ 高光剪辑
 def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
-    """按 AI JSON 剪高光：从 clip.start 剪到 clip.end 原速播放，片尾接 1 秒纯红背景。"""
+    """按 AI JSON 剪高光：从 segments[0].sa 剪到 .end 原速播放，片尾按配置冻住末帧几秒。"""
 
-    from vidscribe.highlight import default_target, parse_spec, render_highlight, resolve_video  # noqa: PLC0415
+    from vidscribe.highlight import parse_spec, render_highlight, resolve_video  # noqa: PLC0415
     from vidscribe.highlight import clip_engine  # noqa: PLC0415
     from vidscribe.video_io import is_complete_video  # noqa: PLC0415
 
@@ -613,22 +630,21 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
         logger.error("%s（可用 --video 指定源视频）", exc)
         return 2
 
+    manual = None
     if args.out:
-        target = Path(args.out)
-        if not target.is_absolute():
-            target = cfg.root / target
-    else:
-        target = default_target(_export_dir(cfg, video), video)
+        manual = Path(args.out)
+        if not manual.is_absolute():
+            manual = cfg.root / manual
 
     # ---- 剪辑引擎：用逐词时间戳把 AI 的粗区间修成语义边界（--no-engine 可关掉）----
     jobs: list[tuple[Any, Path]] = []
     if args.no_engine:
         try:
-            jobs.append((spec.shifted(args.start_offset, args.end_offset),
-                         target))
+            one = spec.shifted(args.start_offset, args.end_offset)
         except ValueError as exc:
             logger.error("加减秒数不合规: %s", exc)
             return 2
+        jobs.append((one, manual or _planned_target(cfg, video, one)))
     else:
         result = _clip_plans(cfg, video, payload)
         for line in clip_engine.describe_result(result):
@@ -646,13 +662,19 @@ def cmd_highlight(cfg: Config, args: argparse.Namespace) -> int:
             except ValueError as exc:
                 logger.error("第 %d 段修正后的区间不能渲染: %s", index, exc)
                 return 2
-            jobs.append((one, _numbered_target(target, index)))
+            jobs.append((one, _numbered_target(manual, index) if manual
+                         else _planned_target(cfg, video, one, index)))
 
     for index, (job, out_path) in enumerate(jobs, start=1):
+        if manual is None and out_path.exists():
+            print(f"[剪辑引擎] 同名成品已经在盘上，跳过：{out_path.name}", flush=True)
+            continue
         print(f"[剪辑引擎] 开始渲染第 {index}/{len(jobs)} 段 -> {out_path.name}", flush=True)
         try:
             result_info = render_highlight(video, job, out_path,
-                                           on_log=lambda line: print(line, flush=True))
+                                           on_log=lambda line: print(line, flush=True),
+                                           freeze_seconds=float(
+                                               cfg.highlight.get("freeze_tail_seconds", 2.0)))
         except Exception as exc:
             logger.error("剪辑失败: %s", exc)
             logger.debug(traceback.format_exc())
@@ -676,6 +698,21 @@ def _numbered_target(target: Path, index: int) -> Path:
     return target.with_name(f"{target.stem}_{index}{target.suffix}")
 
 
+def _planned_target(cfg: Config, video: Path, job: Any, index: int = 1,
+                    seconds: float | None = None) -> Path:
+    """按**实际剪进去的时长**命名：`<视频名>_1095.mp4` = 10.95 秒（和 GUI 同一个口径）。
+
+    区间 = 起剪 → 结束（含加减秒数；引擎开着就是修正后的区间）。冻帧不算，
+    静音压缩剪掉的那部分也不算（`seconds` 给了就以它为准，那是保留片段的总长），
+    「提取数据」导出的 duration 也是这个口径，两边永远对得上。
+    同名不让位也不覆盖：调用方看到文件已存在就跳过这一段（已经剪过了）。
+    """
+    from vidscribe.highlight import default_target  # noqa: PLC0415
+
+    raw = float(job.duration) if seconds is None else float(seconds)
+    return default_target(_export_dir(cfg, video), video, round(max(0.0, raw), 2), index=index)
+
+
 def _clip_plans(cfg: Config, video: Path, payload: Any) -> Any:
     """跑剪辑引擎：逐词时间戳从库里取，视频时长现探；取不到就退化成只做合法性校验。"""
     from vidscribe.highlight import clip_engine  # noqa: PLC0415
@@ -683,6 +720,7 @@ def _clip_plans(cfg: Config, video: Path, payload: Any) -> Any:
 
     segments: tuple[Any, ...] = ()
     duration: float | None = None
+    use_engine = bool(cfg.highlight.get("clip_engine", False))
     try:
         from vidscribe.db import open_db, repo  # noqa: PLC0415
 
@@ -690,14 +728,18 @@ def _clip_plans(cfg: Config, video: Path, payload: Any) -> Any:
         try:
             row = repo.find_video(db, video)
             if row is not None:
-                segments = clip_engine.segments_for_video(db, int(row["id"]))
+                if use_engine:
+                    segments = clip_engine.segments_for_video(db, int(row["id"]))
                 # 库里没时长就现探一次写回（和 GUI 同一个入口，不另写一套）
                 duration = repo.ensure_duration(db, int(row["id"]), video)
         finally:
             db.close()
     except Exception as exc:  # noqa: BLE001 - 没库也要能剪，只是没法修边界
         logger.warning("取不到逐词时间戳（%s），本次不修正边界", exc)
-    if not segments:
+    if not use_engine:
+        logger.info("剪辑引擎已关闭（highlight.clip_engine=false）："
+                    "按 AI 的区间原样剪，只按视频时长收尾")
+    elif not segments:
         logger.warning("库里没有这个视频的逐词时间戳，AI 区间将原样使用（只按视频时长收尾）")
     else:
         logger.info("逐词时间戳：%d 句", len(segments))
@@ -854,10 +896,188 @@ def _assets_detail(cfg: Config, db: Any, assets: Any, row: Any) -> None:
         _print_lineage(info)
 
 
+def _assets_import_moments(cfg: Config, args: argparse.Namespace, db: Any, assets: Any,
+                           video_row: Any) -> int:
+    """结果清单（AI 只给两个时间点）→ 一行一份高光方案入库。
+
+    区间不是 AI 给的：`plan_from_span` 拿库里的逐词时间戳把两个点吸到句边界上，
+    所以这条路比 `--import-json` 多一个硬前提 —— 这个视频得先跑过分析。
+    """
+    from vidscribe import ai_protocol  # noqa: PLC0415
+    from vidscribe.highlight import clip_engine, from_moments  # noqa: PLC0415
+
+    source = Path(args.import_moments)
+    if not source.is_absolute():
+        source = cfg.root / source
+    if not source.is_file():
+        logger.error("找不到清单文件：%s", source)
+        return 2
+    rows = from_moments.rows_from_text(source.read_text(encoding="utf-8", errors="replace"))
+    if not rows:
+        logger.error("清单里一行都没解出来（要的是一行一个 JSON 对象）：%s", source)
+        return 2
+    video_id = int(video_row["id"])
+    name = str(video_row["file_name"])
+    # 清单每一行都带着剧本第一行那个文件名。和 `--video` 指定的对不上就**直接拒**：
+    # 那是「导错视频」的铁证，按指定视频硬算只会入库一批别人的区间，事后极难发现
+    named = {one for one in (from_moments.video_of_row(row) for row in rows) if one}
+    wrong = sorted(one for one in named if one != name)
+    if wrong:
+        logger.error("清单里写的是 %s，和指定的视频 %s 对不上，不导",
+                     "、".join(wrong), name)
+        return 2
+    segments = clip_engine.segments_for_video(db, video_id)
+    if not segments:
+        logger.error("视频 #%d 库里没有语音，算不出区间——先跑一遍 run", video_id)
+        return 2
+
+    try:
+        seconds = float(video_row["duration"]) if video_row["duration"] else None
+    except (IndexError, KeyError, TypeError, ValueError):
+        seconds = None
+    made, logs = from_moments.payloads_from_rows(segments, rows, video_name=name,
+                                                 duration=seconds)
+    for line in logs:
+        print(line, flush=True)
+    if not made:
+        logger.error("清单 %d 行一条都没算出合法区间，不登记", len(rows))
+        return 2
+    if args.dry_run:
+        logger.info("dry-run：只算不入库（%d/%d 行可用）", len(made), len(rows))
+        return 0
+
+    # 翻译是可选的一步：填的是 `Speech text`（中文），失败也不拦入库 ——
+    # 区间已经算准了，译文回头可以再补，没必要为一次模型加载失败丢掉整批方案
+    if getattr(args, "translate", False):
+        from vidscribe.translate import translate_items  # noqa: PLC0415
+
+        wanted = [{"key": str(i), "text": speech}
+                  for i, (_, speech, _) in enumerate(made) if speech]
+        result = translate_items(cfg, wanted) if wanted else {"translations": {}}
+        got = result.get("translations") or {}
+        for i, (payload, _, _) in enumerate(made):
+            text = got.get(str(i))
+            if text:
+                payload["clip"]["Trimclip"]["Speech text"] = text
+        if wanted and not got:
+            logger.warning("翻译一行都没成：%s，Speech text 先留空",
+                           result.get("detail") or result.get("reason") or "原因不明")
+
+    for index, (payload, speech, row) in enumerate(made, start=1):
+        note = args.note or f"{source.name} 第 {index} 条"
+        if speech and not payload["clip"]["Trimclip"]["Speech text"]:
+            note += f"｜区间原文待译：{speech}"
+        # raw_json 存 AI 原话（那两个时间点），current_json 存程序算出的区间，
+        # 血缘上一眼能看出「AI 指哪儿」和「程序切到哪儿」差了多少。
+        # 入库前先升级成新协议：和 AI 那条路存进 current_json 的形状保持一致
+        asset_id = assets.create_asset(
+            db, video_id, ai_protocol.payload_of(payload), source_type="imported",
+            name=(f"{args.name} {index}" if args.name else None),
+            note=note, raw_payload=row,
+            make_current=(not args.no_current) and index == 1)
+        clip = payload["clip"]
+        logger.info("方案 #%d ← %.2f-%.2f（%.2fs）", asset_id,
+                    clip["start"], clip["end"], clip["duration"])
+    logger.info("清单 %d 行 → 入库 %d 份方案（Speech text 留空，等翻译）",
+                len(rows), len(made))
+    return 0
+
+
+def _assets_extract(cfg: Config, args: argparse.Namespace, db: Any, assets: Any,
+                    video_row: Any) -> int:
+    """成品 → 第二轮混剪的输入行（和资产中心「提取数据」**同一份实现**）。
+
+    只导**剪出过成品**的 JSON，一个成品一行：先看盘（文件真的还在），再去溯源它的 JSON。
+    库里的 `exists_on_disk` 只是上次扫盘的旧状态，不拿它当准。
+
+    加减秒数（startframe / freeze）优先用 JSON 里那份（剪辑时盖进去的，记的是这个成品
+    当时的口径），没有才退回界面设置里的值 —— 和 GUI 那条路读的是同一个文件。
+
+    成品渲染时剪过超时静音的，`gaps` 按**剪完之后**的片段算（`keeps_for` 现算，
+    和渲染同一个 `trim_plan`）：不这么算，第二轮的旁白会压在人说话上。
+    """
+    from vidscribe import ai_protocol  # noqa: PLC0415
+    from vidscribe.gui import settings as gui_settings  # noqa: PLC0415 - 纯 json，不拉 Qt
+    from vidscribe.highlight import clip_engine  # noqa: PLC0415
+    from vidscribe.highlight.extract import (  # noqa: PLC0415
+        extract_line,
+        keeps_for,
+        unresolved_note,
+        unresolved_seconds,
+    )
+
+    video_id = int(video_row["id"])
+    name = str(video_row["file_name"])
+    saved = gui_settings.load(cfg).get("highlight_offsets") or ()
+    deltas = [ai_protocol.num(saved[i]) if i < len(saved) else None for i in (0, 1)]
+    startframe = deltas[0] if deltas[0] is not None else 0.0
+    freeze = deltas[1] if deltas[1] is not None else 0.0
+    # 静音压缩：成品剪成哪几段不入库，这里按**成品的真实时长**反推（`keeps_for`），
+    # 空隙才落在和盘上那个文件一致的坐标上。**不看 silence_keep** —— 配置改一次就得
+    # 把旧成品全重剪才能导数据，那没必要。GUI 的「提取数据」走同一个函数
+    speech = clip_engine.segments_for_video(db, video_id)
+    if not speech:
+        logger.warning("视频 #%d 没有逐词时间戳，gaps 全给空数组（第二轮就别插配音了）",
+                       video_id)
+
+    lines: list[str] = []
+    empty = 0                 # 没有可用空隙的条数：第二轮插不了配音，报个数
+    unknown = 0               # 时长既不等于区间长度、也反推不出剪法：clips 和文件对不上
+    for info in assets.products_overview(db, video_id):
+        path = Path(str(info["path"]))
+        if not path.is_file():
+            logger.info("跳过 %s（文件不在盘上）", path.name)
+            continue
+        if info["asset_id"] is None:
+            logger.info("跳过 %s（成品没挂上高光 JSON，溯源不到）", path.name)
+            continue
+        spans = info.get("spans") or ()
+        if len(spans) > 1:
+            # 一个成品正常只对应一段，多出来的是历史脏数据（clips 张冠李戴）
+            logger.warning("%s 挂着 %d 段实际区间，导出只用第一段", path.name, len(spans))
+        region = ((spans[0].get("start"), spans[0].get("end")) if spans else None)
+        recorded = (spans[0].get("duration") if spans else None)
+        keeps = keeps_for(speech, region, made=recorded)
+        # 时长解释不了：这条 clips 记录和盘上的文件本来就对不上，gaps 不可信
+        if unresolved_seconds(recorded, keeps, region):
+            unknown += 1
+
+        one = extract_line(
+            assets.asset_payload(db, int(info["asset_id"])), path.name,
+            startframe=startframe, freeze=freeze, source=name,
+            span=recorded,
+            region=region,
+            speech=speech,
+            keeps=keeps)
+        if one is None:
+            logger.info("跳过 %s（溯源到的 JSON 里没有片段）", path.name)
+            continue
+        lines.append(one[0])
+        if not one[1]:
+            empty += 1
+
+    if not lines:
+        logger.error("视频 #%d 没有可提取的成品素材", video_id)
+        return 2
+    target = Path(args.out) if args.out else (
+        cfg.path("output_dir") / f"高光提取_{video_id}_{len(lines)}条.txt")
+    if not target.is_absolute():
+        target = cfg.root / target
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    logger.info("提取 %d 条 → %s", len(lines), target)
+    if empty:
+        logger.warning("其中 %d 条没有可用原声空隙，第二轮只能当无旁白素材用", empty)
+    if unknown:
+        logger.warning("%s", unresolved_note(unknown, len(lines)))
+    return 0
+
+
+
 def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) -> int:
     """只用库里的高光方案剪成片：**一次 AI 都不调**。"""
     from vidscribe.db import repo  # noqa: PLC0415
-    from vidscribe.highlight import default_target, parse_spec, render_highlight  # noqa: PLC0415
+    from vidscribe.highlight import parse_spec, render_highlight  # noqa: PLC0415
     from vidscribe.highlight import clip_engine  # noqa: PLC0415
     from vidscribe.video_io import is_complete_video  # noqa: PLC0415
 
@@ -881,24 +1101,9 @@ def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) 
         logger.error("源视频已不在盘上：%s", video)
         return 2
 
-    prm_row = None
-    if args.prm is not None:
-        prm_row = assets.get_prm(db, int(args.prm))
-        if prm_row is None:
-            logger.error("没有 #%s 这个 PRM", args.prm)
-            return 2
-    else:
-        prm_row = assets.default_prm(db)
-
-    target = Path(args.out) if args.out else None
-    if target is not None and not target.is_absolute():
-        target = cfg.root / target
-    if target is None:
-        stem = f"{video.stem}_{asset['name']}"
-        if prm_row is not None:
-            stem += f"_{prm_row['name']}"
-        target = default_target(_export_dir(cfg, video), video)
-        target = target.with_name(f"{stem}{target.suffix}")
+    manual = Path(args.out) if args.out else None
+    if manual is not None and not manual.is_absolute():
+        manual = cfg.root / manual
 
     result = _clip_plans(cfg, video, payload)
     for line in clip_engine.describe_result(result):
@@ -911,16 +1116,45 @@ def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) 
         return 0
 
     made: list[Path] = []
+    # 静音压缩：区间里超时的静音剪掉，只留 `silence_keep` 秒（0 = 不剪）。
+    # 和 GUI 读同一个键、算同一个 `trim_plan`，成品口径只有一份
+    silence_keep = max(0.0, float(cfg.highlight.get("silence_keep", 2.0)))
+    silence_target = max(0.0, float(cfg.highlight.get("silence_target", 0.0)))
+    words: tuple[Any, ...] = ()
+    if silence_keep > 0:
+        words = clip_engine.segments_for_video(db, int(video_row["id"]))
+        if not words:
+            logger.info("视频 #%d 没有逐词时间戳，这次不剪静音", int(video_row["id"]))
     for index, plan in enumerate(result.plans, start=1):
         try:
             job = parse_spec(clip_engine.payload_for(plan))
         except ValueError as exc:
             logger.error("第 %d 段不能渲染：%s", index, exc)
             return 2
-        out_path = _numbered_target(target, index)
+        keeps = None
+        if words:
+            spans = clip_engine.trim_for(words, job.clip_start, job.clip_end,
+                                         keep=silence_keep, target=silence_target)
+            if len(spans) > 1:
+                keeps = spans
+        played = (round(sum(hi - lo for lo, hi in keeps), 3) if keeps
+                  else max(0.0, float(job.duration)))
+        if keeps:
+            print(f"[静音压缩] 第 {index} 段 静音最多留 {silence_keep:.2f}s："
+                  f"{job.duration:.2f}s → {played:.2f}s，剪成 {len(keeps)} 段 "
+                  + " + ".join(f"{lo:.2f}-{hi:.2f}" for lo, hi in keeps), flush=True)
+        # 和 GUI 的 render_asset 同名口径：<视频名>_<时长>.mp4，时长取实际剪进去的那个数
+        out_path = (_numbered_target(manual, index) if manual is not None
+                    else _planned_target(cfg, video, job, index, seconds=played))
+        if manual is None and out_path.exists():
+            print(f"[剪辑引擎] 同名成品已经在盘上，跳过：{out_path.name}", flush=True)
+            continue
         print(f"[剪辑引擎] 开始渲染第 {index}/{len(result.plans)} 段 -> {out_path.name}", flush=True)
         try:
-            render_highlight(video, job, out_path, on_log=lambda line: print(line, flush=True))
+            info_render = render_highlight(
+                video, job, out_path, on_log=lambda line: print(line, flush=True),
+                freeze_seconds=float(cfg.highlight.get("freeze_tail_seconds", 2.0)),
+                keep_spans=keeps)
         except Exception as exc:
             logger.error("剪辑失败：%s", exc)
             logger.debug(traceback.format_exc())
@@ -929,16 +1163,20 @@ def _assets_render(cfg: Config, args: argparse.Namespace, db: Any, assets: Any) 
             logger.error("成片封装不完整，不当成成品：%s", out_path)
             return 1
         print("[剪辑引擎] 成片验证通过", flush=True)
-        # 成品记账走数据层的同一个入口：写实际剪辑区间 → 登记成品 → 挂方案 / PRM
+        # 成品记账走数据层的同一个入口：写实际剪辑区间 → 登记成品 → 挂方案
+        # PRM 不参与：那是问 AI 时用的提示词，渲染这一步压根不读它
+        spec = assets.clip_spec_for(plan, job.clip_start, job.clip_end)
+        if keeps:
+            # 区间两头还是这一段在原视频里的范围，但成品里中间少了几截，
+            # 时长记实际剪进去的那个数 —— 和文件名、提取数据同一个口径
+            spec["duration"] = played
         info = assets.record_product(
             db, int(video_row["id"]), out_path,
-            specs=[assets.clip_spec_for(plan, job.clip_start, job.clip_end)],
-            asset_id=int(asset["id"]),
-            prm_id=int(prm_row["id"]) if prm_row is not None else None)
+            specs=[spec],
+            asset_id=int(asset["id"]))
         made.append(out_path)
-        logger.info("成品已生成并记账：%s（方案 #%s%s，实际区间 %.2f → %.2f）", out_path,
-                    asset["id"], f"，PRM #{prm_row['id']}" if prm_row is not None else "",
-                    job.clip_start, job.clip_end)
+        logger.info("成品已生成并记账：%s（方案 #%s，实际区间 %.2f → %.2f）", out_path,
+                    asset["id"], job.clip_start, job.clip_end)
         logger.debug("artifact #%s / clips %s", info["artifact_id"], info["clip_ids"])
     print(f"[高光方案] 本次共产出 {len(made)} 个成品，全部挂在方案 #{asset['id']} 名下")
     return 0
@@ -960,6 +1198,24 @@ def cmd_assets(cfg: Config, args: argparse.Namespace) -> int:
     db = open_db(cfg)
     code = 0
     try:
+        if args.extract:
+            if not args.video:
+                logger.error("--extract 要配 --video <id|文件名>")
+                return 2
+            row = _pick_video(db, args.video)
+            if row is None:
+                logger.error("库里找不到视频：%s", args.video)
+                return 2
+            return _assets_extract(cfg, args, db, db_assets, row)
+        if args.import_moments:
+            if not args.video:
+                logger.error("--import-moments 要配 --video <id|文件名>，得知道挂在哪个视频下")
+                return 2
+            row = _pick_video(db, args.video)
+            if row is None:
+                logger.error("库里找不到视频：%s", args.video)
+                return 2
+            return _assets_import_moments(cfg, args, db, db_assets, row)
         if args.import_json:
             if not args.video:
                 logger.error("--import-json 要配 --video <id|文件名>，得知道挂在哪个视频下")
@@ -1294,7 +1550,59 @@ def write_final_report(path: Path, cfg: Config, results: list[dict], total: floa
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
+def cmd_montage(cfg: Config, args: argparse.Namespace) -> int:
+    """检查第二轮混剪的输出：能机器判的全判一遍，主观项另出一张评分表。
+
+    为什么要有这个命令：混剪 PRM 里绝大多数规则都是可计算的（素材分数、同源、
+    Rank 1 闭嘴、旁白说不说得完），而实测 AI 出错**全部**集中在这些地方。
+    人盯着一页 JSON 一条条对时间戳既慢又漏，程序一秒就报完。
+
+    返回码：0 = 全部合规；1 = 有不合规（好接到批处理里当闸门）；2 = 参数或文件不对。
+    """
+    from vidscribe.highlight import montage as check  # noqa: PLC0415
+
+    try:  # Windows 控制台默认 GBK，报告里的中文会花屏
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:  # noqa: BLE001
+        pass
+
+    def _resolve(text: str) -> Path:
+        one = Path(text)
+        return one if one.is_absolute() else cfg.root / one
+
+    pool_path = _resolve(args.pool)
+    if not pool_path.is_file():
+        logger.error("找不到提取数据：%s（就是「提取数据」导出的那份 txt）", pool_path)
+        return 2
+    pool = check.load_pool(pool_path.read_text(encoding="utf-8").splitlines())
+    if not pool:
+        logger.error("%s 里一行素材都没读出来", pool_path)
+        return 2
+
+    if args.json:
+        source = _resolve(args.json)
+        if not source.is_file():
+            logger.error("找不到混剪 JSON：%s", source)
+            return 2
+        raw = source.read_text(encoding="utf-8")
+    else:
+        raw = sys.stdin.read()
+
+    checked = check.check_all(raw, pool)
+    print(check.report(checked))
+
+    if args.scorecard:
+        target = _resolve(args.scorecard)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # utf-8-sig：Excel 双击打开 CSV 时不带 BOM 会把中文认成乱码
+        target.write_text(check.scorecard(checked, raw, pool), encoding="utf-8-sig")
+        logger.info("评分表 → %s（机器判定已填好，故事/节奏/情绪那几项留空等你打分）", target)
+
+    return 1 if any(bad for _i, bad in checked) else 0
+
+
 # ------------------------------------------------------------------ 参数解析
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="vidscribe", description="本地 AI 视频理解：视觉事件 + 语音时间轴")
     parser.add_argument("--config", default=None, help="配置文件路径，默认 config.json")
@@ -1393,24 +1701,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_hl.add_argument("--video", default=None, help="源视频路径，JSON 的 video 字段找不到时用它兜底")
     p_hl.add_argument("--out", default=None,
                       help="输出 MP4 路径，默认放导出目录（gui_settings.json 的 export_dir），"
-                           "没设过就放 output/<视频名>/，文件名带 _高光时刻")
+                           "没设过就放 output/<视频名>/，文件名带成片时长（例 _689 = 6.89 秒）")
     p_hl.add_argument("--start-offset", type=float, default=0.0,
-                      help="起剪点 = clip.start + 本值，秒；负数提前起剪")
+                      help="起剪点 = segments[0].sa + 本值，秒；负数提前起剪")
     p_hl.add_argument("--end-offset", type=float, default=0.0,
-                      help="结束点 = clip.end + 本值，秒；正数多留一点")
+                      help="结束点 = segments[0].end + 本值，秒；正数多留一点")
     p_hl.add_argument("--dry-run", action="store_true",
                       help="只跑剪辑引擎算区间并打印中文报告，不渲染、不写文件")
     p_hl.add_argument("--no-engine", action="store_true",
-                      help="不修正边界，clip.start / clip.end 原样照剪（老行为）")
+                      help="不修正边界，segments[0].sa / .end 原样照剪（老行为）")
 
 
     p_hl.set_defaults(func=cmd_highlight)
+
+    p_mg = sub.add_parser("montage",
+                          help="检查第二轮混剪的输出：素材分数 / 同源 / Rank1 闭嘴 / 旁白说不说得完")
+    p_mg.add_argument("--pool", required=True, metavar="提取TXT",
+                      help="「提取数据」导出的那份 txt（一行一个成品素材），当对照的真值")
+    p_mg.add_argument("--json", default=None, metavar="混剪JSON",
+                      help="AI 交回来的混剪 JSON；不给则从标准输入读")
+    p_mg.add_argument("--scorecard", default=None, metavar="CSV",
+                      help="另存一张评分表：机器判定填好，故事/节奏/情绪留空等人打分")
+    p_mg.set_defaults(func=cmd_montage)
+
 
     p_as = sub.add_parser("assets", help="高光方案：查/导入/复制/编辑/软删/设当前/只用 JSON 剪/成品溯源")
     p_as.add_argument("--video", default=None, help="视频 id 或文件名片段：看这个视频的详情")
     p_as.add_argument("--limit", type=int, default=30, help="总表列多少个视频，默认 30")
     p_as.add_argument("--import-json", dest="import_json", default=None, metavar="JSON",
                       help="把一份现成 JSON 登记成新方案（要配 --video），旧方案一个字不动")
+    p_as.add_argument("--extract", action="store_true",
+                      help="把这个视频剪出过的成品导成第二轮混剪的输入（要配 --video），"
+                           "一个成品一行，带 gaps 和四维 scores；落点用 --out 指定")
+    p_as.add_argument("--import-moments", dest="import_moments", default=None, metavar="清单",
+                      help="结果清单（一行一个 setup_at/result_at）→ 一行一份方案；"
+                           "区间由程序按逐词时间戳算（要配 --video，视频得先分析过）")
+    p_as.add_argument("--translate", action="store_true",
+                      help="配合 --import-moments：顺手把区间原文译成中文填进 Speech text")
     p_as.add_argument("--copy", default=None, metavar="方案ID", help="复制一份方案（原件不动）")
     p_as.add_argument("--edit", default=None, metavar="方案ID",
                       help="用 --json 的内容改方案；默认另开一条新方案")
@@ -1433,8 +1760,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_as.add_argument("--trace", default=None, metavar="成品ID",
                       help="成品反查：视频 / 分析 / 方案 / AI / 模型 / PRM")
     p_as.add_argument("--render", default=None, metavar="方案ID",
-                      help="只用这份 JSON 剪成片，**不调用 AI**；可配 --prm 记这次用的是哪版 PRM")
-    p_as.add_argument("--prm", default=None, metavar="PRM_ID", help="配合 --render：成品记这版 PRM")
+                      help="只用这份 JSON 剪成片，**不调用 AI**（不涉及 PRM）")
     p_as.add_argument("--out", default=None, help="配合 --render：输出 MP4 路径")
     p_as.add_argument("--dry-run", dest="dry_run", action="store_true",
                       help="配合 --render：只算区间不渲染")

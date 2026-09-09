@@ -123,3 +123,10 @@ def extract_json(text: str) -> dict | None:
     from . import gemini_api  # noqa: PLC0415
 
     return gemini_api.extract_json(text)
+
+
+def extract_json_list(text: str) -> list[dict]:
+    """抠出回答里的**所有** JSON（向下兼容：只回一份就一份）。"""
+    from . import gemini_api  # noqa: PLC0415
+
+    return gemini_api.extract_json_list(text)

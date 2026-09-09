@@ -105,8 +105,11 @@ SECTION 2 — ACTION TRACK
 One entry per action span. This is WHAT IS PHYSICALLY HAPPENING and WHEN IT CHANGES.
 
 SECTION 3 — EXPRESSION TRACK
-`[start - end]: expression intensity`
+`[start - end]: expression confidence`
 Facial expression from a dedicated face model, sampled at 2 fps, 0.5s resolution.
+The number is the model's classification confidence for that label (top-1 probability),
+NOT how strong the expression is. A high number means "the model is sure it is this
+expression", it does not mean "the expression is intense".
 This is the PRIMARY emotional evidence.
 It describes ONLY the largest face on screen. When two people are visible, it is one
 person's expression — do not attribute it to whoever happens to be speaking.

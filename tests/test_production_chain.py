@@ -40,22 +40,33 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from test_highlight_assets import Win, make_project, video_row   # noqa: E402
 
+from vidscribe import ai_protocol                                # noqa: E402
 from vidscribe import video_io                                   # noqa: E402
 from vidscribe.db import assets as db_assets                     # noqa: E402
 from vidscribe.db import repo as db_repo                         # noqa: E402
+from vidscribe.highlight import clip as clip_mod                  # noqa: E402
 from vidscribe.highlight import clip_engine                      # noqa: E402
 
 
 # ------------------------------------------------------------------ 小道具
+#: `t` 那块整份 JSON 会被存进 clips.evaluation 列（见 db/repo.py 的 clips_from_payload）
+TRIM = {"Scene": "赌桌前", "Action": "赌注揭晓后的反应", "Speech text": "节奏明快"}
+
+
 def ai_payload(start: float = 8.23, end: float = 23.49, score: float = 0.91,
                video: str = "v.mp4") -> dict:
-    """一份典型的 AI 高光 JSON（带 overlays，能过 parse_spec 那一关）。"""
+    """一份典型的**新协议**高光 JSON（带 o / t，能过 parse_spec 那一关）。
+
+    `sa` / `end` 是原视频时间；`timeline.duration` 和 `o` 是成片时间域，`t` 无时间。
+    """
+    span = round(end - start, 3)
     return {"video": video,
-            "clip": {"start": start, "end": end, "duration": round(end - start, 3),
-                     "score": score, "type": "hook", "reason": "赌注揭晓",
-                     "overlays": {"comment": {"time": end, "text": "no way",
-                                              "kind": "comment"},
-                                  "evaluation": "节奏明快"}}}
+            "timeline": {"duration": span, "score": score,
+                         "type": "hook", "reason": "赌注揭晓"},
+            "segments": [{"sa": start, "end": end, "dst": [0.0, span]}],
+            "o": [[span, "comment", "no way"]],
+            "t": dict(TRIM)}
+
 
 
 class FakeInfo:
@@ -197,8 +208,10 @@ def test_json_render_registers_product_and_real_clip(tmp_path: Path) -> None:
         "clips 里必须是实际渲染区间"
     assert float(clip["duration"]) == 11.16
     assert clip["status"] == "rendered" and clip["output_path"] == str(product)
-    assert clip["reason"] == "赌注揭晓" and clip["evaluation"] == "节奏明快", "文案不许被改写"
-    assert float(db_assets.asset_payload(db, asset)["clip"]["end"]) == 23.49, \
+    assert clip["reason"] == "赌注揭晓", "文案不许被改写"
+    assert json.loads(clip["evaluation"]) == TRIM, \
+        "evaluation 列存的是整个 t 块的 JSON 文本"
+    assert float(db_assets.asset_payload(db, asset)["segments"][0]["end"]) == 23.49, \
         "JSON 里的 AI 原始区间一个字不动"
     db.close()
 
@@ -270,9 +283,24 @@ def test_failed_render_registers_nothing(tmp_path: Path) -> None:
         "先验成片，再记账"
     gui = _call_names(_method(_source("src/vidscribe/gui/main_window.py"),
                               "HighlightWorker", "run"))
-    assert gui.index("is_complete_video") < gui.index("clip_spec_for"), \
+    # 渲染那条路：渲完先验成片，再记实际区间。从 render_highlight 往后截，
+    # 免得被前面「同名跳过」那条路上的同名调用干扰
+    after = gui[gui.index("render_highlight"):]
+    assert after.index("is_complete_video") < after.index("_remember_cut"), \
         "GUI 也是先验成片，再记实际区间"
+    # 同名跳过那条路（成品已在盘上、不重剪、只回写库）同样要先验再记
+    assert gui.index("_standing_ok") < gui.index("_remember_cut"), \
+        "同名跳过也要先验盘上那个成品，再回写"
+    standing = _call_names(_method(_source("src/vidscribe/gui/main_window.py"),
+                                   "HighlightWorker", "_standing_ok"))
+    assert "is_complete_video" in standing, "盘上的成品也得过完整性闸门"
+    # 记账那一步真的在算 spec —— 不然上面那些顺序断言能被一个空方法骗过去
+    remember = _call_names(_method(_source("src/vidscribe/gui/main_window.py"),
+                                   "HighlightWorker", "_remember_cut"))
+    assert "clip_spec_for" in remember, "记实际区间必须走 clip_spec_for"
     db.close()
+
+
 
 
 # ------------------------------------------------------------------ T7
@@ -402,6 +430,79 @@ def test_gui_register_final_video_creates_clips(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ 直接跑
+# ------------------------------------------------------------------ 命名
+def test_product_name_carries_its_duration(tmp_path: Path) -> None:
+    """成品名带成片时长（<视频名>_689.mp4），血缘照旧挂在方案 / PRM 上。"""
+    cfg, db = make_project(tmp_path)
+    video, vid = video_row(cfg, db, "name.mp4")
+    payload = ai_payload(video=video.name)
+    asset = db_assets.create_asset(db, vid, payload, source_type="imported")
+    prm = db_assets.create_prm(db, "PRM V1", "prm/prm_en.txt", make_default=True)
+    out = cfg.path("output_dir")
+
+    assert clip_mod.duration_tag(6.89) == "689"
+    assert clip_mod.duration_tag(6.9) == "690", "两位小数，别写成 69"
+    assert clip_mod.default_target(out, video, 6.89).name == "name_689.mp4"
+    # 第 2 段再加 _2，时长一样也不互相覆盖；名字里没有方案 / PRM——直剪不用它们
+    assert clip_mod.default_target(out, video, 6.89, index=2).name == "name_689_2.mp4"
+    assert clip_mod.default_target(out, video).name == "name_高光时刻.mp4", \
+        "不给时长（--out 之类）就退回老名字"
+
+    # 成片时长 = 播放段 + 冻帧，和渲染那边同一个口径
+    assert ai_protocol.final_duration(4.89, freeze_tail=2.0) == 6.89
+
+    product = clip_mod.default_target(out, video, 6.89)
+    product.write_bytes(b"z" * 4096)
+    plan, start, end = one_plan(payload, 8.23, 19.39)
+    made = db_assets.record_product(
+        db, vid, product, specs=[db_assets.clip_spec_for(plan, start, end)],
+        asset_id=asset, prm_id=prm)
+    trace = db_assets.artifact_lineage(db, made["artifact_id"])
+    assert trace is not None and int(trace["asset"]["id"]) == asset
+    assert int(trace["prm"]["id"]) == prm
+    assert Path(trace["path"]).name == "name_689.mp4", "库里记的就是新名字"
+    assert db_repo.artifact_path(db, vid, "final_video") == product
+
+    # 名字在渲染之前就定了，用的是实际剪进去的区间长度（不含冻帧、不按实测改名）
+    gui = _call_names(_method(_source("src/vidscribe/gui/main_window.py"),
+                             "HighlightWorker", "run"))
+    assert "final_duration" not in gui, "文件名不含冻帧，只有区间长度"
+    assert "replace" not in gui, "不许再按实测时长改名"
+    assert "exists" in gui, "同名成品已经在盘上就跳过，不让位也不覆盖"
+    cli = _call_names(_function(_source("src/vidscribe/cli.py"), "_assets_render"))
+    assert "_planned_target" in cli and cli.index("_planned_target") < cli.index("record_product"), \
+        "CLI 也是先按区间长度定名，再记账"
+    db.close()
+
+
+# ------------------------------------------------------------------ 一份 JSON 一个成品
+def test_auto_queue_renders_every_json(tmp_path: Path) -> None:
+    """自动剪辑一份 JSON 出一个成品：待剪清单来自 assets_without_product（源码级）。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "each.mp4")
+    payload = ai_payload(video="each.mp4")
+    first = db_assets.create_asset(db, vid, payload, source_type="imported")
+    second = db_assets.create_asset(db, vid, ai_payload(30.0, 41.0, video="each.mp4"),
+                                    source_type="imported")
+
+    gui = _source("src/vidscribe/gui/main_window.py")
+    picker = _call_names(_method(gui, "MainWindow", "_asset_json_for_render"))
+    assert "assets_without_product" in picker, "待剪的 JSON 只能来自这个清单"
+    assert "current_asset" not in picker, "别再只认当前方案，那样只会剪一份"
+    done = _call_names(_method(gui, "MainWindow", "on_highlight_done"))
+    assert "_render_next_asset" in done and "_auto_advance" in done
+    # 前面几个 _auto_advance 是失败分支；判「这条干完了」那一个必须排在接着剪的后面
+    last_advance = max(i for i, name in enumerate(done) if name == "_auto_advance")
+    assert done.index("_render_next_asset") < last_advance, \
+        "还有 JSON 没剪就接着剪，别先把任务落成 completed"
+    chain = _call_names(_method(gui, "MainWindow", "_auto_chain_done"))
+    assert "assets_without_product" in chain, "全部 JSON 都出成品才算这个视频干完"
+
+    # 库侧口径：两份都还没成品 → 两份都要剪
+    assert [int(r["id"]) for r in db_assets.assets_without_product(db, vid)] == [first, second]
+    db.close()
+
+
 TESTS = (
     test_duration_is_filled_once_and_never_overwritten,
     test_json_render_registers_product_and_real_clip,
@@ -412,6 +513,8 @@ TESTS = (
     test_one_video_many_jsons_each_renders,
     test_full_lineage_and_untouched_raw_json,
     test_gui_register_final_video_creates_clips,
+    test_product_name_carries_its_duration,
+    test_auto_queue_renders_every_json,
 )
 
 

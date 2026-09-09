@@ -160,6 +160,18 @@ _STEPS: dict[int, list[str]] = {
     8: [
         "ALTER TABLE prm_profiles ADD COLUMN content TEXT",
     ],
+    # v9：expression_spans.intensity 改名成 confidence。这一列存的一直是人脸模型的
+    # 分类置信度（段内 top-1 softmax 概率的平均），叫 intensity 会被下游当成"表情强弱"。
+    # 纯改名，数据原地保留，不用重新分析。
+    9: [
+        "ALTER TABLE expression_spans RENAME COLUMN intensity TO confidence",
+    ],
+    # v10：音轨预检。文件里根本没有音轨的视频，把结论记在 videos.no_audio 上
+    # （1 = 没音轨、0 = 有、NULL = 还没探过），自动剪辑以后不再排它，
+    # 「清空无声音视频」也照这一列清。老库里全是 NULL = 一个都没探过，行为跟以前一致。
+    10: [
+        "ALTER TABLE videos ADD COLUMN no_audio INTEGER",
+    ],
 }
 
 

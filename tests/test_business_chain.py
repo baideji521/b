@@ -31,6 +31,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PyQt5.QtWidgets import QApplication, QMessageBox   # noqa: E402
 
 from vidscribe.config import Config                     # noqa: E402
+from vidscribe.db import assets as db_assets            # noqa: E402
 from vidscribe.db import open_db                        # noqa: E402
 from vidscribe.db import repo as db_repo                # noqa: E402
 from vidscribe.gui import ai_options as ao              # noqa: E402
@@ -64,6 +65,9 @@ def make_project(tmp_path: Path):
     bridge["ai_output_dir"] = str(tmp_path / "ai_out")
     bridge["ai_job"] = "full"
     bridge["highlight_source"] = "all"
+    # 「不跑成品」按出厂默认（勾上）钉死：夹具是拷仓库根 config.json 来的，
+    # 不钉的话开发机上在界面把这个勾取消过，测试就跟着一起红
+    bridge["skip_done_products"] = True
     bridge["prm_id"] = 0
     bridge["mode"] = "extension"
     bridge["keep_merged_file"] = False
@@ -117,9 +121,12 @@ def analysis(db, vid: int) -> int:
     return aid
 
 
+#: 一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）：
+#: 剪辑区间在 segments[0].sa / .end（原视频时间），文案在 timeline
 HIGHLIGHT_JSON = {"video": "a.mp4",
-                  "clip": {"start": 2.0, "end": 9.0, "score": 0.9,
-                           "type": "hook", "reason": "打翻杯子"}}
+                  "timeline": {"duration": 7.0, "score": 0.9,
+                               "type": "hook", "reason": "打翻杯子"},
+                  "segments": [{"sa": 2.0, "end": 9.0, "dst": [0.0, 7.0]}]}
 
 
 def ai_json(db, vid: int, *, task_id: int | None = None) -> None:
@@ -171,6 +178,10 @@ class Win:
     _skip_because_done = mw.MainWindow._skip_because_done
     skip_done_products = mw.MainWindow.skip_done_products
     _language_blocked = mw.MainWindow._language_blocked
+    # 分析完一句语音都没有的视频不发 AI（没人说话 = 没互动，也算不出区间）
+    _silent_video = mw.MainWindow._silent_video
+    # 文件里根本没音轨的视频连队都不排（没声音 = 没剧本）
+    _mute_video = mw.MainWindow._mute_video
     _auto_done_file = mw.MainWindow._auto_done_file
     _auto_product_ready = mw.MainWindow._auto_product_ready
     _auto_after_analyze = mw.MainWindow._auto_after_analyze
@@ -186,8 +197,6 @@ class Win:
     _register_artifact = mw.MainWindow._register_artifact
     script_payload = mw.MainWindow.script_payload
     write_script_text = mw.MainWindow.write_script_text
-    # 剧本会问一句"这是不是合并视频"：自动链里的视频不是拼接的，直接给空表
-    pieces_spans = lambda self, force=False: []  # noqa: E731
     write_ai_text = mw.MainWindow.write_ai_text
     _archive_script_txt = mw.MainWindow._archive_script_txt
     _ai_files_ok = mw.MainWindow._ai_files_ok
@@ -438,13 +447,14 @@ def test_three_modes_do_different_things(tmp_path: Path) -> None:
     full.on_auto_clip()
     assert len(full.bridge.tasks) == 1 and full.calls["run_highlight"] == 0, "full 该去问 AI"
 
-    # collect：库里已有可复用 JSON -> 直接算完成，不渲染、不问 AI
+    # collect：库里已有可复用 JSON **且**方案也在 -> 直接算完成，不渲染、不问 AI
     ai_json(db, vid)
+    db_assets.create_asset(db, vid, HIGHLIGHT_JSON, source_type="ai")
     collect = Win(cfg, db, job="collect")
     collect.on_auto_clip()
     assert collect.bridge.tasks == [], "collect 有 JSON 就不问 AI"
     assert collect.calls["run_highlight"] == 0, "collect 永远不渲染"
-    assert collect._auto_chain_done(video) is True, "库里有可复用 JSON 就是干完了"
+    assert collect._auto_chain_done(video) is True, "AI 结果 + 方案都在库里才算干完"
 
     # script：库里没有 JSON -> 记 failed，绝不问 AI
     cfg2, db2 = make_project(tmp_path / "second")

@@ -142,15 +142,21 @@ class FakeWindow(QWidget):
         super().__init__()
         self.calls: list[tuple] = []
 
-    def render_asset(self, asset_id, prm_id=None):
-        self.calls.append((int(asset_id), prm_id))
+    def render_asset(self, asset_id):
+        self.calls.append((int(asset_id),))
         return True
 
 
 def payload(video: str = "demo.mp4", start: float = 8.23, end: float = 23.49) -> str:
+    """一份**新协议**的高光 JSON 文本（唯一认的写法，见 src/vidscribe/ai_protocol.py）。"""
+    span = round(end - start, 3)
     return json.dumps({"video": video,
-                       "clip": {"start": start, "end": end, "score": 0.91,
-                                "type": "hook", "reason": "很炸", "evaluation": "好笑"}})
+                       "timeline": {"duration": span, "score": 0.91,
+                                    "type": "hook", "reason": "很炸"},
+                       "segments": [{"sa": start, "end": end, "dst": [0.0, span]}],
+                       "t": {"Scene": "室内", "Action": "很炸的一下",
+                             "Speech text": "好笑"}})
+
 
 
 def center(tmp_path: Path, *, videos: int = 1, assets: int = 2, products: int = 1):
@@ -604,10 +610,8 @@ def test_render_goes_through_main_window(tmp_path: Path) -> None:
     page = view.videos
     page.select_asset(made[0][2][0])
     page.on_render()
-    assert len(window.calls) == 1 and window.calls[0][0] == made[0][2][0], \
-        f"直接剪辑必须打到 MainWindow.render_asset：{window.calls}"
-    assert window.calls[0][1] in (None, prm_id), \
-        f"带过去的 PRM 不对：{window.calls}"
+    assert len(window.calls) == 1 and window.calls[0] == (made[0][2][0],), \
+        f"直接剪辑必须打到 MainWindow.render_asset，且只传 JSON id（不带 PRM）：{window.calls}"
     assert "render_highlight" not in PANEL, "资产中心不许自己渲染"
     assert "plan_clips(" not in PANEL, \
         "资产中心不许自己算区间（区间只能来自 db/assets.py 的读取接口）"
@@ -622,7 +626,10 @@ def test_5000_videos_is_not_n_plus_one(tmp_path: Path) -> None:
     count = sql_count(page.reload)
     assert page.tbl_videos.rowCount() >= 5000, \
         f"5000 条视频没全列出来：{page.tbl_videos.rowCount()}"
-    assert count <= 20, f"5000 视频列表退化成 N+1：{count} 条 SQL"
+    # 上限从 20 提到 24：成品表的「空隙」列要拿当前视频的句 + 逐词（3 条 SQL：
+    # latest_analysis / speech_words / speech_segments）。这是**常数**开销，只查当前
+    # 选中的那一个视频，跟列表里有多少视频无关——这条护栏防的是 N+1，不是常数。
+    assert count <= 24, f"5000 视频列表退化成 N+1：{count} 条 SQL"
 
 
 # ------------------------------------------------------------------ T18 / T19

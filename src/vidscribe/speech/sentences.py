@@ -298,6 +298,14 @@ def _join_lines(head: dict[str, Any], tail: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+def _same_speaker(one: dict[str, Any], two: dict[str, Any]) -> bool:
+    """两行是不是同一个人说的。谁的标签是空的（声纹还没跑）就当同一个人，照旧合并。"""
+    first, second = one.get("speaker"), two.get("speaker")
+    if not first or not second:
+        return True
+    return str(first) == str(second)
+
+
 def _merge_across_segments(lines: list[dict[str, Any]],
                           max_merge_gap: float = MAX_MERGE_GAP) -> list[dict[str, Any]]:
     """跨 whisper 段并碎片。
@@ -305,17 +313,20 @@ def _merge_across_segments(lines: list[dict[str, Any]],
     `_merge_fragments` 只在一段之内work，可 whisper 经常把"If ……（停 3 秒）……
     this is pink, then you have to jump in" 切成两个 segment，碎片和下半句根本不在同一段里，
     段内那道合并够不着。这里在成行之后再扫一遍，把跨段的碎片并回它所属的那句话。
+
+    **换人说话就不并**：`split_on_turns` 刚按说话人切换点切开的句子，在这儿被粘回去的话，
+    一问一答会挤进同一行，而且界面每次加载都要重排一次，害得已有译文作废。
     """
     out: list[dict[str, Any]] = []
     for line in lines:
-        if out and _line_is_fragment(out[-1]):
+        if out and _line_is_fragment(out[-1]) and _same_speaker(out[-1], line):
             gap = float(line.get("start") or 0.0) - float(out[-1].get("end") or 0.0)
             if gap <= max_merge_gap:
                 out[-1] = _join_lines(out[-1], line)
                 continue
         out.append(line)
     # 末尾的碎片没有下一行可并，贴回上一行——但上一行已经说完一句就别贴，理由同 _merge_fragments
-    if len(out) > 1 and _line_is_fragment(out[-1]):
+    if len(out) > 1 and _line_is_fragment(out[-1]) and _same_speaker(out[-2], out[-1]):
         prev = str(out[-2].get("text") or "").strip()
         gap = float(out[-1].get("start") or 0.0) - float(out[-2].get("end") or 0.0)
         if gap <= max_merge_gap and prev.rstrip(_TRAILING)[-1:] not in (_END_CHARS + "."):

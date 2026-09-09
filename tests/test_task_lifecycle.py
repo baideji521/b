@@ -58,6 +58,17 @@ from vidscribe.db.schema import TASK_ACTIVE              # noqa: E402
 MAIN_WINDOW = ROOT / "src" / "vidscribe" / "gui" / "main_window.py"
 
 
+def highlight_json(sa: float = 1.0, end: float = 9.0, *, score: float = 0.9) -> dict:
+    """一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）。
+
+    剪辑区间在 `segments[0].sa` / `.end`（原视频时间），文案在 `timeline`。
+    """
+    span = round(end - sa, 3)
+    return {"timeline": {"duration": span, "score": score, "type": "hook", "reason": "r"},
+            "segments": [{"sa": sa, "end": end, "dst": [0.0, span]}]}
+
+
+
 # ------------------------------------------------------------------ 测试夹具
 def make_project(tmp_path: Path):
     """在临时目录里搭一个独立工程：库、输入、输出、AI 输出全在 tmp 下。"""
@@ -245,7 +256,7 @@ def test_ai_result_and_clip_links(tmp_path: Path) -> None:
     cfg, db = make_project(tmp_path)
     vid = db_repo.upsert_video(db, fake_video(cfg, "res.mp4"))
     tid, _ = db_repo.enqueue_ai_task(db, vid, mode="full")
-    payload = {"clip": {"start": 1.0, "end": 9.0, "score": 0.9, "type": "hook", "reason": "r"}}
+    payload = highlight_json(1.0, 9.0, score=0.9)
     rid = db_repo.save_ai_result(db, vid, task_id=tid, raw_response="raw",
                                  json_data=payload, validated=True)
     specs = db_repo.clips_from_payload(payload)
@@ -338,7 +349,7 @@ def test_reconcile_is_idempotent(tmp_path: Path) -> None:
     text = video.with_suffix(".txt")
     text.write_text("merged", encoding="utf-8")
     db_repo.register_artifact(db, vid, "merged_txt", text)
-    rid = db_repo.save_ai_result(db, vid, json_data={"clip": {"start": 0, "end": 3}})
+    rid = db_repo.save_ai_result(db, vid, json_data=highlight_json(0.0, 3.0))
     cid = db_repo.create_clip(db, vid, {"start": 0, "end": 3}, ai_result_id=rid)
 
     before = db_repo.counts(db)
@@ -370,7 +381,7 @@ def test_prompt_fingerprint(tmp_path: Path) -> None:
 
     task = db_repo.get_ai_task(db, tid)
     assert task["prompt_hash"] == second["prompt_hash"], "任务记的必须是最后真正发出去那份"
-    db_repo.save_ai_result(db, vid, task_id=tid, json_data={"clip": {"start": 0, "end": 3}},
+    db_repo.save_ai_result(db, vid, task_id=tid, json_data=highlight_json(0.0, 3.0),
                            prompt_hash=task["prompt_hash"], prompt_path=task["prompt_path"],
                            prompt_size=task["prompt_size"])
     joined = db.one(
@@ -381,7 +392,7 @@ def test_prompt_fingerprint(tmp_path: Path) -> None:
     assert joined["th"] == joined["rh"], "任务与结果两侧的指纹必须能对上"
 
     manual = db_repo.save_ai_result(db, vid, task_id=None,
-                                    json_data={"clip": {"start": 0, "end": 3}},
+                                    json_data=highlight_json(0.0, 3.0),
                                     **db_repo.prompt_fingerprint(prompt))
     got = db.one("SELECT prompt_hash FROM ai_results WHERE id = ?", (manual,))["prompt_hash"]
     assert got == second["prompt_hash"], "手工单发（没有任务行）也要能追溯"

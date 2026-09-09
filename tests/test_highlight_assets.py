@@ -52,19 +52,31 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")   # 只导入模块，不建窗口
 
+from vidscribe import ai_protocol                       # noqa: E402
 from vidscribe.config import Config                      # noqa: E402
 from vidscribe.db import assets as db_assets             # noqa: E402
 from vidscribe.db import migrations, open_db             # noqa: E402
 from vidscribe.db import repo as db_repo                 # noqa: E402
 from vidscribe.db import schema                          # noqa: E402
 from vidscribe.gui import main_window as mw              # noqa: E402
+from vidscribe.highlight import clip as clip_mod         # noqa: E402
 
 
 def payload(start: float = 4.0, end: float = 13.0, score: float = 0.87,
-            video: str = "v.mp4") -> dict:
+            video: str = "v.mp4", *, more: tuple[tuple[float, float], ...] = ()) -> dict:
+    """一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）。
+
+    `start` / `end` 是原视频时间，落在 `segments[0].sa` / `.end`；成片时长和文案
+    在 `timeline` 里。`more` 多给的段用来验证"一份 JSON 只算一个高光"。
+    """
+    spans = ((start, end),) + more
     return {"video": video,
-            "clip": {"start": start, "end": end, "score": score,
-                     "type": "hook", "reason": "r"}}
+            "timeline": {"duration": round(end - start, 3), "score": score,
+                         "type": "hook", "reason": "r"},
+            "segments": [{"sa": sa, "end": stop, "dst": [0.0, round(stop - sa, 3)]}
+                         for sa, stop in spans],
+            "t": {"Scene": "室内", "Action": "打翻杯子", "Speech text": "r"}}
+
 
 
 # ------------------------------------------------------------------ 夹具
@@ -139,6 +151,7 @@ class Win:
     _register_highlight_asset = mw.MainWindow._register_highlight_asset
     _register_artifact = mw.MainWindow._register_artifact
     _register_final_video = mw.MainWindow._register_final_video
+    _asset_result_id = mw.MainWindow._asset_result_id         # 这次那份 JSON 是哪次 AI 结果
     _link_final_video = mw.MainWindow._link_final_video
     _auto_save_script = mw.MainWindow._auto_save_script
     _auto_text_file = mw.MainWindow._auto_text_file
@@ -148,6 +161,10 @@ class Win:
     _skip_because_done = mw.MainWindow._skip_because_done
     skip_done_products = mw.MainWindow.skip_done_products
     _language_blocked = mw.MainWindow._language_blocked
+    # 分析完一句语音都没有的视频不发 AI（没人说话 = 没互动，也算不出区间）
+    _silent_video = mw.MainWindow._silent_video
+    # 文件里根本没音轨的视频连队都不排（没声音 = 没剧本）
+    _mute_video = mw.MainWindow._mute_video
     _reusable_highlight_json = mw.MainWindow._reusable_highlight_json
     script_payload = mw.MainWindow.script_payload
     _db_video_id = mw.MainWindow._db_video_id
@@ -258,7 +275,7 @@ def test_multiple_assets_never_overwrite(tmp_path: Path) -> None:
     assert [int(r["id"]) for r in rows] == [first, second, third], "三份方案都得在"
     assert [r["name"] for r in rows] == ["方案 A", "方案 B", "方案 C"]
     kept = db_assets.asset_payload(db, first)
-    assert kept["clip"]["start"] == 4.0, "登记新方案不许改旧方案的 JSON"
+    assert kept["segments"][0]["sa"] == 4.0, "登记新方案不许改旧方案的 JSON"
     assert db_assets.asset_counts(db, [vid])[vid] == 3
     db.close()
 
@@ -271,8 +288,8 @@ def test_raw_json_is_always_the_ai_original(tmp_path: Path) -> None:
     edited = db_assets.edit_asset(db, origin, payload(5.5, 12.0))
 
     row = db_assets.get_asset(db, edited)
-    assert json.loads(row["raw_json"])["clip"]["start"] == 4.0, "raw_json 得是 AI 原话"
-    assert json.loads(row["current_json"])["clip"]["start"] == 5.5
+    assert json.loads(row["raw_json"])["segments"][0]["sa"] == 4.0, "raw_json 得是 AI 原话"
+    assert json.loads(row["current_json"])["segments"][0]["sa"] == 5.5
     db.close()
 
 
@@ -288,7 +305,7 @@ def test_edit_opens_a_new_asset(tmp_path: Path) -> None:
     old_row = db_assets.get_asset(db, origin)
     assert int(new_row["parent_id"]) == origin and int(new_row["version"]) == 2
     assert new_row["source_type"] == "edited"
-    assert json.loads(old_row["current_json"])["clip"]["start"] == 4.0, "原方案一字不动"
+    assert json.loads(old_row["current_json"])["segments"][0]["sa"] == 4.0, "原方案一字不动"
     assert int(new_row["is_current"]) == 1 and int(old_row["is_current"]) == 0
     db.close()
 
@@ -302,9 +319,51 @@ def test_in_place_edit_keeps_raw(tmp_path: Path) -> None:
 
     assert same == origin, "就地改就该还是那一条"
     row = db_assets.get_asset(db, origin)
-    assert json.loads(row["raw_json"])["clip"]["start"] == 4.0
-    assert json.loads(row["current_json"])["clip"]["start"] == 7.0
+    assert json.loads(row["raw_json"])["segments"][0]["sa"] == 4.0
+    assert json.loads(row["current_json"])["segments"][0]["sa"] == 7.0
     assert len(db_assets.list_assets(db, vid)) == 1
+    db.close()
+
+
+# ------------------------------------------------------ T4b（血缘：偏移与成品 1:1）
+def test_offsets_fork_a_new_version(tmp_path: Path) -> None:
+    """盖 startframe / freeze：没出过成品的方案原地盖（一个成品一份 JSON），
+    已经有成品挂着的才另存一版（老成品的溯源不许被改）。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "t4b.mp4")
+    origin = db_assets.create_asset(db, vid, payload(4.0, 13.0), make_current=True)
+
+    # ① 还没出成品：原地盖，不许凭空多出一版没有成品的 JSON
+    used, forked = db_assets.fork_with_offsets(db, origin, -0.55, 2.0)
+    assert (used, forked) == (origin, False), "没成品挂着就该原地盖，不另存"
+    assert len(db_assets.list_assets(db, vid)) == 1, "方案数不许变"
+    current = json.loads(db_assets.get_asset(db, origin)["current_json"])
+    assert current["startframe"] == -0.55 and current["freeze"] == 2.0, current
+    # AI 原话永远不动
+    assert "startframe" not in json.loads(db_assets.get_asset(db, origin)["raw_json"])
+
+    # ② 值一模一样：什么都不做
+    assert db_assets.fork_with_offsets(db, origin, -0.55, 2.0) == (origin, False)
+    assert len(db_assets.list_assets(db, vid)) == 1
+
+    # ③ 已经有成品挂着，又换了加减秒数：另存一版，老成品那份内容一个字不许变
+    product = cfg.path("output_dir") / "t4b_高光时刻.mp4"
+    product.parent.mkdir(parents=True, exist_ok=True)
+    product.write_bytes(b"x" * 4096)
+    artifact = db_repo.register_artifact(db, vid, "final_video", product)
+    db_assets.link_artifact(db, artifact, asset_id=origin)
+
+    new_id, forked_again = db_assets.fork_with_offsets(db, origin, 1.5, -2.0)
+    assert forked_again is True and new_id != origin, "有成品挂着就必须另存一版"
+    row = db_assets.get_asset(db, int(new_id))
+    assert int(row["parent_id"]) == origin, "新版本得挂在原方案下面（血缘要连得上）"
+    assert int(row["is_current"]) == 1, "剪的是这一版，它该成为当前方案"
+    fresh = json.loads(row["current_json"])
+    assert fresh["startframe"] == 1.5 and fresh["freeze"] == -2.0, fresh
+    old = json.loads(db_assets.get_asset(db, origin)["current_json"])
+    assert old["startframe"] == -0.55 and old["freeze"] == 2.0, "老成品那份不许被改"
+    assert db_assets.artifact_lineage(db, artifact)["asset"]["id"] == origin
+    assert len(db_assets.list_assets(db, vid)) == 2
     db.close()
 
 
@@ -316,8 +375,8 @@ def test_copy_is_independent(tmp_path: Path) -> None:
     copy = db_assets.copy_asset(db, origin)
     db_assets.edit_asset(db, copy, payload(9.0, 17.0), in_place=True)
 
-    assert json.loads(db_assets.get_asset(db, origin)["current_json"])["clip"]["start"] == 4.0
-    assert json.loads(db_assets.get_asset(db, copy)["current_json"])["clip"]["start"] == 9.0
+    assert json.loads(db_assets.get_asset(db, origin)["current_json"])["segments"][0]["sa"] == 4.0
+    assert json.loads(db_assets.get_asset(db, copy)["current_json"])["segments"][0]["sa"] == 9.0
     assert db_assets.get_asset(db, copy)["source_type"] == "copied"
     db.close()
 
@@ -471,7 +530,92 @@ def test_product_traces_back_to_everything(tmp_path: Path) -> None:
     db.close()
 
 
+def test_moment_list_becomes_one_asset_per_line(tmp_path: Path) -> None:
+    """结果清单入库：一行一份方案，raw_json 是 AI 原话、current_json 是程序算的区间。"""
+    from argparse import Namespace
+
+    from vidscribe import cli
+
+    cfg, db = make_project(tmp_path)
+    _, vid = video_row(cfg, db, "moments.mp4")
+    run_id = db_repo.create_analysis(db, vid, {})
+    db_repo.finish_analysis(db, run_id)
+    db_repo.save_speech_segments(db, run_id, [
+        {"start": 10.0, "end": 12.0, "text": "铺垫",
+         "words": [{"word": "铺", "start": 10.0, "end": 11.0},
+                   {"word": "垫", "start": 11.0, "end": 12.0}]},
+        {"start": 13.0, "end": 15.0, "text": "结果",
+         "words": [{"word": "结", "start": 13.0, "end": 14.0},
+                   {"word": "果", "start": 14.0, "end": 15.0}]},
+        {"start": 40.0, "end": 43.0, "text": "另一件事",
+         "words": [{"word": "另", "start": 40.0, "end": 41.5},
+                   {"word": "事", "start": 41.5, "end": 43.0}]},
+    ])
+    listing = tmp_path / "moments.txt"
+    listing.write_text(
+        '{"setup_at": 10.5, "result_at": 14.2, "score": 91, "word": "冲击"}\n'
+        '{"setup_at": 40.4, "result_at": 42.0, "score": 77, "word": "第二条"}\n',
+        encoding="utf-8")
+
+    args = Namespace(import_moments=str(listing), name=None, note=None,
+                     no_current=False, dry_run=False)
+    row = db.one("SELECT * FROM videos WHERE id = ?", (vid,))
+    assert cli._assets_import_moments(cfg, args, db, db_assets, row) == 0
+
+    rows = db_assets.list_assets(db, vid)
+    assert len(rows) == 2, "两行清单必须变成两份方案"
+    # 每份方案都只有一个片段：一条素材一段，多段拼接是混剪那一关的事
+    assert [int(r["clip_count"]) for r in rows] == [1, 1]
+    # 当前方案只认第一条，不是最后入库的那一条
+    current = db_assets.current_asset(db, vid)
+    first = min(rows, key=lambda r: int(r["id"]))
+    assert int(current["id"]) == int(first["id"])
+    # raw_json 是清单原行（AI 原话），current_json 是程序算出的区间
+    raw = db_assets.loads(first["raw_json"])
+    assert raw["setup_at"] == 10.5 and raw["result_at"] == 14.2
+    span = ai_protocol.clips(db_assets.loads(first["current_json"]))[0]
+    assert (span["start"], span["end"]) == (10.0, 15.0), span
+    assert "区间原文待译" in str(first["note"])
+
+    # 清单解不出东西 → 不许登记空方案
+    empty = tmp_path / "empty.txt"
+    empty.write_text("这里没有 JSON", encoding="utf-8")
+    args.import_moments = str(empty)
+    assert cli._assets_import_moments(cfg, args, db, db_assets, row) == 2
+    assert len(db_assets.list_assets(db, vid)) == 2
+
+    # 视频没分析过 → 明确报错，不许拿 AI 给的两个点当区间硬剪
+    _, blank = video_row(cfg, db, "no_speech.mp4")
+    args.import_moments = str(listing)
+    blank_row = db.one("SELECT * FROM videos WHERE id = ?", (blank,))
+    assert cli._assets_import_moments(cfg, args, db, db_assets, blank_row) == 2
+    assert db_assets.list_assets(db, blank) == []
+
+    # --translate：译文填进 Speech text，备注里就不再挂"待译"
+    from vidscribe import translate as translate_mod
+    calls: list[list[dict]] = []
+
+    def fake_translate(_cfg, items, **_kw):
+        calls.append(list(items))
+        return {"ok": True, "translations": {it["key"]: "译文" for it in items}}
+
+    real = translate_mod.translate_items
+    translate_mod.translate_items = fake_translate
+    try:
+        args.translate = True
+        assert cli._assets_import_moments(cfg, args, db, db_assets, row) == 0
+    finally:
+        translate_mod.translate_items = real
+    assert calls and calls[0][0]["text"], "该把区间原文交给翻译，而不是空字符串"
+    fresh = max(db_assets.list_assets(db, vid), key=lambda r: int(r["id"]))
+    latest = db_assets.loads(fresh["current_json"])
+    assert ai_protocol.payload_of(latest)["t"]["Speech text"] == "译文"
+    assert "待译" not in str(fresh["note"])
+    db.close()
+
+
 # ------------------------------------------------------------------ T15
+
 def test_video_without_asset_still_asks_ai(tmp_path: Path) -> None:
     cfg, db = make_project(tmp_path)
     video, vid = video_row(cfg, db, "t15.mp4")
@@ -501,7 +645,7 @@ def test_video_with_asset_renders_without_ai(tmp_path: Path) -> None:
     win._auto_step()
     assert win.calls["run_highlight"] == 1, "库里有方案就直接开剪"
     assert win.calls["send_file_to_ai"] == 0 and win.calls["dispatch_ai"] == 0, "一次 AI 都不许调"
-    assert json.loads(win.rendered)["clip"]["start"] == 4.0
+    assert json.loads(win.rendered)["segments"][0]["sa"] == 4.0
     assert win._last_asset_id == asset, "记住按哪份方案剪的，成品要靠它溯源"
     task = db_repo.get_ai_task(db, win._auto_task_id)
     assert task["status"] == "processing", "状态机照旧：素材齐了就是在剪"
@@ -693,14 +837,14 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         """把 schema.TABLES 退回 v4 之前的样子：去掉后来加的表、列和相关索引。
 
         v5 的东西（expression_spans、analysis_runs 的三个渲染列）和 v7 的
-        videos.blocked_language 也一并去掉，否则造出来的"老库"里已经有了，
-        升级脚本的 ADD COLUMN 会撞上重名。
+        videos.blocked_language、v10 的 videos.no_audio 也一并去掉，否则造出来的
+        "老库"里已经有了，升级脚本的 ADD COLUMN 会撞上重名。
         """
         out: list[str] = []
         for statement in schema.TABLES:
             if "CREATE TABLE IF NOT EXISTS videos" in statement:
                 keep = [line for line in statement.splitlines()
-                        if "blocked_language" not in line
+                        if "blocked_language" not in line and "no_audio" not in line
                         and not line.strip().startswith("--")]
                 out.append("\n".join(keep))
                 continue
@@ -730,7 +874,7 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         return out
 
     fresh = sqlite3.connect(":memory:")
-    assert migrations.apply(fresh) == 8, "新建库就是 v8"
+    assert migrations.apply(fresh) == 10, "新建库就是 v10"
 
     old = sqlite3.connect(":memory:")
     old.execute("BEGIN")
@@ -740,7 +884,7 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
     old.commit()
     assert ("table", "highlight_assets") not in objects(old), "造出来的老库不该有新表"
     assert ("table", "expression_spans") not in objects(old), "造出来的老库不该有表情表"
-    assert migrations.apply(old) == 8, "老库能一路升到 v8"
+    assert migrations.apply(old) == 10, "老库能一路升到 v10"
 
     missing = objects(fresh) - objects(old)
     assert not missing, f"升级漏了这些对象：{sorted(missing)}"
@@ -763,7 +907,7 @@ def test_upgrade_only_adds(tmp_path: Path) -> None:
     row = db.one("SELECT * FROM artifacts WHERE id = ?", (artifact,))
     assert row["highlight_asset_id"] is None and row["prm_id"] is None, \
         "老成品的新列就该是 NULL，不许瞎猜来源"
-    assert int(db.value("PRAGMA user_version")) == 8
+    assert int(db.value("PRAGMA user_version")) == 10
     assert db_assets.artifact_lineage(db, artifact)["asset"] is None, "查不到来源就老实说没有"
     db.close()
 
@@ -777,7 +921,8 @@ def test_center_rows_aggregates_and_filters(tmp_path: Path) -> None:
     _bare, vid_c = video_row(cfg, db, "zz_bare.mp4")
     db_assets.create_asset(db, vid_a, payload(video=rich.name), provider="gemini",
                            model="gemini-2.5-flash")
-    db_assets.create_asset(db, vid_a, {"clips": [payload()["clip"], payload(30.0, 38.0)["clip"]]},
+    # 一份 JSON 里给两段 segments：新协议只剪第一段，所以高光数照旧只算 1
+    db_assets.create_asset(db, vid_a, payload(more=((30.0, 38.0),)),
                            provider="qwen", model="qwen3-vl")
     db_assets.create_asset(db, vid_b, payload(video=lean.name), provider="gemini",
                            model="gemini-2.5-pro")
@@ -786,7 +931,8 @@ def test_center_rows_aggregates_and_filters(tmp_path: Path) -> None:
     db_repo.register_artifact(db, vid_a, "final_video", product)
 
     rows = {r["id"]: r for r in db_assets.center_rows(db)}
-    assert rows[vid_a]["json_count"] == 2 and rows[vid_a]["highlight_count"] == 3
+    assert rows[vid_a]["json_count"] == 2 and rows[vid_a]["highlight_count"] == 2, \
+        "两份方案、每份只算一个高光（多余的 segments 不计数）"
     assert rows[vid_a]["product_count"] == 1 and rows[vid_b]["product_count"] == 0
     assert rows[vid_a]["provider"] == "qwen", "最近一份 JSON 的 AI 就是列表里显示的那个"
     assert rows[vid_c]["json_count"] == 0
@@ -863,6 +1009,35 @@ def test_center_rows_combines_json_and_product(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ T29
+def test_deleted_product_file_drops_out_of_the_counts(tmp_path: Path) -> None:
+    """成品文件被手动删掉后：对账一次，成品数归零、「无成品」筛得出来。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "d5.mp4")
+    prm = db_assets.create_prm(db, "PRM V1", str(prm_file(cfg, "prm_zh.txt")))
+    asset = db_assets.create_asset(db, vid, payload(), provider="gemini", model="m")
+    product = cfg.path("output_dir") / "d5_高光时刻.mp4"
+    product.write_bytes(b"z" * 2048)
+    db_assets.record_product(db, vid, product,
+                             specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}],
+                             asset_id=asset, prm_id=prm)
+    assert db_assets.center_rows(db, search="d5")[0]["product_count"] == 1
+
+    product.unlink()                       # 用户在资源管理器里删掉了成品
+    assert db_assets.sync_product_presence(db) == 1, "对账要发现这一条不在盘上了"
+    row = db_assets.center_rows(db, search="d5")[0]
+    assert row["product_count"] == 0, "文件没了就不该再显示有成品"
+    assert {int(r["id"]) for r in db_assets.center_rows(db, product="none")} == {vid}
+    assert db_assets.center_rows(db, product="has") == []
+    assert db_assets.product_counts(db, [vid]) == {vid: 0}
+    assert db_assets.product_counts_for_assets(db, vid) == {}
+    assert db_assets.product_counts_for_prms(db) == {}
+    assert db_assets.sync_product_presence(db) == 0, "再对一次没有变化"
+    assert len(db_assets.products_overview(db, vid)) == 1, "血缘照旧留着，只是标记不在盘上"
+    assert db_assets.products_overview(db, vid)[0]["exists_on_disk"] is False
+    db.close()
+
+
+# ------------------------------------------------------------------ T30
 def test_batch_apis_replace_per_row_queries(tmp_path: Path) -> None:
     """成品/计数走批量接口：一个视频一次查完，界面不用逐行 products_for_asset。"""
     cfg, db = make_project(tmp_path)
@@ -996,19 +1171,25 @@ def test_extension_verifies_every_attachment(tmp_path: Path) -> None:
 
     以前是 `probe = names.slice(0, 1)`（按「就两个文件，一起拖进去」写的），
     PRM 一多就会漏：只挂上一份也判成功，AI 按残缺提示词答，回来的 JSON 是错的。
+
+    数卡片后来改成**一次调用判完全部**（`pageScanAttachments`；老写法是每个文件名各发
+    一次 executeScript，N 个文件 × 多轮轮询就是几十次往返，容易读到半成品）。所以这里
+    盯的是新形状下的同三件事：拿到的是全量文件名、同前缀不互相误命中、每一处判定都按
+    文件总数来。
     """
     js = (ROOT / "AI_剪辑师_好帮手" / "src" / "ai-task.js").read_text(encoding="utf-8")
     assert "names.slice(0, 1)" not in js and "const probe" not in js, \
         "不许再只拿第一个文件当门槛"
-    assert "function pageCountAttachment(name, siblings)" in js, \
+    assert "function pageScanAttachments(cardSelectors, names)" in js, \
         "数卡片要知道同批还有哪些名字，免得同前缀互相误命中"
-    assert "if (ambiguous(needle)) continue;" in js, "别的文件也含这段前缀时不能拿来数"
-    assert js.count("pageCountAttachment, [name, names]") >= 4, \
-        "基线、等卡片、手动等待、发送前复查都要按全量文件数"
+    assert "[site.cards || [], names]" in js, "扫卡片必须把全量文件名带进页面"
+    assert "if (ambiguous) continue;" in js, "同批别的文件也认这张卡时不能拿来数"
+    assert js.count("await scanCards()") >= 3, \
+        "塞之前的底数、等卡片、发送前复查、手动等待都要重新扫一遍"
     assert "await waitCards(names," in js and "waitCards(probe" not in js, \
         "等卡片要等全部文件"
-    assert js.count("chipsNow - chipsBase >= names.length") == 2, \
-        "自动和手动两处的角标门槛都得是文件总数"
+    assert js.count("- cardsBase >= names.length") == 2, \
+        "自动和手动两处的卡片张数门槛都得是文件总数"
 
 
 
@@ -1231,11 +1412,203 @@ def test_video_list_shows_thumbnails_lazily(tmp_path: Path) -> None:
 
 
 # ------------------------------------------------------------------ 直接跑
+# ------------------------------------------------------------------ T30
+def test_every_json_waits_for_its_own_product(tmp_path: Path) -> None:
+    """一份 JSON 一个成品：`assets_without_product` 就是自动剪辑的待剪清单。"""
+    cfg, db = make_project(tmp_path)
+    video, vid = video_row(cfg, db, "d6.mp4")
+    first = db_assets.create_asset(db, vid, payload(), provider="gemini", model="m")
+    second = db_assets.create_asset(db, vid, payload(20.0, 27.0), provider="gemini", model="m")
+    third = db_assets.create_asset(db, vid, payload(30.0, 36.0), provider="gemini", model="m")
+
+    def pending():
+        return [int(r["id"]) for r in db_assets.assets_without_product(db, vid)]
+
+    assert pending() == [first, second, third], "三份都还没出成品，按登记顺序排"
+
+    made = cfg.path("output_dir") / "d6_689.mp4"
+    made.write_bytes(b"z" * 2048)
+    db_assets.record_product(db, vid, made,
+                             specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}],
+                             asset_id=first)
+    assert pending() == [second, third], "出过成品的那份不再排队"
+    assert db_assets.product_progress(db, [vid]) == {vid: (1, 3)}, \
+        "三份 JSON 只出了一个成品，面板要显示 1/3，不能算完成"
+
+    db_assets.delete_asset(db, second)
+    assert pending() == [third], "软删的不算"
+
+    made.unlink()                       # 成品被手工删掉
+    db_assets.sync_product_presence(db)
+    assert pending() == [first, third], "成品没了，这份 JSON 重新回到待剪"
+
+    # 名字撞了不让位也不覆盖：自动剪辑那边看到文件已存在就跳过这一段
+    taken = cfg.path("output_dir") / "d6_555.mp4"
+    taken.write_bytes(b"z" * 1024)
+    assert taken.exists() and clip_mod.default_target(
+        cfg.path("output_dir"), video, 5.55).name == "d6_555.mp4"
+
+    # 丢失的成品记录可以清掉：只删记录，clips 退回 planned
+    alive = cfg.path("output_dir") / "d6_900.mp4"
+    alive.write_bytes(b"z" * 1024)
+    db_assets.record_product(db, vid, alive,
+                             specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}],
+                             asset_id=third)
+    db_assets.sync_product_presence(db)
+    assert len(db_assets.products_overview(db, vid)) == 2, "一条丢失 + 一条在盘上"
+    assert db_assets.forget_missing_products(db, vid) == 1
+    left = db_assets.products_overview(db, vid)
+    assert [Path(i["path"]).name for i in left] == ["d6_900.mp4"], "只剩还在盘上的那条"
+    assert db_assets.forget_missing_products(db, vid) == 0, "没有丢失的就什么都不删"
+    # 全库版一次清完；目录整个不在（外接盘掉线）的一条都不许动
+    ghost = cfg.path("output_dir") / "d6_111.mp4"
+    ghost.write_bytes(b"z" * 512)
+    db_assets.record_product(db, vid, ghost,
+                             specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}],
+                             asset_id=third)
+    ghost.unlink()
+    offline = tmp_path / "没挂上的盘" / "d6_222.mp4"
+    db_repo.register_artifact(db, vid, "final_video", offline)
+    db_assets.sync_product_presence(db)
+    assert db_assets.purge_missing_products(db) == 1, "只清目录还在、文件没了的那条"
+    left_paths = {Path(i["path"]).name for i in db_assets.products_overview(db, vid)}
+    assert left_paths == {"d6_900.mp4", "d6_222.mp4"}, \
+        "盘没挂上的那条记录留着，血缘不许白丢"
+    db.close()
+
+
+# ------------------------------------------------------------------ T31
+def test_product_clips_stop_claiming_other_json(tmp_path: Path) -> None:
+    """实际渲染区间只能是自己剪出来的：别的 JSON 的片段被认领了要能修回去。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "d7.mp4")
+    first_result = db_repo.save_ai_result(db, vid, json_data=payload(), validated=True)
+    second_result = db_repo.save_ai_result(db, vid, json_data=payload(20.0, 27.0),
+                                          validated=True)
+    first = db_assets.create_asset(db, vid, payload(), ai_result_id=first_result)
+    second = db_assets.create_asset(db, vid, payload(20.0, 27.0),
+                                    ai_result_id=second_result)
+
+    made = cfg.path("output_dir") / "d7_689.mp4"
+    made.write_bytes(b"z" * 2048)
+    info = db_assets.record_product(
+        db, vid, made, specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}],
+        asset_id=first)
+    # 模拟老版本的张冠李戴：第二份 JSON 的片段也被写上了第一个成品的路径
+    stray = db_repo.create_clip(db, vid, {"start": 20.0, "end": 27.0, "duration": 7.0},
+                                ai_result_id=second_result, status="rendered",
+                                output_path=made)
+    assert len(db_assets.clips_for_product(db, vid, made)) == 2, "两条都指着同一个成品"
+
+    assert db_assets.repair_product_clips(db, vid) == 1
+    left = db_assets.clips_for_product(db, vid, made)
+    assert len(left) == 1 and float(left[0]["end_time"]) == 13.0, \
+        "只剩自己剪出来的那条"
+    back = db.one("SELECT status, output_path FROM clips WHERE id = ?", (stray,))
+    assert back["status"] == "planned" and back["output_path"] is None, \
+        "被退回去的片段回到待剪，不再指着别人的成品"
+    assert db_assets.repair_product_clips(db, vid) == 0, "修过一次就没得修了"
+    # 同名重剪（删掉成品再剪、时长又一样）：登记前先退回旧记录，不许假装成这次的区间
+    again = db_repo.create_clip(db, vid, {"start": 30.0, "end": 41.0, "duration": 11.0},
+                                ai_result_id=second_result, status="rendered",
+                                output_path=made)
+    assert db_assets.detach_product_clips(db, vid, made) == 2, \
+        "指着这个路径的旧记录（含自己那条）全退回，交给这次渲染重新写"
+    assert db_assets.clips_for_product(db, vid, made) == []
+    back_again = db.one("SELECT status FROM clips WHERE id = ?", (again,))
+    assert back_again["status"] == "planned"
+    # 血缘里的实际渲染跟着变干净
+    spans = db_assets.lineage_spans(db, int(info["artifact_id"]))
+    assert spans["actual"] == [], "退回之后由这次渲染补建，不留旧值"
+    assert int(second) > 0                    # 第二份 JSON 本身一个字没动
+    db.close()
+
+
+# ------------------------------------------------------------------ T32
+def test_products_rename_to_the_duration_rule(tmp_path: Path) -> None:
+    """批量改名：老名字按实际区间长度改成规范名，文件和库（血缘）一起走。"""
+    cfg, db = make_project(tmp_path)
+    _video, vid = video_row(cfg, db, "d8.mp4")
+    asset = db_assets.create_asset(db, vid, payload(4.0, 13.0), provider="gemini", model="m")
+    old = cfg.path("output_dir") / "d8_高光时刻.mp4"
+    old.write_bytes(b"z" * 2048)
+    made = db_assets.record_product(
+        db, vid, old, specs=[{"start": 4.0, "end": 13.0, "duration": 9.0}], asset_id=asset)
+
+    plan = db_assets.product_rename_plan(db, [vid])
+    assert len(plan) == 1 and plan[0]["skip"] is None
+    assert Path(plan[0]["new"]).name == "d8_900.mp4", "9.0 秒 → _900"
+    assert Path(plan[0]["old"]) == old, "计划只算不动手"
+    assert old.is_file()
+
+    done, failed = db_assets.apply_product_rename(db, plan)
+    assert (done, failed) == (1, [])
+    new = cfg.path("output_dir") / "d8_900.mp4"
+    assert new.is_file() and not old.exists(), "文件真的改名了"
+    # 库跟着走：artifacts.path 和 clips.output_path 都指新名字，血缘不断
+    assert db_repo.artifact_path(db, vid, "final_video") == new
+    assert [Path(i["path"]).name for i in db_assets.products_overview(db, vid)] == ["d8_900.mp4"]
+    spans = db_assets.lineage_spans(db, int(made["artifact_id"]))
+    assert [s["end"] for s in spans["actual"]] == [13.0], "实际渲染区间还查得到"
+    trace = db_assets.artifact_lineage(db, int(made["artifact_id"]))
+    assert trace is not None and int(trace["asset"]["id"]) == asset, "来源 JSON 还挂着"
+    # 名字已经对了就不再动
+    again = db_assets.product_rename_plan(db, [vid])
+    assert again[0]["skip"] == "名字已经对了"
+    assert db_assets.apply_product_rename(db, again) == (0, [])
+
+    # 同名撞车：两个成品剪出同样时长时后者覆盖前者，被顶掉的记录一并清掉
+    twin = db_assets.create_asset(db, vid, payload(20.0, 29.0), provider="gemini", model="m")
+    other = cfg.path("output_dir") / "d8_高光时刻_方案 B.mp4"
+    other.write_bytes(b"z" * 1024)
+    db_assets.record_product(
+        db, vid, other, specs=[{"start": 20.0, "end": 29.0, "duration": 9.0}],
+        asset_id=twin)
+    plan2 = [i for i in db_assets.product_rename_plan(db, [vid]) if not i["skip"]]
+    assert len(plan2) == 1 and plan2[0]["overwrite"] is True, "撞名标成覆盖，不再跳过"
+    assert db_assets.apply_product_rename(db, plan2) == (1, [])
+    left = db_assets.products_overview(db, vid)
+    assert [Path(i["path"]).name for i in left] == ["d8_900.mp4"], \
+        "盘上只剩一个文件，库里就只剩一条记录"
+    assert not other.exists()
+    db.close()
+
+
+def test_stale_products_are_reported_not_silently_reshaped(work: Path) -> None:
+    """成品是用**别的**静音配置渲的，提取时要报出来 —— 不能悄悄换一套坐标。
+
+    提取侧的 `keeps_for` 是现算的：它假设「渲染那会儿用的就是现在这套配置」。
+    改了配置又没重剪，导出的 gaps / 挂字时间描述的就是一个还没渲出来的成品。
+    """
+    from vidscribe.highlight.extract import stale_note, stale_seconds
+
+    region = (10.0, 20.0)          # 区间 10 秒
+    # 一、库里记着 10.0（渲的时候没剪静音），现在也算「不剪」-> 对得上
+    assert stale_seconds(10.0, None, region) == 0.0
+    # 帧对齐的零点几帧误差不算对不上
+    assert stale_seconds(10.02, None, region) == 0.0
+    # 二、库里记着 10.0，但现在算出来要剪成 7 秒 -> 对不上，差 3 秒
+    assert stale_seconds(10.0, [(10.0, 13.0), (16.0, 20.0)], region) == 3.0
+    # 三、库里记着 7.0（渲的时候剪过），现在算「不剪」-> 也对不上
+    assert stale_seconds(7.0, None, region) == 3.0
+    # 四、老数据没记时长 / 区间不成立 -> 判断不了，不瞎报
+    assert stale_seconds(None, None, region) == 0.0
+    assert stale_seconds(0, None, region) == 0.0
+    assert stale_seconds(10.0, None, None) == 0.0
+    assert stale_seconds(10.0, None, (20.0, 10.0)) == 0.0
+
+    assert stale_note(0, 5) == "", "一条都没问题时不许弹废话"
+    note = stale_note(2, 5)
+    assert "2/5" in note and "重剪" in note, note
+
+
 TESTS = (
+    test_stale_products_are_reported_not_silently_reshaped,
     test_multiple_assets_never_overwrite,
     test_raw_json_is_always_the_ai_original,
     test_edit_opens_a_new_asset,
     test_in_place_edit_keeps_raw,
+    test_offsets_fork_a_new_version,
     test_copy_is_independent,
     test_multiple_ai_sources_are_queryable,
     test_deleted_assets_hide_by_default,
@@ -1261,6 +1634,10 @@ TESTS = (
     test_center_rows_ignores_deleted_assets,
     test_prm_copy_and_restore,
     test_center_rows_combines_json_and_product,
+    test_deleted_product_file_drops_out_of_the_counts,
+    test_every_json_waits_for_its_own_product,
+    test_product_clips_stop_claiming_other_json,
+    test_products_rename_to_the_duration_rule,
     test_batch_apis_replace_per_row_queries,
     test_auto_step_prefers_the_library_over_ai,
     test_product_registration_records_its_source,
@@ -1272,6 +1649,7 @@ TESTS = (
     test_forget_video_removes_the_records_but_keeps_the_file,
     test_product_rows_show_the_video_thumbnail,
     test_video_list_shows_thumbnails_lazily,
+    test_moment_list_becomes_one_asset_per_line,
 )
 
 

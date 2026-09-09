@@ -62,57 +62,14 @@ class Task:
 
 
 def extract_json(text: str) -> dict[str, Any] | None:
-    """从 AI 的回答里抠出 JSON 对象：优先 ```json 围栏，其次第一个配平的 {...}。
+    """从 AI 的回答里抠出 JSON 对象（共用 gemini_api 的一份实现，这里取第一份）。
 
     AI 经常在 JSON 前后写解释，直接 json.loads 整段会失败。
     """
-    if not text:
-        return None
-    fence = text.find("```")
-    while fence >= 0:
-        newline = text.find("\n", fence)
-        close = text.find("```", newline + 1) if newline > 0 else -1
-        if newline > 0 and close > 0:
-            body = text[newline + 1:close].strip()
-            try:
-                parsed = json.loads(body)
-            except ValueError:
-                parsed = None
-            if isinstance(parsed, dict):
-                return parsed
-        fence = text.find("```", fence + 3)
+    from .gemini_api import extract_json_list  # noqa: PLC0415 - 轻量纯函数模块
 
-    start = text.find("{")
-    while start >= 0:
-        depth = 0
-        in_string = False
-        escape = False
-        for index in range(start, len(text)):
-            ch = text[index]
-            if in_string:
-                if escape:
-                    escape = False
-                elif ch == "\\":
-                    escape = True
-                elif ch == '"':
-                    in_string = False
-                continue
-            if ch == '"':
-                in_string = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        parsed = json.loads(text[start:index + 1])
-                    except ValueError:
-                        break
-                    if isinstance(parsed, dict):
-                        return parsed
-                    break
-        start = text.find("{", start + 1)
-    return None
+    docs = extract_json_list(text)
+    return docs[0] if docs else None
 
 
 class _Server(ThreadingHTTPServer):
@@ -317,8 +274,8 @@ class BridgeServer:
         status = str(body.get("status") or "completed")
         text = str(body.get("text") or "")
         parsed = body.get("json")
-        if not isinstance(parsed, dict):
-            parsed = extract_json(text)
+        if not isinstance(parsed, (dict, list)):
+            parsed = extract_json_list(text)
         result = {"status": status, "text": text, "json": parsed,
                   "error": body.get("error") or ""}
         if task is not None:

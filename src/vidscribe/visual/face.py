@@ -9,9 +9,13 @@
 检测这一步就够了，省掉 mediapipe 那 60MB 依赖。表情分类用 HSEmotion 的
 `enet_b0_8_best_afew.onnx`（16MB，AffectNet 8 类），走已经装好的 onnxruntime。
 
-输出只覆盖 `VisualEvent` 的情绪字段（`emotion_en` / `emotion_intensity` /
+输出只覆盖 `VisualEvent` 的情绪字段（`emotion_en` / `emotion_confidence` /
 `emotion_source="face"`），事件的时间轴和描述都不动——判不出人脸的事件保留视觉模型给的
 情绪，`emotion_source` 记 `model`。
+
+**这里的数值一律是分类置信度**：`_faces()` 把 logits 过 softmax，取 top-1 的概率；
+段级数值就是段内这些概率的平均。它表示"模型有多确定是这个表情"，
+跟"表情有多强烈"没有关系，所以字段叫 confidence，不叫 intensity。
 """
 
 from __future__ import annotations
@@ -239,7 +243,7 @@ def aggregate(samples: list[dict[str, Any]], start: float, end: float,
               min_score: float = 0.35) -> dict[str, Any] | None:
     """一段时间里的采样点 -> 一个表情标签。
 
-    每个采样点只取最大那张脸（画面主体），按置信度加权投票；强度取胜出标签的平均置信度。
+    每个采样点只取最大那张脸（画面主体），按置信度加权投票；置信度取胜出标签的平均概率。
     这一段里一张脸都没检出，或者所有置信度都低于 `min_score`，返回 None（保留视觉模型的判断）。
     """
     weights: dict[str, float] = defaultdict(float)
@@ -265,7 +269,7 @@ def aggregate(samples: list[dict[str, Any]], start: float, end: float,
     top = max(weights, key=lambda k: weights[k])
     return {
         "emotion_en": top,
-        "intensity": round(sum(scores[top]) / len(scores[top]), 3),
+        "confidence": round(sum(scores[top]) / len(scores[top]), 3),
         "samples": used,
         "share": round(len(scores[top]) / used, 3),
     }
@@ -276,7 +280,7 @@ def segments(samples: list[dict[str, Any]], min_score: float = 0.35,
     """逐表情时间段：相邻同标签的采样点并成一段。
 
     不额外推理——用的就是 `scan()` 已经算好的那批采样点，纯序列化，所以是零成本。
-    每段 intensity 取段内平均置信度；短于 `min_seconds` 的段丢掉（表情抖一下不算一段）。
+    每段 confidence 取段内平均置信度；短于 `min_seconds` 的段丢掉（表情抖一下不算一段）。
     """
     runs: list[dict[str, Any]] = []
     for sample in samples:
@@ -301,7 +305,7 @@ def segments(samples: list[dict[str, Any]], min_score: float = 0.35,
             continue
         out.append({"start": round(run["start"], 3), "end": round(run["end"], 3),
                     "emotion_en": run["emotion_en"],
-                    "intensity": round(sum(scores) / len(scores), 3),
+                    "confidence": round(sum(scores) / len(scores), 3),
                     "samples": len(scores)})
     return out
 
@@ -321,7 +325,7 @@ def annotate(events: list[VisualEvent], samples: list[dict[str, Any]],
             kept += 1
             continue
         ev.emotion_en = agreed["emotion_en"]
-        ev.emotion_intensity = agreed["intensity"]
+        ev.emotion_confidence = agreed["confidence"]
         ev.emotion_source = "face"
         replaced += 1
     with_face = sum(1 for s in samples if s.get("faces"))

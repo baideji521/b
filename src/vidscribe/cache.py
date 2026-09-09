@@ -36,6 +36,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .constants import VIDEO_SUFFIXES as _VIDEO_SUFFIXES
 from .logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -212,7 +213,7 @@ def human_size(num: float) -> str:
     return f"{num:.1f} GB"
 
 
-VIDEO_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm", ".flv", ".ts", ".wmv"}
+VIDEO_SUFFIXES = _VIDEO_SUFFIXES     # 转发 constants 那一份，别在这里另开名单
 
 
 def library_root(cfg: Any) -> Path | None:

@@ -165,6 +165,37 @@ def test_reset_clears_tmp(work: Path) -> None:
     print("PASS reset 清干净")
 
 
+def test_stale_fields_in_cache_do_not_kill_analysis() -> None:
+    """旧缓存带着已经删掉的字段（比如视觉事件的 emotion_intensity）也必须能还原。
+
+    这是真踩过的坑：`VisualEvent(**e)` 硬解，多一个历史字段就 TypeError，
+    「全部窗口命中缓存」的视频整条分析当场失败。
+    """
+    from vidscribe.events import SpeechEvent, VisualEvent  # noqa: PLC0415
+
+    cached_event = {"id": 1, "start": 0.0, "end": 1.5, "event": "reaction",
+                    "description": "有人在笑", "emotion": "开心", "emotion_en": "happy",
+                    "emotion_intensity": 0.87,          # 已经删掉的老字段
+                    "以后可能加的字段": "随便"}
+    try:
+        VisualEvent(**cached_event)
+        raise AssertionError("硬解本该炸——这个用例的前提没了")
+    except TypeError:
+        pass
+    event = VisualEvent.from_cache(cached_event)
+    assert (event.id, event.end, event.emotion_en) == (1, 1.5, "happy")
+    assert not hasattr(event, "emotion_intensity"), "老字段只是被忽略，不许偷偷挂上去"
+
+    cached_seg = {"id": 2, "start": 1.0, "end": 2.0, "text": "你好",
+                  "emotion_intensity": 0.5,             # 这个 SpeechEvent 认识
+                  "words": [{"word": "你好", "start": 1.0, "end": 2.0, "未来键": 1}],
+                  "早就删了的键": True}
+    seg = SpeechEvent.from_cache(cached_seg)
+    assert seg.text == "你好" and seg.emotion_intensity == 0.5
+    assert [w.word for w in seg.words] == ["你好"], "逐词也要按同一规矩还原"
+    print("PASS 旧缓存字段兼容")
+
+
 def main() -> None:
     work = Path(tempfile.mkdtemp(prefix="window_cache_test_"))
     try:
@@ -173,6 +204,7 @@ def main() -> None:
         test_resume(work)
         test_atomic_write(work)
         test_reset_clears_tmp(work)
+        test_stale_fields_in_cache_do_not_kill_analysis()
         print("全部通过")
     finally:
         shutil.rmtree(work, ignore_errors=True)

@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .. import ai_protocol
 from ..logging_setup import get_logger
 from .db import Database
 from .fingerprint import config_hash, fingerprint, full_sha256
@@ -204,6 +205,35 @@ def get_video_by_fingerprint(db: Database, fp: str) -> sqlite3.Row | None:
     return db.one("SELECT * FROM videos WHERE fingerprint = ?", (fp,))
 
 
+def get_video_by_name(db: Database, name: str) -> sqlite3.Row | None:
+    """按**文件名**找视频（同名多条取最近登记的那条）。
+
+    给「结果清单」用：清单每一行都带着剧本第一行那个文件名，但那只是名字、不是路径，
+    路径在库里。同名撞车时取 id 最大的一条 —— 那是最近一次登记的，最可能是手上这个。
+    """
+    return db.one("SELECT * FROM videos WHERE file_name = ? ORDER BY id DESC LIMIT 1",
+                  (str(name),))
+
+
+def match_video_by_stem(db: Database, name: str) -> sqlite3.Row | None:
+    """按**文件名或去掉后缀的文件名**找视频，大小写无关；同名取最近登记的那条。
+
+    给「批量导入高光 JSON」用：手上只有一份 JSON 和它里面写的 `"video": "x.mp4"`
+    （或者文件名 `x_脚本.json`），既不知道路径也不保证大小写和库里一致。
+    `get_video_by_name` 要求文件名一字不差，这里放宽到「带不带后缀都行」。
+    """
+    key = str(name or "").strip().lower()
+    if not key:
+        return None
+    stem = Path(key).stem
+    for row in db.all("SELECT * FROM videos ORDER BY id DESC", ()):
+        current = str(row["file_name"] or "").lower()
+        if current in (key, stem) or Path(current).stem in (key, stem):
+            return row
+    return None
+
+
+
 def find_video(db: Database, video: str | Path) -> sqlite3.Row | None:
     """先按路径找，找不到再按指纹找（视频被改名/搬走的情况）。都没有返回 None。"""
     hit = get_video_by_path(db, video)
@@ -253,6 +283,53 @@ def blocked_language_videos(db: Database, folder: str | Path | None = None) -> l
         "SELECT * FROM videos WHERE blocked_language IS NOT NULL AND blocked_language <> '' "
         "AND file_path LIKE ? ESCAPE '\\' ORDER BY file_name",
         (_folder_like(folder),))
+
+
+def set_no_audio(db: Database, video_id: int, missing: bool | None) -> None:
+    """记下音轨预检的结论：True = 文件里没有音轨，False = 有，None = 退回「还没探过」。
+
+    只记结论不记时间：文件被换掉（指纹变了）就是新的一条视频记录，自然重新探一遍。
+    """
+    value = None if missing is None else int(bool(missing))
+    with db.tx() as conn:
+        conn.execute("UPDATE videos SET no_audio = ?, updated_at = ? WHERE id = ?",
+                     (value, now(), video_id))
+
+
+def no_audio_flag(db: Database, video_id: int) -> bool | None:
+    """这条视频探过音轨没有：True = 没音轨，False = 有，None = 还没探过。"""
+    row = db.one("SELECT no_audio FROM videos WHERE id = ?", (video_id,))
+    if row is None or row["no_audio"] is None:
+        return None
+    return bool(int(row["no_audio"]))
+
+
+def no_audio_videos(db: Database, folder: str | Path | None = None) -> list[sqlite3.Row]:
+    """探出来**没有音轨**的视频（`no_audio = 1`）。给目录就只看那个目录（含子目录）。
+
+    和 `blocked_language_videos` 同一个口径：盘上还在不在都算，库里那条登记一样该清掉。
+    """
+    if folder is None:
+        return db.all("SELECT * FROM videos WHERE no_audio = 1 ORDER BY file_name")
+    return db.all(
+        "SELECT * FROM videos WHERE no_audio = 1 AND file_path LIKE ? ESCAPE '\\' "
+        "ORDER BY file_name", (_folder_like(folder),))
+
+
+def unprobed_audio_videos(db: Database, folder: str | Path | None = None) -> list[sqlite3.Row]:
+    """**还没做过音轨预检**的视频（`no_audio IS NULL`）。给目录就只看那个目录（含子目录）。
+
+    和 `no_audio_videos` 不同，这里只要**盘上还在的**：探测得打开文件，不在盘上的
+    探不了，留在待探清单里只会让「清空无声音视频」那个按钮永远亮着。
+    """
+    if folder is None:
+        return db.all("SELECT * FROM videos WHERE no_audio IS NULL AND exists_on_disk = 1 "
+                      "ORDER BY file_name")
+    return db.all(
+        "SELECT * FROM videos WHERE no_audio IS NULL AND exists_on_disk = 1 "
+        "AND file_path LIKE ? ESCAPE '\\' ORDER BY file_name", (_folder_like(folder),))
+
+
 
 
 def set_video_presence(db: Database, video_id: int, *, exists: bool,
@@ -399,6 +476,21 @@ def latest_analysis(db: Database, video_id: int, *, only_completed: bool = True)
     return db.one(sql + " ORDER BY id DESC LIMIT 1", (video_id,))
 
 
+def speech_lines(db: Database, video_id: int) -> int:
+    """最近一次**跑完**的分析里识别出几句话；还没跑完过就返回 -1（别当成 0）。
+
+    给「没人说话就别问 AI」那道闸用：一句话都没有说明片子里没互动，
+    程序也算不出区间（`plan_from_span` 全靠句子边界吸附），发过去纯属白花一次调用。
+    返回 -1 和 0 必须分清 —— 没分析过就下「没语音」的结论会把没跑过的视频全枪毙了。
+    """
+    run = latest_analysis(db, video_id)
+    if run is None:
+        return -1
+    row = db.one("SELECT COUNT(*) AS n FROM speech_segments WHERE analysis_id = ?",
+                 (int(run["id"]),))
+    return int(row["n"]) if row is not None else -1
+
+
 def recover_stale_analyses(db: Database, timeout_minutes: float = 180.0) -> int:
     """把崩溃留下的 running 记录标成 failed，免得永远挂着。返回处理了几条。"""
     cutoff = time.strftime("%Y-%m-%dT%H:%M:%S",
@@ -416,9 +508,18 @@ def recover_stale_analyses(db: Database, timeout_minutes: float = 180.0) -> int:
 
 # ================================================================== 分析产物
 def save_visual_events(db: Database, analysis_id: int, events: list[dict[str, Any]]) -> int:
-    """存视觉事件。重存会先清掉这条分析下的旧事件（同一条分析只该有一套）。"""
+    """存视觉事件。重存会先清掉这条分析下的旧事件（同一条分析只该有一套）。
+
+    画面情绪置信度的旧名是 `emotion_intensity`，落库前统一成 `emotion_confidence`：
+    这张表**没有情绪置信度列**（`confidence` 列是事件置信度，被 filter_timeline 当阈值用），
+    `raw_json` 是这个数的唯一副本，一旦按旧名存进来就只能靠读侧认别名兜着。
+    """
     rows = []
     for i, event in enumerate(events, start=1):
+        event = dict(event)
+        if event.get("emotion_confidence") is None and event.get("emotion_intensity") is not None:
+            event["emotion_confidence"] = event["emotion_intensity"]
+        event.pop("emotion_intensity", None)
         rows.append((
             analysis_id,
             event.get("start"), event.get("end"),
@@ -510,15 +611,24 @@ def save_expression_spans(db: Database, analysis_id: int,
 
     拆出来的列是给查询用的，`raw_json` 存整段原样——以后 face 模型多给字段，
     不用再改表也不会丢数据。
+
+    `confidence` 的旧名是 `intensity`：老缓存（cache/videos/*/visual.json）里还是旧名，
+    而 `pipeline._annotate_face_emotion` 的复用闸门只看有没有 segments、不看键名，
+    所以旧形状的 span 完全可能走到这里。不认旧名就会把 confidence 列写成 NULL，
+    比"打印成 0.00"更糟——那是把唯一一份好数据也丢了。落库时统一成新名，别把旧形状传下去。
     """
     rows = []
     for i, span in enumerate(spans, start=1):
         if not isinstance(span, dict):
             continue
+        span = dict(span)
+        if span.get("confidence") is None and span.get("intensity") is not None:
+            span["confidence"] = span["intensity"]
+        span.pop("intensity", None)
         rows.append((
             analysis_id, i,
             span.get("start"), span.get("end"),
-            span.get("emotion_en"), span.get("intensity"), span.get("samples"),
+            span.get("emotion_en"), span.get("confidence"), span.get("samples"),
             _dumps(span),
         ))
     with db.tx() as conn:
@@ -526,7 +636,7 @@ def save_expression_spans(db: Database, analysis_id: int,
         conn.executemany(
             """
             INSERT INTO expression_spans(analysis_id, sequence, start_time, end_time,
-                                         emotion_en, intensity, samples, raw_json)
+                                         emotion_en, confidence, samples, raw_json)
             VALUES(?, ?, ?, ?, ?, ?, ?, ?)
             """, rows)
     return len(rows)
@@ -535,6 +645,26 @@ def save_expression_spans(db: Database, analysis_id: int,
 def get_expression_spans(db: Database, analysis_id: int) -> list[sqlite3.Row]:
     return db.all("SELECT * FROM expression_spans WHERE analysis_id = ? ORDER BY sequence",
                   (analysis_id,))
+
+
+def _expression_span(row: sqlite3.Row) -> dict[str, Any]:
+    """把一行表情段还原成 span dict：**列是权威，`raw_json` 只是留档**。
+
+    迁移 v9 把 `intensity` 列改名成 `confidence`，但 `raw_json` 是整段 JSON 原文，
+    RENAME COLUMN 不会动 JSON 里的键。只读 raw_json 的话，改名之前落库的那批段
+    重建出来就没有 `confidence` 键，导出端一兜底就成了 `0.00`——值其实完好地留在列里。
+    所以这里拿列覆盖回去，顺手把旧键清掉，别让旧形状继续往下游流。
+    """
+    span = _loads(row["raw_json"]) or {}
+    if not isinstance(span, dict):      # raw_json 被手改成数组/标量也不许整份剧本崩
+        span = {}
+    keys = row.keys()
+    if "confidence" in keys and row["confidence"] is not None:
+        span["confidence"] = row["confidence"]
+    elif span.get("confidence") is None and span.get("intensity") is not None:
+        span["confidence"] = span["intensity"]
+    span.pop("intensity", None)          # 归一化之后旧键一律不外流
+    return span
 
 
 def note_render(db: Database, analysis_id: int, *, output_language: str | None = None,
@@ -620,7 +750,7 @@ def script_inputs(db: Database, video_id: int, *,
 
     segments = [_loads(row["raw_json"]) or {} for row in get_speech_segments(db, analysis_id)]
     events = [_loads(row["raw_json"]) or {} for row in get_visual_events(db, analysis_id)]
-    spans = [_loads(row["raw_json"]) or {} for row in get_expression_spans(db, analysis_id)]
+    spans = [_expression_span(row) for row in get_expression_spans(db, analysis_id)]
     return {
         "analysis_id": analysis_id,
         "video_id": video_id,
@@ -738,6 +868,36 @@ def task_with_video(db: Database, task_id: int) -> sqlite3.Row | None:
          WHERE t.id = ?
         """,
         (task_id,))
+
+
+def video_of_open_task(db: Database) -> sqlite3.Row | None:
+    """最近一条**还没跑完**的 AI 任务挂的视频（没有就 None）。
+
+    给「结果清单」用：清单一行只有两个时间点、不带文件名，界面上又可能什么都没选，
+    这时唯一可靠的线索就是「刚才是拿哪个视频去问 AI 的」—— 那条任务还开着。
+    跑完 / 失败 / 取消的任务一概不算：那多半是别的视频的旧账，按它算区间会剪出
+    张冠李戴的成品，比报错难查得多。
+    """
+    marks = ", ".join("?" for _ in TASK_OPEN)
+    return db.one(
+        f"""
+        SELECT v.* FROM ai_tasks t
+          JOIN videos v ON v.id = t.video_id
+         WHERE t.status IN ({marks})
+         ORDER BY t.id DESC LIMIT 1
+        """,
+        tuple(TASK_OPEN))
+
+
+def video_of_asset(db: Database, asset_id: int) -> sqlite3.Row | None:
+    """这份高光方案挂的视频（没有就 None）。"""
+    return db.one(
+        """
+        SELECT v.* FROM highlight_assets a
+          JOIN videos v ON v.id = a.video_id
+         WHERE a.id = ?
+        """,
+        (asset_id,))
 
 
 # 「等 AI」和「正在剪」是从 TASK_ACTIVE 里切出来的两段，不新增状态、不动 schema：
@@ -1123,40 +1283,25 @@ def ai_result_for_task(db: Database, task_id: int) -> sqlite3.Row | None:
 def clips_from_payload(payload: Any) -> list[dict[str, Any]]:
     """从 AI JSON 里抠出片段。字段原样取，不做任何推算或改写。
 
-    兼容两种写法：根上直接是 clip 对象，或者 {"clip": {...}}；
-    clip.duration 没给就用 end - start 补一个，别的字段一律照抄。
+    协议只认一种（见 vidscribe/ai_protocol.py）：区间来自 `segments[0].sa` / `.end`，
+    文案来自 `timeline`（score / type / reason），`t` 那块描述整份存进 evaluation 列。
+    `timeline.duration` 是成片时长，没给才用 end - sa 兜底。
     """
-    if isinstance(payload, str):
-        try:
-            payload = json.loads(payload)
-        except (TypeError, ValueError):
-            return []
-    if not isinstance(payload, dict):
+    data = ai_protocol.as_dict(payload)
+    if data is None:
         return []
-    clip = payload.get("clip") if isinstance(payload.get("clip"), dict) else payload
-    if not isinstance(clip, dict) or clip.get("start") is None or clip.get("end") is None:
+    found = ai_protocol.clips(data)
+    if not found:
         return []
-    try:
-        start = float(clip["start"])
-        end = float(clip["end"])
-    except (TypeError, ValueError):
-        return []
-    duration = clip.get("duration")
-    try:
-        duration = float(duration) if duration is not None else round(end - start, 3)
-    except (TypeError, ValueError):
-        duration = round(end - start, 3)
-    evaluation = clip.get("evaluation") or payload.get("evaluation")
-    if not evaluation and isinstance(clip.get("overlays"), dict):
-        # 现行提示词把中文评价放在 clip.overlays.evaluation 里，别漏掉
-        evaluation = clip["overlays"].get("evaluation")
+    clip = found[0]
+    evaluation = clip.get("t")
     return [{
-        "start": start,
-        "end": end,
-        "duration": duration,
-        "score": _as_float(clip.get("score", payload.get("score"))),
-        "type": clip.get("type") or payload.get("type") or "",
-        "reason": clip.get("reason") or payload.get("reason") or "",
+        "start": float(clip["start"]),
+        "end": float(clip["end"]),
+        "duration": clip.get("duration"),
+        "score": _as_float(clip.get("score")),
+        "type": clip.get("type") or "",
+        "reason": clip.get("reason") or "",
         "evaluation": _dumps(evaluation) if not isinstance(evaluation, str) else evaluation,
     }]
 
@@ -1615,7 +1760,14 @@ def video_queue_statistics(db: Database, video_ids: list[int], *,
     script_ids = script_ready_videos(db, ordered) & ids
     attempted_ids = highlight_attempted_videos(db, ordered, mode=mode,
                                                task_type=task_type) & ids
-    done = json_ok if done_key == "json" else clipped_ids
+    # 「干完」的口径跟着这一串走：收 JSON 看有没有可复用 JSON；只解析视频看有没有跑完的
+    # 分析记录；剪辑成片 / 脚本剪辑看有没有还在盘上的成品。三串各自的数字才对得上。
+    if done_key == "json":
+        done = json_ok
+    elif done_key == "analysed":
+        done = analysed_ids & ids
+    else:
+        done = clipped_ids
     # 旧成品还在就算完成，别让重排的任务把它抢走
     rendering = (task_videos(db, ordered, TASK_RENDERING,
                              mode=mode, task_type=task_type) & ids) - done

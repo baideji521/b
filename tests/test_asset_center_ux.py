@@ -79,9 +79,15 @@ def quiet() -> None:
 
 def payload(start: float = 8.23, end: float = 23.49, score: float = 0.91,
             video: str = "demo.mp4") -> str:
+    """一份**新协议**的高光 JSON 文本（唯一认的写法，见 src/vidscribe/ai_protocol.py）。"""
+    span = round(end - start, 3)
     return json.dumps({"video": video,
-                       "clip": {"start": start, "end": end, "score": score,
-                                "type": "hook", "reason": "很炸", "evaluation": "好笑"}})
+                       "timeline": {"duration": span, "score": score,
+                                    "type": "hook", "reason": "很炸"},
+                       "segments": [{"sa": start, "end": end, "dst": [0.0, span]}],
+                       "t": {"Scene": "室内", "Action": "很炸的一下",
+                             "Speech text": "好笑"}})
+
 
 
 class FakeWindow(QWidget):
@@ -91,8 +97,8 @@ class FakeWindow(QWidget):
         super().__init__()
         self.calls: list[tuple] = []
 
-    def render_asset(self, asset_id, prm_id=None):
-        self.calls.append((int(asset_id), prm_id))
+    def render_asset(self, asset_id):
+        self.calls.append((int(asset_id),))
         return True
 
 

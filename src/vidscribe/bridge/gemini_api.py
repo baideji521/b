@@ -74,30 +74,59 @@ def extract_json(text: str) -> dict | None:
 
     responseMimeType 已经要求纯 JSON，但模型偶尔还是会加围栏，所以照样兜一层。
     """
+    docs = extract_json_list(text)
+    return docs[0] if docs else None
+
+
+def extract_json_list(text: str) -> list[dict]:
+    """从回答里抠出**所有** JSON 对象，向下兼容：只回一份就一份，回多份全带走。
+
+    认四种形状：整段纯 JSON（responseMimeType 的正常情况）、```json 围栏（一块或多块）、
+    顶层数组（[ {...}, {...} ]，一个元素一份方案）、正文里挨着的几个配平 {...}。
+    AI 有时会一口气给几套高光方案——以前只拿第一份，剩下全扔了；
+    现在全带回去，入库时各存一行、方案名自动排开，谁也不覆盖谁。
+    完全相同的两份只留第一份（一个字不差的重复入库没有意义）。
+    """
     if not text:
-        return None
+        return []
+    out: list[dict] = []
+
+    def _push(value: object) -> None:
+        if isinstance(value, dict):
+            if value not in out:
+                out.append(value)
+        elif isinstance(value, list):
+            for item in value:
+                if isinstance(item, dict) and item not in out:
+                    out.append(item)
+
     try:
-        parsed = json.loads(text)
-        if isinstance(parsed, dict):
-            return parsed
+        _push(json.loads(text))
+        if out:
+            return out
     except json.JSONDecodeError:
         pass
+
     fence = text.find("```")
-    if fence >= 0:
-        rest = text[fence + 3:]
-        if rest[:4].lower() == "json":
-            rest = rest[4:]
-        end = rest.find("```")
+    while fence >= 0:
+        body_start = fence + 3
+        if text[body_start:body_start + 4].lower() == "json":
+            body_start += 4
+        close = text.find("```", body_start)
+        body = text[body_start:close if close >= 0 else len(text)].strip()
         try:
-            parsed = json.loads(rest[:end if end >= 0 else None].strip())
-            if isinstance(parsed, dict):
-                return parsed
+            _push(json.loads(body))
         except json.JSONDecodeError:
             pass
+        fence = text.find("```", close + 3) if close >= 0 else -1
+    if out:
+        return out
+
     start = text.find("{")
     while start >= 0:
         depth = 0
         in_string = escape = False
+        end = -1
         for i in range(start, len(text)):
             ch = text[i]
             if in_string:
@@ -115,12 +144,13 @@ def extract_json(text: str) -> dict | None:
             elif ch == "}":
                 depth -= 1
                 if depth == 0:
-                    try:
-                        parsed = json.loads(text[start:i + 1])
-                    except json.JSONDecodeError:
-                        break
-                    if isinstance(parsed, dict):
-                        return parsed
+                    end = i
                     break
-        start = text.find("{", start + 1)
-    return None
+        if end < 0:
+            break
+        try:
+            _push(json.loads(text[start:end + 1]))
+        except json.JSONDecodeError:
+            pass
+        start = text.find("{", end + 1)
+    return out

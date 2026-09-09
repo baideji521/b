@@ -47,7 +47,7 @@ _SCHEMA_EN_HEAD = (
 )
 
 # 情绪字段拼在 schema 末尾：关掉画面情绪时一个字都不多要，输出 token 不涨
-_EMOTION_FIELD = f',"emotion":"{EMOTION_VOCAB}","emotion_intensity":0.8'
+_EMOTION_FIELD = f',"emotion":"{EMOTION_VOCAB}","emotion_confidence":0.8'
 
 
 def _schema(lang: str, with_emotion: bool) -> str:
@@ -121,8 +121,9 @@ def _prompt_zh(window_start: float, window_end: float, timestamps: list[float],
     if with_emotion:
         parts.append(
             f"8. emotion 是画面里人物此刻表现出来的情绪，只能从 {EMOTION_VOCAB} 里选一个英文标签，"
-            "依据是表情、姿态、动作幅度；emotion_intensity 是这个情绪的明显程度，0~1 的小数。"
-            "画面里没有人、或者看不出情绪，就写 emotion=\"neutral\"、emotion_intensity=0。"
+            "依据是表情、姿态、动作幅度；emotion_confidence 是你对这个判断的置信度，0~1 的小数"
+            "（不是情绪的强烈程度）。"
+            "画面里没有人、或者看不出情绪，就写 emotion=\"neutral\"、emotion_confidence=0。"
         )
     parts += [
         f"{9 if with_emotion else 8}. 只输出一行压缩 JSON，不要换行缩进，不要 markdown 代码块，结构如下：",
@@ -169,8 +170,9 @@ def _prompt_en(window_start: float, window_end: float, timestamps: list[float],
         parts.append(
             f"8. emotion is the emotion the people on screen are showing; pick exactly one label from "
             f"{EMOTION_VOCAB}, judged from facial expression, posture and motion. "
-            "emotion_intensity is how pronounced it is, a decimal in 0~1. "
-            'If nobody is visible or no emotion is readable, use emotion="neutral" and emotion_intensity=0.'
+            "emotion_confidence is how confident you are in that label (NOT how strong the "
+            "emotion is), a decimal in 0~1. "
+            'If nobody is visible or no emotion is readable, use emotion="neutral" and emotion_confidence=0.'
         )
     parts += [
         f"{9 if with_emotion else 8}. Output a single line of compact JSON - no line breaks, no markdown fences:",

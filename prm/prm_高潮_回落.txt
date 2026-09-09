@@ -137,34 +137,34 @@ No multiple clip objects.
 No alternative results.
 
 ==================================================
-4. HARD 15-SECOND RULE
+4. HARD 12-SECOND RULE
 ======================
 
 For a NORMAL highlight:
 
-end - start MUST be <= 15.00 seconds.
+end - start MUST be <= 12.00 seconds.
 
 Examples:
 
-15.00 = VALID
+12.00 = VALID
 
-15.01 = INVALID
+12.01 = INVALID
 
-16.00 = INVALID
+13.00 = INVALID
 
 The actual timestamps MUST satisfy the limit.
 
 Changing only the duration field is NOT acceptable.
 
-The 15-second limit is a REAL TIMELINE CONSTRAINT.
+The 12-second limit is a REAL TIMELINE CONSTRAINT.
 
 ==================================================
-5. 15 SECONDS IS A HARD CEILING, NOT A TARGET
+5. 12 SECONDS IS A HARD CEILING, NOT A TARGET
 =============================================
 
-15 seconds is the MAXIMUM allowed duration for a normal highlight.
+12 seconds is the MAXIMUM allowed duration for a normal highlight.
 
-15 seconds is NOT:
+12 seconds is NOT:
 
 * a target
 * a preferred duration
@@ -187,11 +187,11 @@ A valid highlight may naturally be:
 
 The actual duration MUST be determined by the editorial content.
 
-If the complete highlight naturally ends at 6.5 seconds:
+If the complete highlight naturally ends at 6.0 seconds:
 
-use approximately 6.5 seconds.
+use approximately 6.0 seconds.
 
-Do NOT extend it to 15 seconds.
+Do NOT extend it to 12 seconds.
 
 ==================================================
 6. CORE EDITORIAL PRINCIPLE
@@ -404,7 +404,7 @@ A setup-only clip is normally weaker than a complete setup + event + payoff clip
 Never extend a clip because:
 
 * it is short
-* 15 seconds remains available
+* 12 seconds remains available
 * the event is interesting
 * another event is about to begin
 * the timeline has unused space
@@ -439,13 +439,13 @@ those seconds MUST remain.
 15. LONG EVENT HANDLING
 =======================
 
-If an important event naturally lasts longer than 15 seconds:
+If an important event naturally lasts longer than 12 seconds:
 
-Do NOT automatically select the first 15 seconds.
+Do NOT automatically select the first 12 seconds.
 
-Do NOT automatically select the last 15 seconds.
+Do NOT automatically select the last 12 seconds.
 
-Do NOT cut arbitrarily at 15 seconds.
+Do NOT cut arbitrarily at 12 seconds.
 
 Instead identify the strongest coherent sub-unit.
 
@@ -463,9 +463,9 @@ Select the strongest coherent sub-unit that:
 1. remains understandable
 2. contains the core event
 3. contains the necessary payoff
-4. fits <=15 seconds
+4. fits <=12 seconds
 
-If no coherent <=15-second sub-unit exists:
+If no coherent <=12-second sub-unit exists:
 
 select another candidate.
 
@@ -475,14 +475,14 @@ Do NOT create a broken highlight merely to satisfy the duration rule.
 16. OUTRO / WRAP-UP EXCEPTION
 =============================
 
-A NORMAL highlight MUST be <=15 seconds.
+A NORMAL highlight MUST be <=12 seconds.
 
-A clip MAY exceed 15 seconds ONLY when:
+A clip MAY exceed 12 seconds ONLY when:
 
 1. it is genuinely a closing/outro editorial unit
 2. the closing contains meaningful editorial value
 3. shortening it materially damages the natural completion
-4. no coherent <=15-second version preserves the same completion
+4. no coherent <=12-second version preserves the same completion
 
 A genuine outro may contain:
 
@@ -748,7 +748,7 @@ Do NOT force the score into a high range.
 
 A genuinely mediocre highlight may receive a lower score.
 
-Do NOT inflate scores because the clip is close to 15 seconds.
+Do NOT inflate scores because the clip is close to 12 seconds.
 
 Do NOT inflate scores because the clip is very short.
 
@@ -806,13 +806,13 @@ Examples:
 
 A 7-second complete highlight with strong payoff may score 92.
 
-A 12-second complete highlight with stronger impact may score 96.
+A 9-second complete highlight with stronger impact may score 96.
 
 A 5-second incomplete reaction may score 55.
 
-A 14-second complete and highly compelling event may score 94.
+A 11-second complete and highly compelling event may score 94.
 
-A 15-second clip is NOT automatically better than a 7-second clip.
+A 12-second clip is NOT automatically better than a 7-second clip.
 
 A 7-second clip is NOT automatically better than a 12-second clip.
 
@@ -1635,7 +1635,7 @@ end <= video duration
 
 For normal highlights:
 
-end - start <= 15.00
+end - start <= 12.00
 
 If duration exceeds 15 seconds:
 
@@ -1943,7 +1943,7 @@ valid.
 
 If NO:
 
-find a coherent <=15-second sub-unit or choose another candidate.
+find a coherent <=12-second sub-unit or choose another candidate.
 
 QUESTION 9:
 

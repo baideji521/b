@@ -143,15 +143,15 @@ No alternative results.
 
 For a NORMAL highlight:
 
-end - start MUST be <= 15.00 seconds.
+end - start MUST be <= 12.00 seconds.
 
 Examples:
 
-15.00 = VALID
+12.00 = VALID
 
-15.01 = INVALID
+12.01 = INVALID
 
-16.00 = INVALID
+13.00 = INVALID
 
 The actual timestamps MUST satisfy the limit.
 
@@ -1644,7 +1644,7 @@ end <= video duration
 
 For normal highlights:
 
-end - start <= 15.00
+end - start <= 12.00
 
 If duration exceeds 15 seconds:
 

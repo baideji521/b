@@ -67,13 +67,38 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from .. import ai_protocol
 from ..db import assets as db_assets
 from ..db import open_db
 from ..db import repo as db_repo
 from ..db.importer import refresh_from_disk
+from ..highlight.extract import (
+    EXTRACT_EXTRA_KEYS,
+    EXTRACT_TIMELINE_KEYS,
+    clip_gaps as _clip_gaps,
+    extract_line,
+    gaps_note as _gaps_note,
+    keeps_by_config,
+    keeps_for,
+    slim_clip,
+    span_gaps as _span_gaps,
+    stale_note,
+    stale_seconds,
+    unresolved_note,
+    unresolved_seconds,
+)
+
+from ..logging_setup import get_logger
+from . import settings as gui_settings
 from .ai_options import DropDirEdit, dir_row
 
+logger = get_logger(__name__)
+
+
 STATUS_CHOICES = (("全部", "all"), ("已分析", "analysed"), ("未分析", "not_analysed"))
+# 「提取数据」那一行怎么拼、空隙怎么算，都在 highlight.extract 里（跟界面无关的业务口径）。
+# 这里只是把它们摆到本模块的命名空间上，界面按钮和 `assets --extract` 用的是同一份实现
+
 # 「有没有 JSON」「有没有成品」各自一个下拉：三个条件能一起生效（场景 A 一步到位）
 JSON_CHOICES = (("全部", "any"), ("有 JSON", "has"), ("无 JSON", "none"))
 PRODUCT_CHOICES = (("全部", "any"), ("有成品", "has"), ("无成品", "none"))
@@ -208,6 +233,14 @@ def _span(start: Any, end: Any) -> str:
     return f"{_score(start)} → {_score(end)}"
 
 
+def _now_tag() -> str:
+    """`20260907_1945`：给导出文件名用，同一天分批导也不会互相覆盖。"""
+    from datetime import datetime  # noqa: PLC0415 - 只有导出时用得上
+
+    return datetime.now().strftime("%Y%m%d_%H%M")
+
+
+
 def _reveal(widget: QWidget, path: Path) -> None:
     """在文件管理器里定位这个文件；不在盘上就说清楚。"""
     if not path.exists():
@@ -255,6 +288,39 @@ def _plain_table(headers: tuple[str, ...], *, stretch: int | None = None) -> QTa
     if stretch is not None:
         table.horizontalHeader().setSectionResizeMode(stretch, QHeaderView.Stretch)
     return table
+
+
+# 目录下拉往下翻几层：成品目录下面常常还按「每条素材一个文件夹」再分一层
+_DIR_DEPTH = 2
+
+
+def _disk_subdirs(root: str | None, depth: int = _DIR_DEPTH) -> list[str]:
+    """`root` 自己 + 它下面 depth 层子目录（目录筛选下拉用）。读不动就返回空。
+
+    为什么要看盘：库里只记得**已经登记过成品的**目录（`known_dirs` 查的是
+    `artifacts`），所以一个刚建好、还没剪出任何成品的目录永远进不了下拉，
+    用户根本没法把作用域先切到它上面（`2027Prediction` 就是这么"消失"的，
+    跟目录名是中文还是英文无关）。这里把盘上真实存在的目录补进去。
+    """
+    if not root:
+        return []
+    base = Path(str(root))
+    if not base.is_dir():
+        return []
+    found = [str(base)]
+    try:
+        level = [base]
+        for _ in range(max(0, depth)):
+            children = [child for parent in level for child in sorted(parent.iterdir())
+                        if child.is_dir()]
+            if not children:
+                break
+            found.extend(str(child) for child in children)
+            level = children
+    except OSError as exc:
+        logger.warning("列不出 %s 下面的子目录：%s", base, exc)
+    return found
+
 
 
 # ================================================================ JSON 详情
@@ -578,8 +644,9 @@ class JsonPanel(QWidget):
 
 # ================================================================ 按高光 JSON 剪辑
 class RenderDialog(QDialog):
-    """选 PRM，然后**只用这份 JSON 出成品**——这条路一次 AI 都不调。
+    """**只用这份 JSON 出成品**——这条路一次 AI 都不调，也不牵扯 PRM。
 
+    PRM 是问 AI 时用的提示词，渲染这一步压根不读它，所以这里没有 PRM 可选。
     资产中心本身是非模态窗口，这里是唯一一层确认对话框，不再有窗口套娃。
     """
 
@@ -592,12 +659,10 @@ class RenderDialog(QDialog):
         self.setWindowTitle("按这份 JSON 剪辑")
         self.setMinimumWidth(520)
 
-        self.cmb_prm = QComboBox()
-        self._fill_prms()
         flow = QLabel("高光 JSON\n  ↓\nClip Engine（修正区间）\n  ↓\n渲染\n  ↓\n成品 MP4")
         flow.setFrameShape(QFrame.StyledPanel)
-        note = QLabel("此操作不会调用 AI。文件名带 JSON 名和 PRM 名，"
-                      "所以同一份 JSON 换 PRM 再剪不会互相覆盖。")
+        note = QLabel("此操作不会调用 AI，也不用 PRM。文件名带成片时长"
+                      "（例 xxx_689.mp4），同一份 JSON 重剪出同样时长会保留原文件。")
         note.setWordWrap(True)
 
         info = QFormLayout()
@@ -606,7 +671,6 @@ class RenderDialog(QDialog):
                                         f"最高分 {_score(asset_row['best_score'])}）"))
 
         info.addRow("来源 AI", QLabel(_ai_label(asset_row)))
-        info.addRow("PRM", self.cmb_prm)
         info.addRow("流程", flow)
         info.addRow("说明", note)
 
@@ -624,30 +688,14 @@ class RenderDialog(QDialog):
         outer.addLayout(info)
         outer.addLayout(row)
 
-    def _fill_prms(self) -> None:
-        db = open_db(self.cfg)
-        try:
-            rows = db_assets.list_prms(db)
-            default = db_assets.default_prm(db)
-        finally:
-            db.close()
-        if not rows:
-            self.cmb_prm.addItem("（库里还没有 PRM 档案，用配置里的提示词）", 0)
-            return
-        for row in rows:
-            mark = "（默认）" if int(row["is_default"] or 0) else ""
-            self.cmb_prm.addItem(f"{row['name']}{mark}", int(row["id"]))
-        if default is not None:
-            self.cmb_prm.setCurrentIndex(max(0, self.cmb_prm.findData(int(default["id"]))))
-
     def on_start(self) -> None:
         runner = getattr(self._window, "render_asset", None)
         if not callable(runner):
             QMessageBox.information(self, "直接剪辑", "没连上主界面，剪不了")
             return
-        prm_id = int(self.cmb_prm.currentData() or 0)
-        if runner(int(self.asset_row["id"]), prm_id or None):
+        if runner(int(self.asset_row["id"])):
             self.accept()
+
 
 
 # ================================================================ PRM 管理页
@@ -1172,6 +1220,169 @@ class PrmPanel(QWidget):
         QMessageBox.information(self, "PRM", str(path))
 
 
+
+# ========================================================= 批量导入高光 JSON
+class JsonDropEdit(QPlainTextEdit):
+    """能拖文件进来的多行文本框：拖 JSON 文件进来就把内容读出来，粘贴照旧。
+
+    和 `ai_options.DropDirEdit` 同一套写法（`setAcceptDrops` + 三个事件），
+    只是那个收目录、这个收文件正文。
+    """
+
+    dropped_files = pyqtSignal()      # 拖进来几个文件（外面好把「已选 N 个」那行刷新）
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.dropped: list[Path] = []      # 拖进来的文件按原路径记着（要用它的名字配视频）
+
+    def dragEnterEvent(self, event) -> None:      # noqa: N802 - Qt 命名
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event) -> None:       # noqa: N802 - Qt 命名
+        if event.mimeData().hasUrls():
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event) -> None:           # noqa: N802 - Qt 命名
+        urls = event.mimeData().urls() if event.mimeData().hasUrls() else []
+        if not urls:
+            super().dropEvent(event)
+            return
+        for url in urls:
+            path = Path(url.toLocalFile())
+            if path.is_file():
+                self.dropped.append(path)
+        event.acceptProposedAction()
+        self.dropped_files.emit()
+
+
+class JsonImportDialog(QDialog):
+    """批量导入高光 JSON：粘贴文字、拖文件、选文件三条路都能用，一份也认、一堆也认。
+
+    三条路进来的东西最后都变成同一个东西：`(来源名字, JSON 对象)` 的清单，
+    交给调用方逐条登记。**两种形状都吃**：
+
+      * 完整方案（老 / 新协议，带 `clip` 或 `segments`）—— 直接登记；
+      * **结果清单**（一行只有 `setup_at` / `result_at` 两个时间点）—— 区间不在文件里，
+        得拿库里的逐词时间戳现算，走 `from_moments`（和 AI 自动接收、
+        `assets --import-moments` 同一个实现）。
+
+    拆分也复用 `from_moments.rows_from_text`：它先抹掉聊天界面带出来的 ``` 围栏和
+    行内 `[cite: 1, 2]` 标记，再按「整段 JSON / JSONL 一行一份 / 并排 `{...}`」拆。
+    这一步不能自己另写 —— 一行末尾多个 `[cite: 1]`，那行就整行废掉，
+    干净的行照旧进来、脏行悄悄消失，比整份解不开更难发现。
+    """
+
+    def __init__(self, cfg: Any, parent=None):
+        super().__init__(parent)
+        self.cfg = cfg
+        self.setWindowTitle("批量导入高光 JSON")
+        self.resize(680, 480)
+        self._picked: list[Path] = []
+
+        self.edit_text = JsonDropEdit()
+        self.edit_text.setPlaceholderText(
+            "把 JSON 直接粘到这里（可以一口气贴好几份 / 一行一份），"
+            "或者把 .json 文件拖进来。\n"
+            "AI 的结果清单（setup_at / result_at 那种）也认，区间由程序按逐词时间戳现算。")
+        self.edit_text.dropped_files.connect(self._sync_files)
+        self.btn_files = QPushButton("选文件…（可多选）")
+        self.btn_files.clicked.connect(self.on_pick_files)
+        self.lbl_files = QLabel("还没选文件")
+        self.lbl_files.setWordWrap(True)
+
+        note = QLabel("三种都行：粘贴文字 / 拖文件进来 / 点「选文件」。"
+                      "每一份自己找归属——先认里面写的 video，再认文件名；"
+                      "都认不出来才落到列表里当前选中的那个视频上。\n"
+                      "结果清单那种（只有两个时间点）必须先分析过那个视频，"
+                      "不然库里没有逐词时间戳，算不出区间。")
+        note.setWordWrap(True)
+
+        ok = _primary(QPushButton("开始导入"))
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("取消")
+        cancel.clicked.connect(self.reject)
+        foot = QHBoxLayout()
+        foot.addWidget(self.btn_files)
+        foot.addStretch(1)
+        foot.addWidget(ok)
+        foot.addWidget(cancel)
+
+        lay = QVBoxLayout(self)
+        lay.addWidget(note)
+        lay.addWidget(self.edit_text, 1)
+        lay.addWidget(self.lbl_files)
+        lay.addLayout(foot)
+
+    def on_pick_files(self) -> None:
+        paths, _ = QFileDialog.getOpenFileNames(self, "选高光 JSON（可多选）",
+                                                str(self.cfg.root), "JSON (*.json)")
+        for path in paths:
+            self._picked.append(Path(path))
+        self._sync_files()
+
+    def _sync_files(self) -> None:
+        every = self._files()
+        if not every:
+            self.lbl_files.setText("还没选文件")
+            return
+        names = "、".join(path.name for path in every[:6])
+        more = f" 等 {len(every)} 个" if len(every) > 6 else ""
+        self.lbl_files.setText(f"已选 {len(every)} 个文件：{names}{more}")
+
+    def _files(self) -> list[Path]:
+        """选进来 + 拖进来的文件，按 normcase 去重（同一个文件只导一次）。"""
+        seen: set[str] = set()
+        out: list[Path] = []
+        for path in [*self._picked, *self.edit_text.dropped]:
+            key = os.path.normcase(os.path.normpath(str(path)))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(path)
+        return out
+
+    def payloads(self) -> list[tuple[str, Any]]:
+        """`(来源名字, JSON 对象)` 清单：文件在前、粘贴的在后。读不动的当场报出来。
+
+        一个文件里可以装好几份（JSONL、并排对象都行），所以文件那一路也走
+        `rows_from_text` 拆，来源名字带上第几份。文件名会被用来配视频，
+        所以同一个文件拆出来的每一份都挂同一个名字。
+        """
+        from ..highlight import from_moments  # noqa: PLC0415 - 重依赖，用到才导
+
+        out: list[tuple[str, Any]] = []
+        bad: list[str] = []
+        for path in self._files():
+            try:
+                text = path.read_text(encoding="utf-8")
+            except OSError as exc:
+                bad.append(f"{path.name}（{exc}）")
+                continue
+            found = from_moments.rows_from_text(text)
+            if not found:
+                bad.append(f"{path.name}（里面找不到 JSON 对象）")
+                continue
+            out.extend((path.name, item) for item in found)
+        text = self.edit_text.toPlainText().strip()
+        if text:
+            found = from_moments.rows_from_text(text)
+            if found:
+                out.extend((f"粘贴的第 {index} 份", item)
+                           for index, item in enumerate(found, start=1))
+            else:
+                bad.append("粘贴的文字里找不到 JSON 对象")
+        if bad:
+            QMessageBox.information(self, "批量导入高光 JSON",
+                                    "这些读不进来，已经跳过：\n" + "\n".join(bad))
+        return out
+
+
 # ================================================================ 视频资产页
 class VideoAssetsPage(QWidget):
     """左边视频列表，右边这个视频的高光 JSON 和成品血缘。"""
@@ -1187,7 +1398,8 @@ class VideoAssetsPage(QWidget):
     # 主键只藏在 UserRole 里（界面上不出现裸 ID 列）。
     ASSET_HEADERS = ("当前", "高光 JSON", "名称", "区间", "时长", "高光数", "评分",
                      "AI", "模型", "成品", "创建时间", "状态")
-    PRODUCT_HEADERS = ("ID", "成品", "来源 JSON", "PRM", "时长", "实际区间", "生成时间", "状态")
+    PRODUCT_HEADERS = ("ID", "成品", "来源 JSON", "PRM", "时长", "实际区间", "空隙",
+                       "生成时间", "状态")
     THUMB_SIZE = QSize(96, 54)     # 视频列表 / 成品表每行左边那张缩略图（16:9）
     THUMB_BATCH = 8                # 一轮最多解几帧：滚动时不许把界面按住
 
@@ -1206,6 +1418,8 @@ class VideoAssetsPage(QWidget):
         self._rows: list[dict[str, Any]] = []
         self._asset_rows: list[Any] = []          # 当前视频的 JSON 行（刷新时手上就有）
         self._product_rows: list[dict[str, Any]] | None = None   # 当前视频的成品全景
+        self._speech_cache: dict[int, tuple[Any, ...]] = {}      # 视频 → 句+逐词（算空隙）
+        self._lost_products: list[dict[str, Any]] = []           # 文件已丢失的那几条记录
         # 详情区（当前视频 / 高光 JSON / 成品 / 血缘）现在画的是哪个视频。
         # 列表重画后行号会留在原地但那一行已经换成别的视频了，Qt 这种情况不发
         # itemSelectionChanged，光靠信号刷详情会拿到上一个视频的成品 —— 靠这个字段兜住。
@@ -1213,6 +1427,7 @@ class VideoAssetsPage(QWidget):
         self._lineage_for: int | None = None      # 血缘树现在画的是哪个成品
         self._thumbs: dict[str, QIcon | None] = {}   # 视频路径 → 缩略图（一个视频只解一次帧）
         self._checked: set[int] = set()            # 勾上的视频 id（换筛选也不丢）
+        self._last_imported: int | None = None     # 批量导入最后登记的那份 JSON（导完停在它上面）
 
         # 页面只剩「① 视频库」一栏：以前右边那半（当前视频 / 高光 JSON / 成品血缘）
         # 要挤在 400~600px 里，四块表格叠在一起怎么排都难看。现在整块搬进两个弹窗，
@@ -1264,14 +1479,15 @@ class VideoAssetsPage(QWidget):
             widget.currentIndexChanged.connect(lambda _=0: self.reload())
 
         # 两个目录筛选：扫描目录下常常有几十个子目录，得能只看其中一个。
-        # 选完即存（写 assets.filter_video_dir / filter_product_dir），
-        # 而且「看全部视频（清掉筛选）」**不会**把它们清掉——那是手动挑的作用域。
+        # 选完即存（写 assets.filter_video_dir / filter_product_dir），重启还在；
+        # 「看全部视频（清掉筛选）」会把它们**一起清掉**（连配置里存的那份也清），
+        # 不然用户点了清筛选，列表还被上次挑的目录硬性限制着，怎么看都像少了视频。
         self.cmb_video_dir = QComboBox()
         self.cmb_video_dir.setToolTip("原视频目录：只看原视频落在这个目录（含子目录）里的。"
-                                      "选完即存，清筛选也不会动它")
+                                      "选完即存（重启还在），点「清掉筛选」会一起清掉")
         self.cmb_product_dir = QComboBox()
         self.cmb_product_dir.setToolTip("成品目录：只看**成品**落在这个目录（含子目录）里的。"
-                                        "选完即存，清筛选也不会动它")
+                                        "选完即存（重启还在），点「清掉筛选」会一起清掉")
         for widget in (self.cmb_video_dir, self.cmb_product_dir):
             # 目录字符串很长，这里也按「3 个字」算最小宽（整页最小宽必须守住 960）
             widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
@@ -1575,11 +1791,25 @@ class VideoAssetsPage(QWidget):
             self.reload()
 
     def reload(self) -> None:
-        """重查视频列表：一次 SQL 聚合，不扫磁盘，刷新后保持原来的选中行。"""
+        """重查视频列表：一次 SQL 聚合，刷新后保持原来的选中行。
+
+        查之前先把**成品**收拾干净：`sync_product_presence` 对一遍在盘状态，
+        再 `purge_missing_products` 把真的丢了的记录删掉（文件没了、所在目录还在）。
+        成品是用户会在资源管理器里直接删的东西，留着幽灵记录只会让「成品」数不准、
+        提取数据时满屏「文件已经不在盘上」。只 stat 成品这一类文件，不扫目录。
+        """
         db = self._handle()
         if db is None:
             return
         keep = self.current_video_id()
+        self._speech_cache = {}      # 语音可能重新分析过，缓存跟着这次刷新作废
+        try:
+            db_assets.sync_product_presence(db)
+            gone = db_assets.purge_missing_products(db)
+            if gone and self._log:      # 只记日志：reload 里不发 changed，免得刷新套刷新
+                self._log(f"[成品] 已清掉 {gone} 条文件早就不在盘上的成品记录")
+        except Exception as exc:  # noqa: BLE001 - 对账失败不该让列表打不开
+            logger.warning("成品在盘状态对账失败：%s", exc)
         self._fill_ai_choices(db)
         self._fill_dir_choices(db)
         try:
@@ -1645,6 +1875,11 @@ class VideoAssetsPage(QWidget):
         目录列表跟着库走（扫过什么就有什么），选中的那一项来自
         `assets.filter_video_dir` / `filter_product_dir`——配置里的目录哪怕这一次
         库里没有，也照样保留成一项，不然一刷新就把用户手动挑的作用域弄丢了。
+
+        **成品目录额外看一眼盘**：库里只记得已经登记过成品的目录（`known_dirs`
+        查的是 `artifacts`），所以刚建好、还没剪出成品的目录永远进不了下拉，
+        用户没法先把作用域切到它上面。这里把 `assets.output_dir` 自己和它下面
+        两层子目录一起补进去（跟目录名是中文还是英文无关）。
         """
         try:
             video_dirs, product_dirs = db_assets.known_dirs(db)
@@ -1652,6 +1887,8 @@ class VideoAssetsPage(QWidget):
             self._note(f"[资产中心] 目录列表查不出来：{exc}")
             return
         section = self.cfg.assets
+        product_dirs = self._merge_dirs(product_dirs,
+                                        _disk_subdirs(str(section.get("output_dir") or "")))
         for combo, folders, key in ((self.cmb_video_dir, video_dirs, "filter_video_dir"),
                                     (self.cmb_product_dir, product_dirs,
                                      "filter_product_dir")):
@@ -1667,6 +1904,24 @@ class VideoAssetsPage(QWidget):
             index = combo.findData(picked) if picked else 0
             combo.setCurrentIndex(index if index >= 0 else 0)
             combo.blockSignals(False)
+
+    @staticmethod
+    def _merge_dirs(*groups: list[str]) -> list[str]:
+        """把几组目录并成一份下拉用的列表：按 normcase 去重（同一个目录只出现一次）。
+
+        Windows 上库里存的是 `F:\\a\\b`、盘上列出来的可能是 `F:/a/b`，裸字符串去重
+        会让同一个目录在下拉里出现两次。这里按 `_under` 那套口径归一化再比。
+        """
+        seen: set[str] = set()
+        out: list[str] = []
+        for group in groups:
+            for folder in group:
+                key = os.path.normcase(os.path.normpath(str(folder)))
+                if key in seen:
+                    continue
+                seen.add(key)
+                out.append(str(folder))
+        return sorted(out)
 
     def _pick_dir_filter(self) -> None:
         """挑了目录：立刻存进全局配置（`assets`），再按新作用域刷列表。"""
@@ -1764,6 +2019,7 @@ class VideoAssetsPage(QWidget):
         db = self._handle()
         self._shown_video = vid          # 详情区从这一刻起画的是这个视频
         self._product_rows = None        # 换视频 = 成品缓存作废，下一次刷新重新查
+        self._lost_products = []
         if vid is None or db is None:
             self.lbl_video.setText("请选择一个视频")
             self.lbl_state.setText("回到「① 视频库」点一个视频，这个弹窗就是它的工作区")
@@ -1835,31 +2091,96 @@ class VideoAssetsPage(QWidget):
         # 「JSON」/「成品」格子就开对应弹窗，少一层菜单
         menu.addAction("只看这个视频的高光", self.on_only_json)
         menu.addAction("只看这个视频的成品", self.on_only_products)
-        menu.addAction("看全部视频（清掉筛选）", self.on_clear_filters)
+        menu.addAction("看全部视频（清掉筛选，含两个目录筛选）", self.on_clear_filters)
         menu.addSeparator()
         menu.addAction("打开所在文件夹", self.on_reveal_video)
         menu.addAction("复制视频路径", self.on_copy_video_path)
+        menu.addSeparator()
+        menu.addAction("按时长批量改名成品（勾选的视频，没勾就这一个）",
+                       self.on_retag_products)
         menu.addSeparator()
         menu.addAction("从库里删除这个视频（不删文件）", self.on_forget_video)
         menu.addAction("删除该视频（包含本地文件）", self.on_delete_video_file)
         menu.exec_(self.tbl_videos.viewport().mapToGlobal(pos))
 
-    def on_clear_filters(self) -> None:
-        """把状态 / JSON / 成品 / AI 四个筛选和搜索框复位。
+    def on_retag_products(self) -> None:
+        """把成品名统一成现在的口径：`<原视频名>_<区间长度>.mp4`，文件和库一起改。
 
-        **两个目录筛选故意不动**：那是手动挑的作用域（存在全局配置里），
-        清筛选只是"这一屏别再挑挑拣拣"，不该把作用域也一起丢掉。
+        先算一份计划给人看（哪些改、哪些跳过、跳过为什么），确认之后才动手。
+        库里跟着改 `artifacts.path` 和 `clips.output_path`，血缘不断。
         """
-        for combo in (self.cmb_status, self.cmb_json, self.cmb_product, self.cmb_ai):
+        db = self._handle()
+        if db is None:
+            return
+        rows = self._checked_rows()
+        ids = [int(r["id"]) for r in rows] if rows else (
+            [int(self.current_video_id())] if self.current_video_id() else [])
+        if not ids:
+            QMessageBox.information(self, "资产中心", "先勾几个视频，或者选中一行")
+            return
+        try:
+            plan = db_assets.product_rename_plan(db, ids)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "资产中心", f"改名计划算不出来：{exc}")
+            return
+        todo = [item for item in plan if not item["skip"]]
+        skipped = [f"{Path(item['old']).name}（{item['skip']}）"
+                   for item in plan if item["skip"] and item["skip"] != "名字已经对了"]
+        fine = sum(1 for item in plan if item["skip"] == "名字已经对了")
+        if not todo:
+            QMessageBox.information(
+                self, "资产中心",
+                f"没有要改的：{fine} 个名字已经对了"
+                + (f"\n\n另有 {len(skipped)} 个改不了：\n" + "\n".join(skipped[:20])
+                   if skipped else ""))
+            return
+        preview = "\n".join(f"{Path(i['old']).name}\n  → {Path(i['new']).name}"
+                            + ("（覆盖同名）" if i.get("overwrite") else "")
+                            for i in todo[:15])
+        more = f"\n… 还有 {len(todo) - 15} 个" if len(todo) > 15 else ""
+        clash = sum(1 for i in todo if i.get("overwrite"))
+        if QMessageBox.question(
+                self, "资产中心",
+                f"把 {len(todo)} 个成品按区间长度改名？文件和库（血缘）一起改。\n"
+                f"{fine} 个名字已经对了，{len(skipped)} 个改不了"
+                + (f"，{clash} 个会覆盖同名文件（被顶掉的那条记录一并清掉）" if clash else "")
+                + f"。\n\n{preview}{more}",
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        done, failed = db_assets.apply_product_rename(db, todo)
+        text = f"[成品] 批量改名 {done} 个（文件 + 库里的路径和血缘一起改）"
+        if failed:
+            text += "；没改成：" + "、".join(failed[:10])
+        self._note(text, f"✓ 已改名 {done} 个成品"
+                         + (f"（{len(failed)} 个没改成，详见日志）" if failed else ""))
+        self.refresh_products()
+        self.reload()
+        if failed:
+            QMessageBox.information(self, "资产中心", "这些没改成：\n" + "\n".join(failed[:20]))
+
+    def on_clear_filters(self) -> None:
+        """把筛选全部复位：状态 / JSON / 成品 / AI、搜索框，**两个目录筛选也一起清掉**。
+
+        目录筛选是存在全局配置里的（`assets.filter_video_dir` /
+        `filter_product_dir`），重启还生效——以前清筛选故意不动它，结果用户点完
+        「看全部视频」列表还被上次挑的目录锁着，体感就是"只显示有成品的"。
+        现在连配置里那份一起清空，清完就是真的全部视频。
+
+        复位时先把每个控件的信号掐掉，改完再放开，最后靠 `_pick_dir_filter()`
+        统一存一次配置 + 刷一次列表（它自己带 `reload()`），不会刷 N 次。
+        """
+        for combo in (self.cmb_status, self.cmb_json, self.cmb_product, self.cmb_ai,
+                      self.cmb_video_dir, self.cmb_product_dir):
             combo.blockSignals(True)
-            combo.setCurrentIndex(0)
+            combo.setCurrentIndex(0)      # 两个目录下拉的第 0 项就是「全部目录」
             combo.blockSignals(False)
         self.edit_search.blockSignals(True)
         self.edit_search.clear()
         self.edit_search.blockSignals(False)
-        self.reload()
-        kept = self.cmb_video_dir.currentData() or self.cmb_product_dir.currentData()
-        self.notice.emit("✓ 已清掉筛选" + ("（目录筛选保留）" if kept else "，显示全部视频"))
+        # 存配置 + 刷列表都在这一个方法里（写配置的口径和用户手动挑目录时完全一样）
+        self._pick_dir_filter()
+        self.notice.emit("✓ 已清掉筛选（连目录筛选一起），显示全部视频")
+
 
     def on_forget_video(self) -> None:
         """把这个视频从库里删掉：磁盘文件一个不动，库里的记录全没。**不可恢复。**"""
@@ -2156,6 +2477,262 @@ class VideoAssetsPage(QWidget):
             QMessageBox.information(self, "资产中心",
                                     "这些没拷成：\n" + "\n".join(failed))
 
+    def _speech_for_gaps(self, db: Any, video_id: int) -> tuple[Any, ...]:
+        """这个视频的句 + 逐词（算原声空隙用）。取不到就空元组，不当错误。
+
+        一个视频只查一次，缓存到下一次 `reload()`：成品表每次重画、导出时逐条溯源，
+        都会问同一个视频要语音，逐次查库会把界面按住。
+        重新分析过的视频靠 `reload()` 清缓存拿到新数据。
+        """
+        hit = self._speech_cache.get(video_id)
+        if hit is not None:
+            return hit
+        from ..highlight import clip_engine  # noqa: PLC0415 - 重依赖，用到才导
+
+        try:
+            out = clip_engine.segments_for_video(db, video_id)
+        except Exception as exc:  # noqa: BLE001 - 没语音数据不影响提取，空隙给空数组
+            logger.warning("取不到视频 %s 的逐词时间戳，空隙按空处理：%s", video_id, exc)
+            out = ()
+        self._speech_cache[video_id] = out
+        return out
+
+
+
+
+    def on_purge_stale_products(self) -> None:
+        """把「和当前静音配置对不上」的成品清掉（删文件 + 清库记录），好重剪一遍。
+
+        为什么需要这个按钮：改了 `silence_keep` / `silence_target` 之后，旧成品还是按
+        老配置渲的 —— 想让盘上的成品符合新配置，只能删了重剪。
+
+        **和提取数据无关**：提取那边按成品的真实时长反推坐标（`keeps_for`），
+        配置改了也导得对，不需要先重剪。这个按钮只管「让成品本身符合新配置」，
+        比如你把时长上限收紧了、想让成片真的变短。
+
+        判定用 `keeps_by_config`（按当前配置该剪成什么样）和成品的真实时长比：
+        对不上就是老配置的产物。只删成品文件，方案（highlight_assets）和 AI 结果
+        都留着 —— 重剪不用再问 AI。
+        """
+
+        rows = self._checked_rows()
+        if not rows:
+            QMessageBox.information(self, "资产中心", "先勾上要检查的视频")
+            return
+        db = self._handle()
+        if db is None:
+            return
+        keep = self.cfg.highlight.get("silence_keep", 2.0)
+        target = self.cfg.highlight.get("silence_target", 0.0)
+        stale: list[tuple[Path, str, float]] = []      # (成品路径, 视频名, 差多少秒)
+        for row in rows:
+            speech = self._speech_for_gaps(db, int(row["id"]))
+            for info in db_assets.products_overview(db, int(row["id"])):
+                path = Path(str(info["path"]))
+                if info["asset_id"] is None or not path.is_file():
+                    continue
+                spans = info.get("spans") or ()
+                region = ((spans[0].get("start"), spans[0].get("end")) if spans else None)
+                recorded = (spans[0].get("duration") if spans else None)
+                gap = stale_seconds(recorded,
+                                    keeps_by_config(speech, region, keep=keep,
+                                                    target=target),
+                                    region)
+
+                if gap:
+                    stale.append((path, str(row["file_name"]), gap))
+        if not stale:
+            self._note("[成品] 勾上的视频里没有和当前静音配置对不上的成品，不用重剪",
+                       "✓ 都对得上，不用重剪")
+            return
+        sample = "\n".join(f"· {one.name}（差 {gap:.2f} 秒）" for one, _, gap in stale[:5])
+        more = f"\n… 另外 {len(stale) - 5} 条" if len(stale) > 5 else ""
+        answer = QMessageBox.question(
+            self, "清掉待重剪的成品",
+            f"这 {len(stale)} 个成品是用**别的静音配置**渲的，导出的坐标和文件对不上：\n\n"
+            f"{sample}{more}\n\n"
+            f"要把这些成品**文件删掉**并清掉库里的记录吗？\n"
+            f"方案和 AI 结果都留着，清完点「直接剪辑」就会按现在的配置重剪一遍。\n"
+            f"（删文件这一步不可逆）",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        if answer != QMessageBox.Yes:
+            return
+        failed: list[str] = []
+        for path, _, _ in stale:
+            try:
+                path.unlink()
+            except OSError as exc:
+                failed.append(f"{path.name}：{exc}")
+        # 删完再对账：文件没了 -> 记录清掉 -> clips 退回 planned -> 可以重剪
+        db_assets.sync_product_presence(db)
+        cleared = db_assets.purge_missing_products(db)
+        done = len(stale) - len(failed)
+        self._note(f"[成品] 已删掉 {done} 个配置对不上的成品，清掉 {cleared} 条记录；"
+                   f"点「直接剪辑」按现在的配置重剪一遍",
+                   f"✓ 已清 {done} 个待重剪的成品")
+        if failed:
+            self._note("[成品] 有几个删不掉（可能正被占用）：" + "；".join(failed[:3]),
+                       f"⚠ {len(failed)} 个删不掉")
+        self.reload()
+
+    def on_extract_checked(self) -> None:
+        """提取数据：**只提取剪出过成品的 JSON**，一个成品一行；没成品的一律跳过。
+
+        - 走 `products_overview`（成品 → highlight_asset_id）：导出的是「这个成品当时
+          按哪份 JSON 剪的」，一个成品一行，不多不少；
+        - 顺序是**先看盘再溯源**：成品文件当场 `is_file()` 确认还在，才去查它的 JSON。
+          库里的 `exists_on_disk` 只是上次扫盘的旧状态，不拿它当准；
+        - **没有可用成品的视频直接跳过**，不再拿库里的高光 JSON 兜底——提取出来的每一行
+          都对应一个真实存在的成品素材，没剪过的 JSON 不许混进去；
+        - 时间重算走 `highlight.extract.extract_line()`：`timeline.duration` 是**实际剪进去的区间长度**
+          （和成品文件名同一个口径，优先取这个成品的实际渲染区间），不加冻帧；
+        - o 挂字 / s 语音段 / w 逐词 / a 动作 / e 表情**整条平移**（减 startframe），
+          越界的裁进成片范围、完全落在外面的丢掉——只要吃时间的都重算；
+        - `t` 没有时间，原样照抄；末尾带 `startframe` / `freeze` 两个加减秒数；
+        - `gaps` 是程序算出的原声空隙（成片坐标、>= 0.5 秒、含首尾），第二轮混剪的 TTS
+          落位只许读它，不许自己推；语音没分析过就给空数组，绝不猜一个空隙出来；
+        - 成品渲染时剪过超时静音的，空隙按**剪完之后**的片段算 —— 剪成哪几段由
+          `keeps_for` 拿成品的真实时长**反推**（`trim_as_made`），不看当前配置：
+          这样改了 `silence_keep` 也不必把旧成品重剪一遍才能导出正确的 gaps；
+
+
+
+        - 只读库，一个文件都不改（除了用户选定的那个 txt）；跳过的都列出来，
+          一行都抠不出来就只弹框列原因，不产出任何文件。
+        """
+        db = self._handle()
+        rows = self._checked_rows()
+        if db is None or not rows:
+            QMessageBox.information(self, "资产中心", "先勾几个视频")
+            return
+        # JSON 里没有那两个键才用这两个兜底：剪辑时会把加减秒数盖进 JSON，那份优先
+        saved = gui_settings.load(self.cfg).get("highlight_offsets") or ()
+        deltas = [ai_protocol.num(saved[i]) if i < len(saved) else None for i in (0, 1)]
+        startframe = deltas[0] if deltas[0] is not None else 0.0
+        freeze = deltas[1] if deltas[1] is not None else 0.0
+        # 静音压缩：成品渲染时剪成哪几段不入库，这里按**成品的真实时长**反推
+        # （`keeps_for` → `clip_engine.trim_as_made`），空隙才落在和盘上那个文件
+        # 一致的坐标上。**不看 silence_keep**：配置改一次就得把旧成品全重剪才能导数据，
+        # 那没必要 —— 口径由成品自己说了算。命令行 `assets --extract` 走同一个函数
+
+        picked: list[tuple[str, bool]] = []   # (一行 JSON, 这条有没有可用空隙)
+        skipped: list[str] = []
+        vanished = 0        # 文件早就不在盘上的成品：顺手清掉，不占跳过清单
+        unknown = 0         # 时长既不等于区间长度、也反推不出剪法：clips 和文件对不上
+        for row in rows:
+            name = str(row["file_name"])
+            made = 0        # 这个视频靠成品导出了几行
+            hold: list[str] = []
+            speech = self._speech_for_gaps(db, int(row["id"]))
+            for info in db_assets.products_overview(db, int(row["id"])):
+                path = Path(str(info["path"]))
+                label = path.name
+                # 先看盘：文件真的还在，才值得去溯源它的 JSON。库里的 exists_on_disk 是
+                # 上一次扫盘时的旧状态，手动挪走 / 删掉的成品靠它是查不出来的
+                if not path.is_file():
+                    vanished += 1        # 一条条报出来只会刷屏，末尾汇总一句就够
+                    continue
+                if info["asset_id"] is None:
+                    hold.append(f"{label}（成品没挂上高光 JSON，溯源不到）")
+                    continue
+                spans = info.get("spans") or ()
+                if len(spans) > 1:
+                    # 一个成品正常只对应一段。多出来的是历史脏数据（clips 张冠李戴），
+                    # 这里只会用第一段算 duration 和空隙，闷头导出就成了错数据
+                    self._note(f"[提取] {label} 挂着 {len(spans)} 段实际区间，只用第一段；"
+                               f"建议在成品表右键跑一次「修正实际渲染记录」",
+                               f"⚠ {label} 有多段区间，导出只用了第一段")
+                region = ((spans[0].get("start"), spans[0].get("end")) if spans else None)
+                recorded = (spans[0].get("duration") if spans else None)
+                keeps = keeps_for(speech, region, made=recorded)
+                # 时长解释不了：这条 clips 记录和盘上的文件本来就对不上，gaps 不可信
+                if unresolved_seconds(recorded, keeps, region):
+                    unknown += 1
+                one = extract_line(
+
+                    db_assets.asset_payload(db, int(info["asset_id"])), label,
+                    startframe=startframe, freeze=freeze, source=name,
+                    span=recorded,
+                    region=region,
+                    speech=speech,
+                    keeps=keeps)
+
+                if one is None:
+                    hold.append(f"{label}（溯源到的 JSON 里没有片段）")
+                    continue
+                picked.append((one[0], bool(one[1])))
+                made += 1
+            skipped.extend(hold)
+            if not made:
+                skipped.append(f"{name}（没有还在盘上的成品，跳过）")
+
+        if vanished:
+            # 幽灵记录当场清掉：文件没了、所在目录还在的那些（外接盘掉线的不动）
+            try:
+                db_assets.sync_product_presence(db)
+                cleaned = db_assets.purge_missing_products(db)
+            except Exception as exc:  # noqa: BLE001 - 清不掉也不影响这次提取
+                logger.warning("清理丢失的成品记录失败：%s", exc)
+            else:
+                if cleaned:
+                    self._note(f"[成品] 提取时清掉 {cleaned} 条文件早就不在盘上的成品记录",
+                               f"✓ 顺手清掉 {cleaned} 条幽灵成品记录")
+                    self.reload()
+        if unknown:
+            # 提取侧已经不看配置了（按成品真实时长反推），所以「改过配置」不再影响导出。
+            # 这里报的是另一回事：时长本身解释不通 —— clips 记录和盘上的文件对不上
+            self._note(unresolved_note(unknown, len(picked) + unknown),
+                       f"⚠ {unknown} 条成品的时长解释不了，它们的 gaps 可能不准")
+
+        if not picked:
+            QMessageBox.information(self, "资产中心",
+                                    "勾上的这些都没有可提取的成品素材：\n"
+                                    + "\n".join(skipped))
+            return
+        usable = sum(1 for _, has_gap in picked if has_gap)
+        chosen = picked
+        if usable and usable < len(picked):
+            # 没有空隙的素材第二轮插不了配音。要不要一起导出，让用户当场决定
+            ask = QMessageBox(QMessageBox.Question, "提取数据",
+                              f"这一批共 {len(picked)} 条，其中 {usable} 条有可用原声空隙，"
+                              f"{len(picked) - usable} 条没有。\n\n"
+                              "没有空隙的素材第二轮混剪不能插配音，只能当无旁白素材用。",
+                              parent=self)
+            only = ask.addButton(f"只导有空隙的（{usable} 条）", QMessageBox.AcceptRole)
+            every = ask.addButton(f"全部导出（{len(picked)} 条）", QMessageBox.AcceptRole)
+            ask.addButton("取消", QMessageBox.RejectRole)
+            ask.setDefaultButton(every)
+            ask.exec_()
+            hit = ask.clickedButton()
+            if hit not in (only, every):
+                return
+            if hit is only:
+                chosen = [item for item in picked if item[1]]
+        lines = [line for line, _ in chosen]
+        left = sum(1 for _, has_gap in chosen if has_gap)
+        where, _ = QFileDialog.getSaveFileName(
+            self, "提取的数据存到哪个 txt",
+            f"高光提取_{_now_tag()}_{len(lines)}条.txt", "文本文件 (*.txt)")
+        if not where:
+            return
+        target = Path(where)
+        if not target.suffix:
+            target = target.with_suffix(".txt")
+        try:
+            target.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "资产中心", f"写不进这个文件：\n{exc}")
+            return
+        text = (f"[资产中心] 已提取 {len(lines)} 行（{len(lines)} 个成品溯源）到 {target}"
+                f"；其中 {left} 条有可用原声空隙、{len(lines) - left} 条无空隙")
+        if skipped:
+            text += "；跳过：" + "、".join(skipped)
+        self._note(text, f"✓ 已提取 {len(lines)} 行到 {target.name}"
+                         f"（{left} 条可配音）"
+                         + (f"（{len(skipped)} 个跳过，详见日志）" if skipped else ""))
+
+
+
     def on_forget_checked(self) -> None:
         """删除 = 只删库里的登记，**磁盘文件一个都不动**（要连文件删走右键那一条）。"""
         db = self._handle()
@@ -2184,7 +2761,428 @@ class VideoAssetsPage(QWidget):
                    f"✓ 已删掉 {done} 个视频的登记（文件没动）")
         self.reload()
 
+    # -------------------------------------------------- 批量：剧本 / JSON / 成品
+    def on_export_scripts_checked(self) -> None:
+        """批量导出剧本：勾上的视频，**合并成一份**或者一个视频一份，导出前问你。
 
+        和「提取数据」是两回事，所以摆在它左边：提取数据导的是**成品溯源的一行 JSON**
+        （第二轮混剪的输入），这里导的是**完整剧本正文**（人看的那份，画面 + 语音
+        逐行排版）。同一个视频两个按钮都能用，互不影响。
+
+        内容只来自数据库（`script_inputs` + `script_lines`，和主界面「导出剧本」
+        同一份实现），没分析过的视频跳过——绝不写一个空文件出去充数。
+        """
+        db = self._handle()
+        rows = self._checked_rows()
+        if db is None or not rows:
+            QMessageBox.information(self, "资产中心", "先勾几个视频")
+            return
+        made, skipped = self._script_lines_for(db, rows)
+        if not made:
+            QMessageBox.information(self, "资产中心",
+                                    "一份都导不出来：\n" + "\n".join(skipped))
+            return
+        merge = True
+        if len(made) > 1:
+            # 一份还是多份，只有用户知道：合成一份好整批喂 AI / 通读，
+            # 拆开好单独拿某一个。勾 1 个时两者一样，就不问了
+            ask = QMessageBox(QMessageBox.Question, "导出剧本",
+                              f"勾上的视频里有 {len(made)} 个能导出剧本"
+                              f"（共 {sum(len(one[1]) for one in made)} 行）。\n\n"
+                              "合并成一份：整批通读、或者一次性喂给 AI；\n"
+                              "每个视频一份：单独拿某一个的时候方便。",
+                              parent=self)
+            one = ask.addButton(f"合并成一份（{len(made)} 个视频）", QMessageBox.AcceptRole)
+            many = ask.addButton("每个视频一份", QMessageBox.AcceptRole)
+            ask.addButton("取消", QMessageBox.RejectRole)
+            ask.setDefaultButton(one)
+            ask.exec_()
+            hit = ask.clickedButton()
+            if hit not in (one, many):
+                return
+            merge = hit is one
+        if merge:
+            self._save_scripts_merged(made, skipped)
+        else:
+            self._save_scripts_split(made, skipped)
+
+    def _script_lines_for(self, db: Any, rows: list[dict[str, Any]]
+                          ) -> tuple[list[tuple[str, list[str]]], list[str]]:
+        """勾上的视频 → `[(视频名, 剧本行), ...]` + 跳过说明。**先全部生成再落盘。**
+
+        顺序刻意是「先算完、再问存哪儿」：算不出来的视频在问路径之前就报出来，
+        用户不会先挑好文件名才发现一份都导不了。
+        """
+        from ..timeline.exporters import script_lines  # noqa: PLC0415 - 重依赖，用到才导
+
+        made: list[tuple[str, list[str]]] = []
+        skipped: list[str] = []
+        for row in rows:
+            name = str(row["file_name"])
+            try:
+                payload = db_repo.script_inputs(db, int(row["id"]))
+            except Exception as exc:  # noqa: BLE001 - 一个视频读不出来不该拖垮整批
+                skipped.append(f"{name}（库里的分析结果读不出来：{exc}）")
+                continue
+            if payload is None or not (payload["segments"] or payload["events"]):
+                skipped.append(f"{name}（库里没有分析结果，先分析再导）")
+                continue
+            try:
+                lines, _count = script_lines(payload)
+            except ValueError as exc:
+                skipped.append(f"{name}（{exc}）")
+                continue
+            made.append((name, lines))
+        return made, skipped
+
+    def _save_scripts_merged(self, made: list[tuple[str, list[str]]],
+                             skipped: list[str]) -> None:
+        """几份剧本合成一个 txt。每份之间画一条分隔线，份内一个字都不改。
+
+        不额外写视频名：每份剧本第一行本来就是 `Video: <文件名>`，
+        再补一遍只会让「第一行那个文件名」这个约定多出一个候选，下游反而更难认。
+        """
+        where, _ = QFileDialog.getSaveFileName(
+            self, "剧本合集存到哪个 txt",
+            f"剧本合集_{_now_tag()}_{len(made)}个.txt", "文本文件 (*.txt)")
+        if not where:
+            return
+        target = Path(where)
+        if not target.suffix:
+            target = target.with_suffix(".txt")
+        body: list[str] = []
+        for index, (_name, lines) in enumerate(made):
+            if index:
+                body.extend(("", "=" * 78, ""))
+            body.extend(lines)
+        try:
+            target.write_text("\n".join(body).rstrip() + "\n", encoding="utf-8")
+        except OSError as exc:
+            QMessageBox.warning(self, "资产中心", f"写不进这个文件：\n{exc}")
+            return
+        text = (f"[资产中心] 已把 {len(made)} 个视频的剧本合并导出到 {target}"
+                f"（共 {len(body)} 行）")
+        if skipped:
+            text += "；跳过：" + "、".join(skipped)
+        self._note(text, f"✓ 已合并导出 {len(made)} 份剧本到 {target.name}"
+                         + (f"（{len(skipped)} 个跳过，详见日志）" if skipped else ""))
+
+    def _save_scripts_split(self, made: list[tuple[str, list[str]]],
+                            skipped: list[str]) -> None:
+        """一个视频一份 `<视频名>_剧本.txt`，存进你挑的目录。"""
+        where = QFileDialog.getExistingDirectory(self, "剧本存到哪个目录")
+        if not where:
+            return
+        folder = Path(where)
+        done = 0
+        failed = list(skipped)
+        for name, lines in made:
+            target = folder / f"{Path(name).stem}_剧本.txt"
+            try:
+                target.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            except OSError as exc:
+                failed.append(f"{name}（{exc}）")
+                continue
+            done += 1
+        text = f"[资产中心] 已导出 {done} 份剧本到 {folder}"
+        if failed:
+            text += "；跳过：" + "、".join(failed)
+        self._note(text, f"✓ 已导出 {done} 份剧本到 {folder.name}"
+                         + (f"（{len(failed)} 个跳过，详见日志）" if failed else ""))
+
+
+    def on_import_batch(self) -> None:
+        """批量导入高光 JSON：粘贴文字 / 拖文件 / 选文件都行，一份也认、一堆也认。
+
+        和「更多 ▾ → 导入现成 JSON…」的区别有两点：**不用先选视频**（每一份自己找归属），
+        而且**两种形状都吃**：
+
+          * 完整方案（老 / 新协议，带 `clip` 或 `segments`）—— 直接登记；
+          * **结果清单**（AI 只给 `setup_at` / `result_at` 两个时间点）—— 区间不在文件里，
+            得拿那个视频的逐词时间戳现算，走 `from_moments`。这条路和 AI 自动接收
+            （`main_window._payloads_from_reply`）、命令行 `assets --import-moments`
+            **同一个实现**，所以三个入口算出来的区间一模一样，不存在两套算法。
+
+        **同一个视频里区间重复的一律跳过**（见 `_spans_of`）：同一份清单导两遍不会
+        出两套方案，一次里贴了两遍也只进一份。
+        """
+        db = self._handle()
+        if db is None:
+            return
+        dialog = JsonImportDialog(self.cfg, self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        items = dialog.payloads()
+        if not items:
+            return
+        fallback = self.current_video_id()
+        added = 0
+        double = 0
+        last: int | None = None
+        skipped: list[str] = []
+        moments: list[tuple[str, dict[str, Any]]] = []
+        seen: dict[int, list[tuple[float, float]]] = {}
+        for label, payload in items:
+            # 有片段 = 已经是完整方案，原路登记；抠不出来的先当结果清单收着
+            got = ai_protocol.clips(payload)
+            if got:
+                vid = self._match_json_video(db, payload, label) or fallback
+                if vid is None:
+                    skipped.append(f"{label}（认不出是哪个视频的，也没选中任何视频）")
+                    continue
+                start, end = float(got[0]["start"]), float(got[0]["end"])
+                spans = self._spans_of(db, vid, seen)
+                if self._span_taken(spans, start, end):
+                    double += 1
+                    continue
+                last = int(db_assets.create_asset(db, vid, payload,
+                                                  source_type="imported",
+                                                  note=f"从 {label} 批量导入"))
+                spans.append((start, end))
+                added += 1
+            elif isinstance(payload, dict):
+                moments.append((label, payload))
+            else:
+                skipped.append(f"{label}（既不是高光方案，也不是结果清单）")
+        if moments:
+            made, twice, notes = self._import_moment_rows(db, moments, fallback, seen)
+            added += made
+            double += twice
+            last = last if made == 0 else self._last_imported
+            skipped.extend(notes)
+        text = f"[高光 JSON] 批量导入完成：登记 {added} 份"
+        if double:
+            text += f"；{double} 份区间和库里已有的重复，跳过了"
+        if skipped:
+            text += "；跳过：" + "、".join(skipped)
+        flash = f"✓ 已导入 {added} 份 JSON"
+        if double:
+            flash += f"（{double} 份重复已跳过）"
+        if skipped:
+            flash += f"（{len(skipped)} 份没认下，详见日志）"
+        self._note(text, flash)
+        if skipped and not added and not double:
+            QMessageBox.information(self, "资产中心", "一份都没导进去：\n" + "\n".join(skipped))
+        self.reload()
+        if last is not None:
+            self.select_asset(last)
+
+    def _import_moment_rows(self, db: Any, rows: list[tuple[str, dict[str, Any]]],
+                            fallback: int | None,
+                            seen: dict[int, list[tuple[float, float]]]
+                            ) -> tuple[int, int, list[str]]:
+        """结果清单的行 → 高光方案，返回（登记了几份，重复跳过几份，跳过的说明）。
+
+        **按视频分组**再算：一份清单里混着好几个视频的行是常态（AI 一次回一批），
+        而区间要拿「那个视频」的逐词时间戳算，`payloads_from_rows` 的区间重叠去重
+        也只在同一个视频里才有意义。
+
+        算完的区间还要再过一道 `_spans_of`：`payloads_from_rows` 只管这一批内部不重叠，
+        管不到「上次已经导过同一份清单」。两道合起来才挡得住截图里那种一份清单
+        导两遍出两套方案。
+
+        入库时 `current_json` 是程序算出来的新协议，`raw_json` 是清单原行 ——
+        少了后面这一路，血缘里就只剩程序算出的区间，追不回 AI 当初指的那两个点。
+        """
+        from ..highlight import clip_engine, from_moments  # noqa: PLC0415 - 重依赖，用到才导
+
+        grouped: dict[str, list[tuple[str, dict[str, Any]]]] = {}
+        for label, row in rows:
+            grouped.setdefault(from_moments.video_of_row(row, label), []).append((label, row))
+        added = 0
+        double = 0
+        skipped: list[str] = []
+        self._last_imported = None
+        for name, group in grouped.items():
+            found = db_repo.match_video_by_stem(db, name)
+            vid = int(found["id"]) if found is not None else fallback
+            if vid is None:
+                skipped.append(f"{name}（认不出是哪个视频的，也没选中任何视频）")
+                continue
+            row = self._row_of(vid)
+            title = str(row["file_name"]) if row is not None else name
+            segments = clip_engine.segments_for_video(db, vid)
+            if not segments:
+                skipped.append(f"{title}（库里没有逐词时间戳，先跑一遍分析再导）")
+                continue
+            seconds = None
+            if row is not None:
+                try:
+                    seconds = float(row["duration"]) if row["duration"] else None
+                except (IndexError, KeyError, TypeError, ValueError):
+                    seconds = None
+            made, logs = from_moments.payloads_from_rows(
+                segments, [one for _label, one in group], video_name=title, duration=seconds)
+            for line in logs:
+                self._note(f"[结果清单] {title}：{line}")
+            if not made:
+                skipped.append(f"{title}（{len(group)} 行一条都没算出合法区间）")
+                continue
+            spans = self._spans_of(db, vid, seen)
+            fresh = 0
+            for payload, speech, origin in made:
+                start = float(payload["clip"]["start"])
+                end = float(payload["clip"]["end"])
+                if self._span_taken(spans, start, end):
+                    self._note(f"[结果清单] {title}：{start:.2f}-{end:.2f} 库里已经有了，跳过")
+                    double += 1
+                    continue
+                note = f"从结果清单导入（{name}）"
+                if speech:
+                    note += f"｜区间内原文：{speech}"
+                self._last_imported = int(db_assets.create_asset(
+                    db, vid, ai_protocol.payload_of(payload),
+                    source_type="imported", raw_payload=origin, note=note))
+                spans.append((start, end))
+                added += 1
+                fresh += 1
+            self._note(f"[结果清单] {title}：{len(group)} 行 → 算出 {len(made)} 份，"
+                       f"新登记 {fresh} 份")
+        return added, double, skipped
+
+
+
+    @staticmethod
+    def _match_json_video(db: Any, payload: Any, label: str) -> int | None:
+        """这份 JSON 是哪个视频的：先认 JSON 里写的 `video`，再认文件名。认不出返回 None。
+
+        文件名那一路会把导出时挂上去的后缀先摘掉（`x_脚本.json` / `x_高光时刻.json`
+        都是视频 `x.mp4` 的），不然一个都对不上。
+        """
+        data = db_assets.loads(payload)
+        wanted = ""
+        if isinstance(data, dict):
+            for key in ("video", "video_name", "source", "file"):
+                if data.get(key):
+                    wanted = str(data[key])
+                    break
+        for name in (wanted, label):
+            stem = Path(str(name or "")).stem
+            for suffix in ("_脚本", "_高光时刻", "_merged", "_剧本"):
+                if stem.endswith(suffix):
+                    stem = stem[: -len(suffix)]
+            if not stem:
+                continue
+            row = db_repo.match_video_by_stem(db, stem)
+            if row is not None:
+                return int(row["id"])
+        return None
+
+    # 两份 JSON 的区间差在这个数以内就算同一段（导入去重用）
+    SAME_SPAN = 0.05
+
+    def _spans_of(self, db: Any, vid: int,
+                  cache: dict[int, list[tuple[float, float]]]) -> list[tuple[float, float]]:
+        """这个视频**已经有**的高光区间，给导入去重用。软删的不算。
+
+        按 vid 缓存，而且本次导入新登记的也会追加回这个列表 —— 一个字典同时挡住
+        两种重复：**上次已经导过的**（截图里那种，同一份清单导两遍出两套方案），
+        和**这一次里贴了两遍的**。
+
+        软删的不算占位是刻意的：删掉 = 用户明确不要了，之后重新导入应该能进来，
+        否则那份 JSON 就永远导不回来了。
+        """
+        if vid not in cache:
+            found: list[tuple[float, float]] = []
+            for row in db_assets.list_assets(db, vid):
+                got = ai_protocol.clips(db_assets.loads(row["current_json"]))
+                if got:
+                    found.append((float(got[0]["start"]), float(got[0]["end"])))
+            cache[vid] = found
+        return cache[vid]
+
+    @classmethod
+    def _span_taken(cls, spans: list[tuple[float, float]], start: float, end: float) -> bool:
+        """这个区间是不是已经有了。留 `SAME_SPAN` 的容差，不做浮点数裸比较。"""
+        return any(abs(old_start - start) <= cls.SAME_SPAN
+                   and abs(old_end - end) <= cls.SAME_SPAN for old_start, old_end in spans)
+
+    def on_delete_json_checked(self) -> None:
+        """批量删 JSON：勾上的视频，库里的高光 JSON 记录**全部真删**（软删的一并清）。
+
+        成品文件一个都不动——只是它们从此溯源不到 JSON 了（血缘里显示「—」）。
+        JSON 攒太多、想整个清掉重问一次 AI 的时候用这个。
+        """
+        db = self._handle()
+        rows = self._checked_rows()
+        if db is None or not rows:
+            QMessageBox.information(self, "资产中心", "先勾几个视频")
+            return
+        counts = {int(row["id"]): len(db_assets.list_assets(db, int(row["id"]),
+                                                            include_deleted=True))
+                  for row in rows}
+        total = sum(counts.values())
+        if not total:
+            self._note("[高光 JSON] 勾上的视频一份 JSON 都没有，没什么要删的",
+                       "✓ 没有 JSON 可删")
+            return
+        names = "、".join(f"{row['file_name']}（{counts[int(row['id'])]} 份）"
+                         for row in rows[:6] if counts[int(row["id"])])
+        if len(rows) > 6:
+            names += f" 等 {len(rows)} 个视频"
+        ask = QMessageBox(
+            QMessageBox.Warning, "批量删除高光 JSON",
+            f"把这 {total} 份高光 JSON 从库里**彻底删掉**？\n\n{names}\n\n"
+            "已经剪出来的成品文件一个都不动，但它们从此溯源不到 JSON。\n"
+            "这是硬删，不是「移入回收状态」——**删了找不回来**。",
+            QMessageBox.Yes | QMessageBox.No, self)
+        ask.setDefaultButton(QMessageBox.No)
+        if ask.exec_() != QMessageBox.Yes:
+            return
+        done = sum(db_assets.purge_assets_for_video(db, int(row["id"])) for row in rows)
+        self._note(f"[高光 JSON] 已彻底删掉 {done} 份 JSON（成品文件没动）",
+                   f"✓ 已删掉 {done} 份 JSON")
+        self.reload()
+
+    def on_delete_products_checked(self) -> None:
+        """批量删成品：勾上的视频，成品**文件删掉** + 库里的记录清掉。不可逆。
+
+        和「清待重剪」的区别是**不做任何判定**：那个只清「和当前静音配置对不上」的，
+        这个是勾上的视频有几个成品就删几个。方案（高光 JSON）和 AI 结果都留着，
+        清完点「直接剪辑」就能重剪。
+        """
+        db = self._handle()
+        rows = self._checked_rows()
+        if db is None or not rows:
+            QMessageBox.information(self, "资产中心", "先勾几个视频")
+            return
+        targets: list[tuple[Path, str]] = []
+        for row in rows:
+            for product in db_assets.list_products(db, int(row["id"])):
+                path = Path(str(product["path"]))
+                if path.is_file():
+                    targets.append((path, str(row["file_name"])))
+        if not targets:
+            self._note("[成品] 勾上的视频没有还在盘上的成品，没什么要删的",
+                       "✓ 没有成品可删")
+            return
+        sample = "\n".join(f"· {path.name}" for path, _ in targets[:6])
+        more = f"\n… 另外 {len(targets) - 6} 个" if len(targets) > 6 else ""
+        ask = QMessageBox(
+            QMessageBox.Warning, "批量删除成品",
+            f"把这 {len(targets)} 个成品**文件删掉**并清掉库里的记录？\n\n{sample}{more}\n\n"
+            "高光 JSON 和 AI 结果都留着，清完点「直接剪辑」就能重剪一遍。\n"
+            "删文件不进回收站，**找不回来**。",
+            QMessageBox.Yes | QMessageBox.No, self)
+        ask.setDefaultButton(QMessageBox.No)
+        if ask.exec_() != QMessageBox.Yes:
+            return
+        failed: list[str] = []
+        for path, _ in targets:
+            try:
+                path.unlink()
+            except OSError as exc:
+                failed.append(f"{path.name}：{exc}")
+        # 删完再对账：文件没了 -> 记录清掉 -> clips 退回 planned -> 可以重剪
+        db_assets.sync_product_presence(db)
+        cleared = db_assets.purge_missing_products(db)
+        done = len(targets) - len(failed)
+        self._note(f"[成品] 已删掉 {done} 个成品文件，清掉 {cleared} 条记录",
+                   f"✓ 已删掉 {done} 个成品")
+        if failed:
+            self._note("[成品] 有几个删不掉（可能正被占用）：" + "；".join(failed[:3]),
+                       f"⚠ {len(failed)} 个删不掉")
+        self.reload()
 
     # ------------------------------------------------------------ 右键：高光 JSON
     def on_asset_menu(self, pos) -> None:
@@ -2239,12 +3237,18 @@ class VideoAssetsPage(QWidget):
                      if int(i["artifact_id"]) == int(artifact_id)), None)
 
     def on_product_menu(self, pos) -> None:
-        """右键成品：打开 / 定位文件 / 追溯来源 JSON、PRM、完整血缘 / 复制路径。"""
+        """右键成品：打开 / 定位文件 / 追溯来源 JSON、PRM、完整血缘 / 复制路径 / 清理丢失记录。"""
         line = self.tbl_products.rowAt(pos.y())
         if line >= 0:
             self.tbl_products.selectRow(line)
         info = self._product_info(self.selected_product())
+        lost = len(self._lost_products)
         if info is None:
+            if lost:            # 表里一条都不剩、但库里还有丢失记录：至少让人能清掉
+                menu = QMenu(self)
+                menu.addAction(f"清理丢失的成品记录（{lost} 条）",
+                               self.on_forget_lost_products)
+                menu.exec_(self.tbl_products.viewport().mapToGlobal(pos))
             return
         menu = QMenu(self)
         menu.addAction("打开成品", self.on_open_product)
@@ -2258,7 +3262,56 @@ class VideoAssetsPage(QWidget):
         menu.addAction("复制血缘", self.on_copy_lineage)
         menu.addSeparator()
         menu.addAction("复制文件路径", self.on_copy_product_path)
+        menu.addSeparator()
+        menu.addAction("修正实际渲染记录", self.on_repair_product_clips)
+        if lost:
+            menu.addAction(f"清理丢失的成品记录（{lost} 条）", self.on_forget_lost_products)
         menu.exec_(self.tbl_products.viewport().mapToGlobal(pos))
+
+    def on_repair_product_clips(self) -> None:
+        """修历史脏数据：把「被别的 JSON 认领」的实际渲染记录退回去。
+
+        早期版本渲染第一个成品时会把这个视频**所有** planned 片段都标成 rendered 并写上
+        这次的成品路径，于是血缘里的「实际渲染」显示成另一份 JSON 的区间（⚠ 不一致）。
+        只动 clips 的归属，成品文件和 JSON 一个字都不改。
+        """
+        db = self._handle()
+        vid = self.current_video_id()
+        if db is None or vid is None:
+            return
+        try:
+            fixed = db_assets.repair_product_clips(db, vid)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.warning(self, "资产中心", f"修不了：{exc}")
+            return
+        if not fixed:
+            QMessageBox.information(self, "资产中心",
+                                    "这个视频的实际渲染记录都是各归各的，没有要修的")
+            return
+        self._note(f"[成品] 已退回 {fixed} 条被张冠李戴的实际渲染记录（成品文件没动）",
+                   f"✓ 已修正 {fixed} 条实际渲染记录")
+        self.refresh_products()
+        self.refresh_lineage()
+
+    def on_forget_lost_products(self) -> None:
+        """删掉文件已经丢失的成品记录：文件本来就不在盘上，这里只清库里那几行。"""
+        db = self._handle()
+        vid = self.current_video_id()
+        if db is None or vid is None or not self._lost_products:
+            return
+        names = "\n".join(Path(str(i["path"])).name for i in self._lost_products[:10])
+        if QMessageBox.question(
+                self, "资产中心",
+                f"删掉 {len(self._lost_products)} 条文件已丢失的成品记录？\n"
+                "文件本来就不在盘上，这里只清库里的记录（它们的血缘也一起没了）。\n\n"
+                + names,
+                QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+            return
+        gone = db_assets.forget_missing_products(db, vid)
+        self._note(f"[成品] 已清理 {gone} 条丢失的成品记录（文件早就不在盘上）",
+                   f"✓ 已清理 {gone} 条丢失记录")
+        self.refresh_products()
+        self.reload()
 
     def on_open_product(self) -> None:
         """打开成品文件本身（双击成品走的也是这条）。"""
@@ -2537,6 +3590,14 @@ class VideoAssetsPage(QWidget):
         if not count:
             QMessageBox.information(self, "资产中心", "这份 JSON 里抠不出可用片段，不登记")
             return
+        got = ai_protocol.clips(payload)
+        if got:
+            start, end = float(got[0]["start"]), float(got[0]["end"])
+            if self._span_taken(self._spans_of(db, vid, {}), start, end):
+                QMessageBox.information(
+                    self, "资产中心",
+                    f"这个区间（{start:.2f}-{end:.2f}）这个视频已经有一份了，没重复登记。")
+                return
         asset_id = db_assets.create_asset(db, vid, payload, source_type="imported",
                                           note=f"从 {Path(path).name} 导入")
         self._note(f"[高光 JSON] 已登记 #{asset_id}（{count} 个高光，来自 {Path(path).name}）",
@@ -2588,7 +3649,7 @@ class VideoAssetsPage(QWidget):
         self.select_asset(asset_id)
 
     def on_render(self) -> None:
-        """按选中的 JSON 出成品：选 PRM → 交给 `MainWindow.render_asset`（不调 AI）。"""
+        """按选中的 JSON 出成品：交给 `MainWindow.render_asset`（不调 AI，不用 PRM）。"""
         got = self._need_asset()
         if got is None:
             return
@@ -2604,10 +3665,10 @@ class VideoAssetsPage(QWidget):
         if window is None:
             QMessageBox.information(self, "资产中心",
                                     "这个窗口没连上主界面，剪不了。"
-                                    "命令行可以用：run.py assets --render <JSON ID> --prm <PRM>")
+                                    "命令行可以用：run.py assets --render <JSON ID>")
             return
         dialog = RenderDialog(self.cfg, row, window, self, log=self._log)
-        self.notice.emit("开始剪辑…（选好 PRM 点「开始剪辑」，进度在主界面）")
+        self.notice.emit("开始剪辑…（点「开始剪辑」，进度在主界面）")
         if dialog.exec_() == QDialog.Accepted:
             self._note(f"[高光 JSON] #{asset_id} 已交给主界面渲染（进度和日志在主界面）",
                        "✓ 成品已生成（详见主界面日志）")
@@ -2697,7 +3758,11 @@ class VideoAssetsPage(QWidget):
 
 
     def refresh_products(self, *, reload: bool = True) -> None:
-        """成品表。`reload=False` 只是重画（换选中的 JSON 时用），一条 SQL 都不发。"""
+        """成品表。`reload=False` 只是重画（换选中的 JSON 时用），一条 SQL 都不发。
+
+        真查库那次先对一遍成品的在盘状态：「状态」列显示的是库里的 `exists_on_disk`，
+        不对账的话文件早被删了这里还写「✓ 完成」，点开才发现路径不存在。
+        """
         db = self._handle()
         vid = self.current_video_id()
         picked = self.selected_asset()
@@ -2706,14 +3771,29 @@ class VideoAssetsPage(QWidget):
         self.tbl_products.setRowCount(0)
         if db is None or vid is None:
             self._product_rows = None
+            self._lost_products = []
             self._lineage_for = None
             self.tree_lineage.clear()
             self.tbl_products.blockSignals(False)
             self.lbl_product_head.setText("—")
             return
         if reload or self._product_rows is None:
-            self._product_rows = db_assets.products_overview(db, vid)  # 两条 SQL 带出全部成品 + 区间
+            try:
+                db_assets.sync_product_presence(db)
+            except Exception as exc:  # noqa: BLE001 - 对账失败不该让成品表画不出来
+                logger.warning("成品在盘状态对账失败：%s", exc)
+            every = db_assets.products_overview(db, vid)  # 两条 SQL 带出全部成品 + 区间
+            # 文件已经不在盘上的不进表：它除了让人点开一次「文件已经不在盘上」之外没有
+            # 用处。记录仍然留在库里（外接盘没挂上这种是一时的，不能顺手删掉血缘），
+            # 想清理走右键的「清理丢失的成品记录」
+            self._product_rows = [r for r in every if r["exists_on_disk"]]
+            self._lost_products = [r for r in every if not r["exists_on_disk"]]
+            # 每条成品能不能插配音，靠这一列一眼看出来。语音只查一次，整表共用
+            speech = self._speech_for_gaps(db, vid)
+            for info in self._product_rows:
+                info["gaps"] = _span_gaps(speech, info.get("spans"))
         rows = self._product_rows
+
         thumb = self._video_thumb()      # 整表共用一张：成品都是同一个视频剪出来的
         mine: list[str] = []
         for info in rows:
@@ -2743,18 +3823,24 @@ class VideoAssetsPage(QWidget):
                 + ("（已删除）" if info["prm_deleted"] else ""), center=True))
             self.tbl_products.setItem(line, 4, _cell(length, center=True))
             self.tbl_products.setItem(line, 5, _cell(span))
-            self.tbl_products.setItem(line, 6, _cell(_short_time(info["created_at"]),
+            gaps_cell = _cell(_gaps_note(info.get("gaps")), center=True)
+            gaps_cell.setToolTip("原声空隙（成片坐标、>= 0.8 秒）。写「无」的成品第二轮"
+                                 "混剪不能插配音，只能当无旁白素材用")
+            self.tbl_products.setItem(line, 6, gaps_cell)
+            self.tbl_products.setItem(line, 7, _cell(_short_time(info["created_at"]),
                                                      center=True))
-            self.tbl_products.setItem(line, 7, _cell(
+            self.tbl_products.setItem(line, 8, _cell(
                 "✓ 完成" if info["exists_on_disk"] else "⚠ 文件不在盘上", center=True))
         self.tbl_products.resizeColumnsToContents()
         self.tbl_products.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        lost = len(self._lost_products)
+        lost_note = (f"　｜　另有 {lost} 条记录的文件已丢失（右键可清理）" if lost else "")
         if not rows:
             self.tbl_products.blockSignals(False)
             self.tree_lineage.clear()
             self._lineage_for = None
             self.lbl_product_head.setText("当前视频还没有成品 —— 上面选一份高光 JSON，"
-                                          "点「直接剪辑」就能出成品")
+                                          "点「直接剪辑」就能出成品" + lost_note)
             self.lbl_product.setText("当前视频还没有成品，选一份 JSON 剪一次就有了")
             self.tree_lineage.clear()
             self.tree_lineage.addTopLevelItem(QTreeWidgetItem(
@@ -2765,7 +3851,7 @@ class VideoAssetsPage(QWidget):
         if picked is not None:
             head += (f"　｜　选中的高光 JSON #{picked} 剪出了 {len(mine)} 个"
                      + (f"（PRM：{' / '.join(mine)}）" if mine else "：还没剪过，点「直接剪辑」"))
-        self.lbl_product_head.setText(head)
+        self.lbl_product_head.setText(head + lost_note)
         target = 0                       # 选回原来那一行，别让血缘树白重画一遍
         for line in range(self.tbl_products.rowCount()):
             if _row_id(self.tbl_products, line, 1) == keep:
@@ -3027,10 +4113,60 @@ class AssetCenter(QWidget):
         self.btn_invert_checks = QPushButton("反选")
         self.btn_invert_checks.setToolTip("当前列表里勾着的取消、没勾的勾上（不删任何东西）")
         self.btn_invert_checks.clicked.connect(self.videos.on_invert_checks)
+        self.btn_stale = QPushButton("清待重剪")
+        self.btn_stale.setToolTip("挑出勾上的视频里「和当前静音配置对不上」的成品："
+                                  "把文件删掉、库里的记录清掉，好按现在的配置重剪一遍。\n"
+                                  "判定和「提取数据」那句警告用的是同一个口径，"
+                                  "所以那里报几条这里就清几条。\n"
+                                  "方案和 AI 结果都留着，重剪不用再问 AI。删文件不可逆，会先问你")
+        self.btn_stale.clicked.connect(self.videos.on_purge_stale_products)
+        self.btn_import_json = QPushButton("导入 JSON")
+        self.btn_import_json.setToolTip("批量导入高光 JSON：粘贴文字 / 拖文件进来 / 选文件都行，"
+                                        "一份也认、一堆也认。\n"
+                                        "两种形状都吃：完整方案（带 clip / segments）直接登记；"
+                                        "AI 的结果清单（只有 setup_at / result_at 两个时间点）"
+                                        "由程序按库里的逐词时间戳现算区间——"
+                                        "和 AI 自动接收、命令行 import-moments 同一个实现。\n"
+                                        "每一份自己找归属（先认里面写的 video，再认文件名），"
+                                        "都认不出来才落到列表里选中的那个视频上。不用先勾视频")
+        self.btn_import_json.clicked.connect(self.videos.on_import_batch)
+        self.btn_drop_json = QPushButton("删 JSON")
+        self.btn_drop_json.setToolTip("把勾上的视频的高光 JSON 记录**彻底删掉**（软删的一并清）。"
+                                      "成品文件一个不动，但它们从此溯源不到 JSON。"
+                                      "硬删，删了找不回来，会先问你")
+        self.btn_drop_json.clicked.connect(self.videos.on_delete_json_checked)
+        self.btn_drop_products = QPushButton("删成品")
+        self.btn_drop_products.setToolTip("把勾上的视频的成品**文件删掉**并清掉库里的记录。"
+                                         "和「清待重剪」不同：这里不做任何判定，有几个删几个。"
+                                         "高光 JSON 和 AI 结果都留着，清完能直接重剪。"
+                                         "删文件不可逆，会先问你")
+        self.btn_drop_products.clicked.connect(self.videos.on_delete_products_checked)
+        self.btn_scripts = QPushButton("导出剧本")
+        self.btn_scripts.setToolTip("把勾上的视频的**完整剧本正文**导出成 txt。\n"
+                                    "导出前问你要哪种：合并成一份"
+                                    "（整批通读 / 一次性喂 AI），"
+                                    "还是每个视频一份 <视频名>_剧本.txt。\n"
+                                    "和右边「提取数据」是两回事：那个导的是成品溯源的一行 JSON"
+                                    "（第二轮混剪的输入），这个导的是人看的剧本"
+                                    "（画面 + 语音逐行排版）。\n"
+                                    "内容只来自数据库，没分析过的视频跳过")
+        self.btn_scripts.clicked.connect(self.videos.on_export_scripts_checked)
+        self.btn_extract = QPushButton("提取数据")
+        self.btn_extract.setToolTip("按成品溯源导出：勾上的视频有几个**还在盘上的成品**就几行，"
+                                    "每行用的是那个成品当时挂的高光 JSON；"
+                                    "没有成品的视频整个跳过。留 timeline"
+                                    "（duration / score / type）+ o 挂字 + t 描述，"
+                                    "末尾带 startframe / freeze。duration 是实际剪进去的"
+                                    "区间长度，和成品文件名同一个口径。每行还带 gaps"
+                                    "（原声空隙），没空隙的素材第二轮插不了配音，导出前"
+                                    "会问你要不要只导有空隙的。只读库，不动文件")
+        self.btn_extract.clicked.connect(self.videos.on_extract_checked)
         batch = QHBoxLayout()
         batch.addWidget(self.lbl_checked)
         for button in (self.btn_check_all, self.btn_rename, self.btn_copy_files,
-                       self.btn_forget, self.btn_invert_checks):
+                       self.btn_forget, self.btn_invert_checks, self.btn_import_json,
+                       self.btn_drop_json, self.btn_drop_products, self.btn_stale,
+                       self.btn_scripts, self.btn_extract):
             batch.addWidget(button)
         batch.addStretch(1)
         self.videos.checks_changed.connect(self.on_checks_changed)
@@ -3162,10 +4298,11 @@ class AssetCenter(QWidget):
         self.reload()
 
     def on_checks_changed(self, count: int) -> None:
-        """勾选数一变：按钮该灰的灰（没勾就只有「全选」「反选」能点）。"""
+        """勾选数一变：按钮该灰的灰（没勾就只有「全选」「反选」「导入 JSON」能点）。"""
         self.lbl_checked.setText(f"勾选 {count} 个")
         self.btn_rename.setEnabled(count == 1)
-        for button in (self.btn_copy_files, self.btn_forget):
+        for button in (self.btn_copy_files, self.btn_forget, self.btn_extract,
+                       self.btn_scripts, self.btn_drop_json, self.btn_drop_products):
             button.setEnabled(count > 0)
 
     # ------------------------------------------------------------ 顶部状态
@@ -3260,6 +4397,9 @@ class AssetCenter(QWidget):
 
     def on_import(self) -> None:
         self.videos.on_import()
+
+    def on_import_batch(self) -> None:
+        self.videos.on_import_batch()
 
     def on_set_current(self) -> None:
         self.videos.on_set_current()

@@ -20,6 +20,12 @@ mp4；下一次开程序 `_sync_disk()` 把它登记成 final_video，`_auto_don
   T9  孤儿任务 + .part + 已有 AI 结果 -> 不问 AI，直接重新渲染（Batch 2 联动）
   T10 完整成品 + 已有 AI 结果     -> 正常识别成品、结算 completed，不重剪不重问
 
+多段拼接（`render_highlight(..., keep_spans=[...])`，长静音剪掉后剩下的保留片段）：
+  T14 不给 keep_spans / 只给一段  -> 成品和以前逐字节一样（老路一个字节都没动）
+  T15 给两段                      -> 逐段拼接，中间那截真的不在成品里了
+  T16 给两段                      -> 音轨和画面一样长，声音也跟着挪到剪完之后的位置
+
+
 功能测试直接调 `MainWindow` 上的真方法（绑到轻量替身上，不建窗口），`_sync_disk`
 用的是**真的**磁盘对账，只有渲染 / 发 AI 这些叶子调用换成计数替身。
 全部用临时目录里的临时库，**绝不碰项目真实数据库**。
@@ -31,10 +37,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 from fractions import Fraction
 from pathlib import Path
+
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -52,7 +60,10 @@ from vidscribe.gui import main_window as mw                   # noqa: E402
 from vidscribe.highlight import clip as clip_mod              # noqa: E402
 from vidscribe.video_io import is_complete_video, probe_video  # noqa: E402
 
-GOOD_JSON = {"clip": {"start": 0.0, "end": 0.32, "score": 0.9, "type": "hook", "reason": "r"}}
+#: 一份**新协议**的高光 JSON（唯一认的写法，见 src/vidscribe/ai_protocol.py）：
+#: 剪辑区间在 segments[0].sa / .end（原视频时间），文案在 timeline
+GOOD_JSON = {"timeline": {"duration": 0.32, "score": 0.9, "type": "hook", "reason": "r"},
+             "segments": [{"sa": 0.0, "end": 0.32, "dst": [0.0, 0.32]}]}
 LONG_AGO = "2000-01-01T00:00:00"
 FINAL_TAIL = "_高光时刻.mp4"
 
@@ -74,6 +85,9 @@ def make_project(tmp_path: Path):
     data["bridge"]["ai_input_dir"] = str(tmp_path / "input")
     data["bridge"]["ai_output_dir"] = str(tmp_path / "ai_out")
     data["bridge"]["ai_job"] = "full"
+    # 「不跑成品」按出厂默认（勾上）钉死：夹具是拷仓库根 config.json 来的，
+    # 不钉的话开发机上在界面把这个勾取消过，测试就跟着一起红
+    data["bridge"]["skip_done_products"] = True
     cfg_file = tmp_path / "config.json"
     cfg_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
     cfg = Config.load(tmp_path, cfg_file)
@@ -135,6 +149,124 @@ def spec_for(video: Path) -> clip_mod.HighlightSpec:
         video_name=video.name, clip_start=0.0, clip_end=0.32, raw={})
 
 
+def spec_between(video: Path, start: float, end: float) -> clip_mod.HighlightSpec:
+    """多段拼接要一段够长的区间，`spec_for` 那 0.32 秒装不下两段 + 中间的空档。"""
+    return clip_mod.HighlightSpec(
+        video_name=video.name, clip_start=start, clip_end=end, raw={})
+
+
+#: 长素材：每一帧的灰度 = 帧号 * FRAME_STEP，解出来就知道"这是源视频第几帧"
+FRAME_STEP = 2
+#: 长素材的音轨只在这一小段有声音（源时间），其余全静音：
+#: 它落在第二段保留片段的**开头**，所以成品里它必须挪到"第一段之后"，不能还在原来那个时刻
+TONE_SPAN = (2.0, 2.4)
+
+
+def joined_source(cfg, name: str = "join.mp4", seconds: float = 5.0, size: int = 64,
+                  fps: int = 25, rate: int = 44100) -> Path:
+    """现场编一份 5 秒、带音轨的素材：画面认得出帧号，声音只在 TONE_SPAN 那一小段响。
+
+    多段拼接必须两头都能验：画面靠灰度反推源帧号（拼缝后面接的到底是哪一帧），
+    音频靠"那一声在成品里的哪个时刻"反推音轨有没有跟着画面一起剪。
+    `real_mp4` 是无声的，验不了音画对齐，所以另起一份。
+    """
+    path = cfg.path("input_dir") / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frames = int(round(seconds * fps))
+    with av.open(str(path), mode="w", format="mp4") as container:
+        video_stream = container.add_stream("libx264", rate=fps)
+        video_stream.width = size
+        video_stream.height = size
+        video_stream.pix_fmt = "yuv420p"
+        video_stream.codec_context.time_base = Fraction(1, fps)
+        # 纯灰度平面 + crf 低一点：yuv420p 往返后灰度还认得出帧号
+        video_stream.options = {"crf": "12", "preset": "ultrafast"}
+        audio_stream = container.add_stream("aac", rate=rate)
+        audio_stream.codec_context.layout = "stereo"
+        for index in range(frames):
+            arr = np.full((size, size, 3), (index * FRAME_STEP) % 256, dtype=np.uint8)
+            frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
+            frame.pts = index
+            for packet in video_stream.encode(frame):
+                container.mux(packet)
+        total = int(round(seconds * rate))
+        clock = np.arange(total, dtype=np.float32) / rate
+        wave = np.zeros(total, dtype=np.float32)
+        loud = (clock >= TONE_SPAN[0]) & (clock < TONE_SPAN[1])
+        wave[loud] = 0.6 * np.sin(2 * np.pi * 440.0 * clock[loud])
+        pcm = np.vstack([wave, wave])
+        block = 1024
+        fed = 0
+        for offset in range(0, total, block):
+            chunk = np.ascontiguousarray(pcm[:, offset:offset + block])
+            audio_frame = av.AudioFrame.from_ndarray(chunk, format="fltp", layout="stereo")
+            audio_frame.sample_rate = rate
+            audio_frame.time_base = Fraction(1, rate)
+            audio_frame.pts = fed
+            fed += audio_frame.samples
+            for packet in audio_stream.encode(audio_frame):
+                container.mux(packet)
+        for packet in video_stream.encode():
+            container.mux(packet)
+        for packet in audio_stream.encode():
+            container.mux(packet)
+    assert probe_video(path).has_audio, "这份素材必须真的有音轨，否则音画对齐无从验起"
+    return path
+
+
+def rgb_frames(path: Path) -> list:
+    with av.open(str(path)) as container:
+        return [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
+
+
+def source_frame_index(rgb) -> int:
+    """从成品的一帧反推它在源视频里是第几帧（灰度 / FRAME_STEP）。"""
+    return int(round(float(rgb.mean()) / FRAME_STEP))
+
+
+def mono_pcm(path: Path, rate: int = 44100):
+    """把成品音轨解成单声道 float32，用来看"哪一段时间有声音"。"""
+    chunks = []
+    with av.open(str(path)) as container:
+        stream = container.streams.audio[0]
+        resampler = av.AudioResampler(format="fltp", layout="mono", rate=rate)
+        for frame in container.decode(stream):
+            for resampled in resampler.resample(frame):
+                chunks.append(resampled.to_ndarray()[0])
+        for resampled in resampler.resample(None):
+            if resampled is not None and resampled.samples:
+                chunks.append(resampled.to_ndarray()[0])
+    return np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+
+
+def window_rms(pcm, start: float, end: float, rate: int = 44100) -> float:
+    piece = pcm[int(start * rate):int(end * rate)]
+    return float(np.sqrt(np.mean(np.square(piece)))) if piece.size else 0.0
+
+
+def stream_seconds(path: Path, kind: str) -> float:
+    """单独读一条流的时长：优先 ffprobe，机器上没这东西就退回 PyAV 自己算。
+
+    音画对齐要的是"视频流多长、音频流多长"两个独立的数，容器总时长掩盖不了错位。
+    """
+    select = "v:0" if kind.startswith("v") else "a:0"
+    try:
+        done = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", select,
+             "-show_entries", "stream=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60)
+        value = done.stdout.strip().splitlines()[0].strip() if done.stdout.strip() else ""
+        if done.returncode == 0 and value and value != "N/A":
+            return float(value)
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        pass
+    with av.open(str(path)) as container:
+        streams = container.streams.video if kind.startswith("v") else container.streams.audio
+        stream = streams[0]
+        return float(stream.duration * stream.time_base)
+
+
+
 def orphan_task(cfg, db, video: Path, mode: str = "full", *, merged_txt: bool = False):
     """造一条"上次崩在 processing"的任务：心跳停在过去，盘上没有成品。"""
     vid = db_repo.upsert_video(db, video)
@@ -172,6 +304,10 @@ class Win:
     _skip_because_done = mw.MainWindow._skip_because_done
     skip_done_products = mw.MainWindow.skip_done_products
     _language_blocked = mw.MainWindow._language_blocked
+    # 分析完一句语音都没有的视频不发 AI（没人说话 = 没互动，也算不出区间）
+    _silent_video = mw.MainWindow._silent_video
+    # 文件里根本没音轨的视频连队都不排（没声音 = 没剧本）
+    _mute_video = mw.MainWindow._mute_video
     _reusable_highlight_json = mw.MainWindow._reusable_highlight_json
     script_payload = mw.MainWindow.script_payload
     _auto_product_ready = mw.MainWindow._auto_product_ready
@@ -486,39 +622,182 @@ def test_complete_product_short_circuits(tmp_path: Path) -> None:
     db.close()
 
 
-# ------------------------------------------------------------------ T11
-def test_render_appends_a_red_tail(tmp_path: Path) -> None:
-    """成品 = 播放段 + 1 秒纯红背景；红屏之前那一帧还不是红的；没有冻帧、字幕、音效。"""
+# ------------------------------------------------------------------ T12
+def test_render_stops_at_the_clip_end(tmp_path: Path) -> None:
+    """默认（不冻帧）：成品就是播放段本身，一帧都不多追加。"""
     cfg, db = make_project(tmp_path)
     video = source_video(cfg)
     target = clip_mod.default_target(Path(str(cfg.bridge["ai_output_dir"])), video)
     result = clip_mod.render_highlight(video, spec_for(video), target)
 
-    tail = int(result["red_tail_frames"])
-    assert abs(float(result["red_tail_seconds"]) - 1.0) < 1e-6, "片尾就该是 1 秒"
-    assert tail == max(1, int(round(result["fps"]))), f"1 秒该是 {result['fps']} 帧：{tail}"
-    for gone in ("sfx", "freeze_frames", "freeze_time", "text"):
+    assert int(result["freeze_frames"]) == 0, "默认不冻帧"
+    assert result["total_frames"] == result["play_frames"], "总帧数就该等于播放帧数"
+    for gone in ("sfx", "freeze_time", "text"):
         assert gone not in result, f"{gone} 已经删掉了，统计里不该再有它"
 
     frames = []
     with av.open(str(target)) as container:
         for frame in container.decode(video=0):
             frames.append(frame.to_ndarray(format="rgb24"))
-    assert len(frames) == result["play_frames"] + tail, f"帧数不对：{len(frames)} vs {result}"
+    assert len(frames) == result["play_frames"], f"帧数不对：{len(frames)} vs {result}"
+    db.close()
 
-    def is_red(rgb) -> bool:
-        # yuv420p 往返会有几个数值的偏差，给宽一点的容差
-        return bool(rgb[..., 0].min() > 200 and rgb[..., 1].max() < 80
-                    and rgb[..., 2].max() < 80)
 
-    for index, rgb in enumerate(frames[-tail:]):
-        assert is_red(rgb), f"片尾第 {index} 帧不是纯红"
-    assert not is_red(frames[-tail - 1]), "红屏之前那一帧不该已经是红的"
+
+# ------------------------------------------------------------------ T13
+def test_freeze_tail_repeats_the_last_frame(tmp_path: Path) -> None:
+    """末帧冻结 2 秒：区间不变，成品多出 2 秒静止画面，且每一帧都等于播放段最后一帧。"""
+    cfg, db = make_project(tmp_path)
+    video = source_video(cfg)
+    target = clip_mod.default_target(Path(str(cfg.bridge["ai_output_dir"])), video)
+    result = clip_mod.render_highlight(video, spec_for(video), target,
+                                      freeze_seconds=2.0)
+
+    fps = float(result["fps"])
+    freeze = int(result["freeze_frames"])
+    assert freeze == max(1, int(round(fps * 2.0))), f"2 秒该是 {fps * 2} 帧：{freeze}"
+    assert abs(float(result["freeze_seconds"]) - 2.0) < 1e-6, result
+    assert result["total_frames"] == result["play_frames"] + freeze, result
+    # 剪辑区间一点没变：冻帧是额外追加的，不吃 spec 的时长预算
+    assert result["target_duration_seconds"] == round(spec_for(video).duration, 3), result
+
+    frames = []
+    with av.open(str(target)) as container:
+        for frame in container.decode(video=0):
+            frames.append(frame.to_ndarray(format="rgb24"))
+    assert len(frames) == result["play_frames"] + freeze, f"帧数不对：{len(frames)}"
+    last_play = frames[result["play_frames"] - 1]
+    for index, rgb in enumerate(frames[-freeze:]):
+        # yuv420p 往返有几个数值的偏差，比"完全相等"松一点
+        assert int(abs(rgb.astype(int) - last_play.astype(int)).max()) <= 12, \
+            f"冻帧第 {index} 帧和播放段最后一帧不一样"
+    db.close()
+
+
+# ------------------------------------------------------------------ T14
+def test_render_without_keep_spans_is_unchanged(tmp_path: Path) -> None:
+    """老路一个字节都不许动：不给 keep_spans、以及只给一段（就是 spec 那个区间），
+    出来的文件必须和"没有多段拼接这回事"的时候完全一样。
+
+    比较的前提是编码本身可重复，所以先连渲两遍证明同一份输入出同一份字节，
+    再拿"给了一段"的成品去比 —— 不然 byte 相等只是碰巧。
+    """
+    cfg, db = make_project(tmp_path)
+    video = source_video(cfg)
+    out = Path(str(cfg.bridge["ai_output_dir"]))
+    spec = spec_for(video)
+
+    plain = clip_mod.render_highlight(video, spec, out / "plain.mp4")
+    again = clip_mod.render_highlight(video, spec, out / "again.mp4")
+    assert (out / "plain.mp4").read_bytes() == (out / "again.mp4").read_bytes(), \
+        "同一份输入渲两遍就该一模一样，否则下面的逐字节比较没有意义"
+
+    single = clip_mod.render_highlight(video, spec, out / "single.mp4",
+                                      keep_spans=[(spec.clip_start, spec.clip_end)])
+    assert (out / "single.mp4").read_bytes() == (out / "plain.mp4").read_bytes(), \
+        "只有一段时必须走老路，成品逐字节等价"
+
+    assert plain["pieces"] == 1 and single["pieces"] == 1
+    assert plain["trimmed_seconds"] == 0.0, "没给 keep_spans 就一秒都没剪"
+    # 除了落点和"少剪了多少"，统计里其它每一项的含义和数值都不许因为这个新参数变样
+    movable = {"output", "trimmed_seconds"}
+    assert {k: v for k, v in plain.items() if k not in movable} \
+        == {k: v for k, v in single.items() if k not in movable}, (plain, single)
+    # 冻帧那一路也一起过一遍：加了参数不代表默认行为会漂
+    frozen = clip_mod.render_highlight(video, spec, out / "frozen.mp4", freeze_seconds=2.0)
+    assert frozen["freeze_frames"] == int(round(frozen["fps"] * 2.0))
+    assert frozen["pieces"] == 1 and frozen["trimmed_seconds"] == 0.0
+    db.close()
+
+
+# ------------------------------------------------------------------ T15
+def test_keep_spans_joins_pieces_in_order(tmp_path: Path) -> None:
+    """两段保留片段：成品 = 两段之和，中间那截真的不在里面了。
+
+    画面靠灰度反推源帧号：拼缝之后接的必须是第二段的第一帧（源第 50 帧），
+    要是渲染偷懒按 spec 区间一路顺着读，那儿会是第 30 帧。
+    """
+    cfg, db = make_project(tmp_path)
+    video = joined_source(cfg)
+    spec = spec_between(video, 0.4, 3.6)
+    spans = [(0.4, 1.2), (2.0, 3.6)]
+    seen: list[tuple[int, int, str]] = []
+    target = clip_mod.default_target(Path(str(cfg.bridge["ai_output_dir"])), video)
+    result = clip_mod.render_highlight(video, spec, target, keep_spans=spans,
+                                       on_progress=lambda done, total, stage:
+                                       seen.append((done, total, stage)))
+
+    fps = float(result["fps"])
+    tolerance = 1.0 / fps                      # 容差按一帧算，不写死秒数
+    keep_seconds = sum(end - start for start, end in spans)
+    assert result["pieces"] == 2, result
+    assert abs(result["duration_seconds"] - keep_seconds) <= tolerance, result
+    assert abs(result["trimmed_seconds"] - (spec.duration - keep_seconds)) <= 1e-6, result
+    # 这几个键说的都是"成品里实际有多少"：没冻帧，所以总帧数就是拼完的播放帧数
+    assert result["total_frames"] == result["play_frames"], result
+    assert result["freeze_frames"] == 0, result
+    assert abs(result["play_frames"] - keep_seconds * fps) <= 1, result
+
+    frames = rgb_frames(target)
+    assert len(frames) == result["total_frames"], f"帧数不对：{len(frames)} vs {result}"
+    first_piece = int(round(spans[0][0] * fps)), int(round((spans[0][1] - spans[0][0]) * fps))
+    seam = int(round(spans[1][0] * fps))
+    assert abs(source_frame_index(frames[0]) - first_piece[0]) <= 1, "第一帧该是第一段的开头"
+    assert abs(source_frame_index(frames[first_piece[1] - 1])
+               - (first_piece[0] + first_piece[1] - 1)) <= 1, "第一段的末帧该是它自己的末帧"
+    assert abs(source_frame_index(frames[first_piece[1]]) - seam) <= 1, \
+        "拼缝后面必须直接跳到第二段，中间被剪掉的部分一帧都不许留"
+    assert abs(source_frame_index(frames[-1])
+               - (seam + result["play_frames"] - first_piece[1] - 1)) <= 1
+
+    # 进度只许往前推：段边界上不能重置，总帧数也不能变
+    assert seen and [d for d, _, _ in seen] == sorted(d for d, _, _ in seen), "进度不许回跳"
+    assert len({total for _, total, _ in seen}) == 1, "总帧数一路都是同一个数"
+    assert seen[-1][0] == result["total_frames"] == seen[-1][1]
+    db.close()
+
+
+# ------------------------------------------------------------------ T16
+def test_keep_spans_keeps_audio_aligned(tmp_path: Path) -> None:
+    """音画对齐：音轨和画面一样长，而且那一声跟着画面一起挪了位置。
+
+    素材的声音只在源 2.0→2.4 响，正好是第二段的开头；成品里第二段从 0.8 秒开始，
+    所以那一声必须落在成品 0.8→1.2。要是只剪了画面、音频还按 0.4→2.8 连着抽，
+    它会出现在 1.6 秒附近 —— 这一条就是专门盯这种"只剪画面不剪声音"的。
+    """
+    cfg, db = make_project(tmp_path)
+    video = joined_source(cfg)
+    spec = spec_between(video, 0.4, 3.6)
+    spans = [(0.4, 1.2), (2.0, 3.6)]
+    target = clip_mod.default_target(Path(str(cfg.bridge["ai_output_dir"])), video)
+    result = clip_mod.render_highlight(video, spec, target, keep_spans=spans,
+                                       freeze_seconds=1.0)
+
+    video_seconds = stream_seconds(target, "video")
+    audio_seconds = stream_seconds(target, "audio")
+    assert abs(video_seconds - audio_seconds) <= 0.1, \
+        f"音画长度不一致：视频 {video_seconds:.3f}s / 音频 {audio_seconds:.3f}s"
+    assert abs(video_seconds - result["duration_seconds"]) <= 0.1, (video_seconds, result)
+
+    pcm = mono_pcm(target)
+    played = result["play_frames"] / float(result["fps"])       # 第二段结束、冻帧开始
+    tone_at = (spans[0][1] - spans[0][0]) + (TONE_SPAN[0] - spans[1][0])   # 成品里那一声的起点
+    tone_len = TONE_SPAN[1] - TONE_SPAN[0]
+    guard = 0.06        # aac 首尾会糊一点，边界各让 60ms
+    loud = window_rms(pcm, tone_at + guard, tone_at + tone_len - guard)
+    before = window_rms(pcm, guard, tone_at - guard)
+    after = window_rms(pcm, tone_at + tone_len + guard, played - guard)
+    freeze = window_rms(pcm, played + guard, result["duration_seconds"] - guard)
+    assert loud > 0.05, f"那一声该在成品 {tone_at:.2f}s 起响，实测 RMS={loud:.4f}"
+    assert before < 0.02, f"第一段本来是静音的，却有声音：RMS={before:.4f}"
+    assert after < 0.02, f"那一声之后应当又静下来，实测 RMS={after:.4f}（音频没跟着剪？）"
+    assert freeze < 0.02, f"冻帧段必须纯静音，实测 RMS={freeze:.4f}"
     db.close()
 
 
 # ------------------------------------------------------------------ 直接跑
 TESTS = (
+
     test_half_baked_mp4_is_not_a_product,
     test_zero_byte_is_not_a_product,
     test_tiny_broken_mp4_is_not_a_product,
@@ -529,8 +808,13 @@ TESTS = (
     test_orphan_with_part_leftover_is_re_rendered,
     test_orphan_with_part_and_ai_result_renders_without_ai,
     test_complete_product_short_circuits,
-    test_render_appends_a_red_tail,
+    test_render_stops_at_the_clip_end,
+    test_freeze_tail_repeats_the_last_frame,
+    test_render_without_keep_spans_is_unchanged,
+    test_keep_spans_joins_pieces_in_order,
+    test_keep_spans_keeps_audio_aligned,
 )
+
 
 
 def main() -> int:

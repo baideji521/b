@@ -10,6 +10,17 @@ IMPORTANCE_ORDER = {"low": 0, "normal": 1, "high": 2, "critical": 3}
 TIMESTAMP_SOURCES = ("frame_based", "hybrid", "model_estimated")
 
 
+def _known_only(cls: type, data: dict) -> dict:
+    """只留这个 dataclass 认识的键。
+
+    缓存是**可再生的旁路数据**：一份旧缓存里完全可能带着后来删掉的字段（比如视觉事件
+    以前有 `emotion_intensity`）。硬解 `Cls(**data)` 时多一个键就 TypeError，整条视频的
+    分析当场失败——一个历史字段不该有这个杀伤力。多的键一律忽略，缺的键走默认值。
+    """
+    fields = set(getattr(cls, "__dataclass_fields__", {}))
+    return {k: v for k, v in data.items() if k in fields}
+
+
 @dataclass
 class VisualEvent:
     id: int
@@ -30,12 +41,27 @@ class VisualEvent:
     # --- 画面情绪（视觉模型在同一次推理里顺便给出；未开启时全为 None）---
     emotion: str | None = None            # 中文显示名
     emotion_en: str | None = None         # 英文小写标签，取自 prompts.VISUAL_EMOTIONS
-    emotion_intensity: float | None = None
+    # 这个情绪判断的置信度（0~1）。人脸模型给的是 top-1 softmax 概率（visual/face.py），
+    # 视觉大模型给的是它自报的确信程度——两边都是"有多确定"，不是"表情有多强烈"。
+    emotion_confidence: float | None = None
     # 情绪是谁判的：face=人脸专用模型（visual/face.py），model=视觉大模型顺带给的
     emotion_source: str | None = None
     # --- 最终自然语言层的记录 ---
     description_language: str | None = None
     language_fallback: bool = False
+
+    @classmethod
+    def from_cache(cls, data: dict) -> VisualEvent:
+        """从缓存 JSON 还原一个事件：不认识的键直接忽略（见 `_known_only`）。
+
+        `emotion_intensity` 是 `emotion_confidence` 的旧名（存的一直是"有多确定"，
+        改名是因为 intensity 会被读成"表情多强烈"）。老缓存和老库里还是旧名，
+        不认这个别名的话，老结果的画面情绪数字会整个消失——不是显示成 0，是不显示。
+        """
+        known = _known_only(cls, data)
+        if known.get("emotion_confidence") is None and data.get("emotion_intensity") is not None:
+            known["emotion_confidence"] = data["emotion_intensity"]
+        return cls(**known)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -56,6 +82,11 @@ class SpeechWord:
     end: float
     probability: float | None = None
 
+    @classmethod
+    def from_cache(cls, data: dict) -> SpeechWord:
+        """从缓存 JSON 还原一个词：不认识的键直接忽略（见 `_known_only`）。"""
+        return cls(**_known_only(cls, data))
+
 
 @dataclass
 class SpeechEvent:
@@ -73,7 +104,7 @@ class SpeechEvent:
     # 按句切分时拿不到词级时间戳，时间是按字数摊出来的（正常路径都是 False）
     time_estimated: bool = False
     # ct-punc 给这一段补过标点（punctuate.py 写入）。字段必须在这儿声明：
-    # pipeline 复用缓存时会 SpeechEvent(**seg)，多一个键就直接 TypeError。
+    # pipeline 复用缓存时会走 `SpeechEvent.from_cache`，认识的键才会被喂进来。
     punctuation_restored: bool = False
 
     # 说话人（speech/speakers.py 写入；未开启声纹或判不出时为 None）。
@@ -88,6 +119,14 @@ class SpeechEvent:
     emotion_intensity: float | None = None
     emotion_scores: dict | None = None
     words: list[SpeechWord] = field(default_factory=list)
+
+    @classmethod
+    def from_cache(cls, data: dict) -> SpeechEvent:
+        """从缓存 JSON 还原一句：不认识的键忽略，`words` 逐词也照同一规矩还原。"""
+        known = _known_only(cls, data)
+        known["words"] = [SpeechWord.from_cache(w) if isinstance(w, dict) else w
+                          for w in (data.get("words") or ())]
+        return cls(**known)
 
     def __post_init__(self) -> None:
         if self.original_text is None:
@@ -154,13 +193,13 @@ def _absorb(keep: VisualEvent, other: VisualEvent) -> VisualEvent:
         keep.scene = other.scene
     if other.subjects:
         keep.subjects = sorted(set(keep.subjects) | set(other.subjects))
-    # 画面情绪：合并后的这一段取更强烈的那个（合并的前提是两段本来就是同一状态）
-    other_i = other.emotion_intensity if other.emotion_intensity is not None else -1.0
-    keep_i = keep.emotion_intensity if keep.emotion_intensity is not None else -1.0
-    if other.emotion and other_i > keep_i:
+    # 画面情绪：合并后的这一段取置信度更高的那个（合并的前提是两段本来就是同一状态）
+    other_c = other.emotion_confidence if other.emotion_confidence is not None else -1.0
+    keep_c = keep.emotion_confidence if keep.emotion_confidence is not None else -1.0
+    if other.emotion and other_c > keep_c:
         keep.emotion = other.emotion
         keep.emotion_en = other.emotion_en
-        keep.emotion_intensity = other.emotion_intensity
+        keep.emotion_confidence = other.emotion_confidence
     keep.language_fallback = keep.language_fallback or other.language_fallback
     frames = sorted(set(keep.source_frames) | set(other.source_frames))
     keep.source_frames = frames

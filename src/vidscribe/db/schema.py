@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 10
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
 TASK_STATES = ("pending", "uploading", "waiting", "processing",
@@ -75,6 +75,9 @@ TABLES: tuple[str, ...] = (
         -- 语言预检判出来、又不在 speech.allowed_languages 里的那个语言码（比如 'id'）。
         -- 非空 = 这条视频以后不再自动跑（手动点分析仍会重新预检并当场终止）
         blocked_language TEXT,
+        -- 音轨预检的结论：1 = 这个文件里根本没有音轨，0 = 有，NULL = 还没探过。
+        -- 1 的不再排进自动剪辑（没声音就没剧本、没高光），也能被「清空无声音视频」清走
+        no_audio       INTEGER,
         created_at     TEXT    NOT NULL,
         updated_at     TEXT    NOT NULL
     )
@@ -170,6 +173,7 @@ TABLES: tuple[str, ...] = (
     # --- 人脸表情轨 -------------------------------------------------------
     # 剧本 SECTION 3 的唯一权威来源。视觉事件上的 emotion_* 是"事件粒度的覆盖值"，
     # 这里是人脸模型 2fps 采样归并出的独立时间轴，两者粒度和语义都不同，不能互相推算。
+    # confidence 是分类置信度（段内 top-1 softmax 概率的平均），不是"表情强弱"。
     # raw_json 存整段原始 span：以后 face 模型多给字段，不用再动 schema。
     """
     CREATE TABLE IF NOT EXISTS expression_spans (
@@ -179,7 +183,7 @@ TABLES: tuple[str, ...] = (
         start_time  REAL,
         end_time    REAL,
         emotion_en  TEXT,
-        intensity   REAL,
+        confidence  REAL,
         samples     INTEGER,
         raw_json    TEXT
     )
