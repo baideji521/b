@@ -1814,8 +1814,10 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
             canvas=canvas, backend=backend, name=args.name or "",
             recommend_enabled=not args.no_recommend, manual=manual,
             render_video=not args.plan_only,
+            pool_size=int(args.pool or cfg.dance["candidate_pool_size"]),
             spec=selection.preset_spec(args.preset) if args.preset else None,
             on_log=lambda line: print(line))
+
         bad = [v for v, r in made if not (r.ok or args.plan_only)]
         for version_id, result in made:
             for line in montage_render.describe(result):
@@ -2102,6 +2104,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_dance.add_argument("--position", type=int, default=None, help="只看某一个音乐位置")
     p_dance.add_argument("--person", nargs="*", default=None, help="只看某几个人物")
     p_dance.add_argument("--limit", type=int, default=None, help="列表最多显示几行")
+    p_dance.add_argument("--pool", type=int, default=None, metavar="N",
+                         help="每个音乐位置预取多少条素材进候选池再打分"
+                              "（默认取 dance.candidate_pool_size；调小会让新素材在打分前就被丢掉）")
+
     p_dance.add_argument("--name", default=None, help="这次混剪的名字")
     p_dance.add_argument("--manual", default=None, metavar="JSON",
                          help='纯手动选择：一个 {"位置": 素材id} 的 json 文件，配 --no-recommend')

@@ -22,7 +22,14 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dance_fixtures import fake_library, fake_material, make_project   # noqa: E402
+from dance_fixtures import (                                           # noqa: E402
+    fake_library,
+    fake_material,
+    fake_song,
+    fake_video,
+    make_project,
+)
+
 from vidscribe.dance import combination_search as search               # noqa: E402
 from vidscribe.dance import material_score as score_mod                # noqa: E402
 from vidscribe.dance import material_selection as selection            # noqa: E402
@@ -293,18 +300,112 @@ def test_repeat_rates_are_honest(work: Path) -> None:
         db.close()
 
 
+def test_candidate_pool_is_not_truncated_by_insertion_order(work: Path) -> None:
+    """候选池的**预取**上限不许按入库顺序砍 —— 否则新切的素材在打分前就被扔掉。
+
+    这是真踩过的坑：`sort="score_desc"` 时 SQL 排不了分（分要读历史），
+    如果那一档的 ORDER BY 写成 `m.id ASC`，`LIMIT N` 就等于"库里最早的 N 条"，
+    某个位置素材一多，从未使用的新素材永远进不了候选池。
+    """
+    cfg, db = make_project(work)
+    try:
+        song_id = fake_song(db, title="很多素材")
+        # 12 条素材全在位置 0：前 6 条（id 小）已经用烂了，后 6 条（id 大）全新
+        ids = []
+        for index in range(12):
+            video = fake_video(db, f"src{index:02d}")
+            ids.append(fake_material(db, song_id, video, 0, person=f"人{index:02d}"))
+        old, fresh = ids[:6], ids[6:]
+        marks = ",".join("?" for _ in old)
+        db.connect().execute(
+            f"UPDATE dance_materials SET use_count=20, output_count=9, "
+            f"last_used_at=datetime('now') WHERE id IN ({marks})", tuple(old))
+
+        pool = selection.build_pool(
+            db, song_id, 0, spec=FilterSpec(target_song_id=song_id, limit=6))
+        got = [s.material_id for s in pool.scored]
+        assert len(got) == 6, got
+        assert set(got) == set(fresh), \
+            f"预取只留下了 {got}，全新素材 {fresh} 被按 id 砍掉了"
+        # SQL 的预取顺序必须体现"最该被考虑"，而不是 id
+        sql, _params = selection.build_query(FilterSpec(target_song_id=song_id))
+        assert "m.id ASC" != sql.split("ORDER BY")[1].split("LIMIT")[0].strip(), sql
+        assert "output_count ASC" in sql and "use_count ASC" in sql, sql
+        # 上限放开就全都在
+        wide = selection.build_pool(
+            db, song_id, 0, spec=FilterSpec(target_song_id=song_id, limit=500))
+        assert len(wide.scored) == 12, len(wide.scored)
+        assert selection.DEFAULT_POOL_LIMIT >= 500, selection.DEFAULT_POOL_LIMIT
+    finally:
+        db.close()
+
+
+def test_history_heavy_material_ranks_below_fresh_one(work: Path) -> None:
+    """用烂了的素材必须排在全新素材后面（默认权重下就该如此）。"""
+    cfg, db = make_project(work)
+    try:
+        song_id = fake_song(db)
+        one = fake_material(db, song_id, fake_video(db, "a"), 0, person="小A")
+        two = fake_material(db, song_id, fake_video(db, "b"), 0, person="小B")
+        db.connect().execute(
+            "UPDATE dance_materials SET use_count=30, output_count=12, "
+            "last_used_at=datetime('now'), last_output_at=datetime('now') WHERE id=?", (one,))
+        pool = selection.build_pool(db, song_id, 0)
+        ranked = [s.material_id for s in pool.scored]
+        assert ranked[0] == two, f"全新素材没排在前面：{ranked}"
+        scores = {s.material_id: s.final_score for s in pool.scored}
+        assert scores[two] > scores[one], scores
+        # 明细里要能看出扣分来自哪儿，而不是一个黑箱数字
+        heavy = next(s for s in pool.scored if s.material_id == one)
+        assert any(v < 0 for v in heavy.breakdown.values()), heavy.breakdown
+    finally:
+        db.close()
+
+
+def test_soft_penalties_punish_same_person_and_same_source(work: Path) -> None:
+    """同人 / 同源连着出现要**扣分**（软惩罚），这和硬约束是两码事。"""
+    cfg, db = make_project(work)
+    try:
+        song_id, videos, materials = fake_library(db, positions=3, people=("小A", "小B"))
+        ctx = selection.score_context(db, song_id)
+        lookup = {m.id: m for m in selection.find_materials(
+            db, FilterSpec(target_song_id=song_id))}
+        a0 = lookup[materials[("小A", 0)]]
+        a1 = lookup[materials[("小A", 1)]]
+        b1 = lookup[materials[("小B", 1)]]
+
+        same_delta, same_parts = score_mod.dynamic_delta(a1, ctx, [a0])
+        diff_delta, diff_parts = score_mod.dynamic_delta(b1, ctx, [a0])
+        assert same_parts["same_person_penalty"] < 0, same_parts
+        assert diff_parts["same_person_penalty"] == 0.0, diff_parts
+        assert same_delta < diff_delta, (same_delta, diff_delta)
+        # 同源（这里同人即同源）也要体现在 source_diversity 上
+        assert same_parts["source_diversity"] < diff_parts["source_diversity"], \
+            (same_parts["source_diversity"], diff_parts["source_diversity"])
+        # 第一格没有邻居，多样性项拿满分，不该无端扣分
+        first_delta, first_parts = score_mod.dynamic_delta(a0, ctx, [])
+        assert first_parts["same_person_penalty"] == 0.0, first_parts
+        assert first_delta >= 0.0, first_delta
+    finally:
+        db.close()
+
+
 TESTS = (
     test_query_never_interpolates_user_input,
     test_long_unused_includes_never_used,
     test_presets_cover_the_seven_schemes,
     test_filters_actually_filter,
     test_static_score_ignores_neighbours,
+    test_candidate_pool_is_not_truncated_by_insertion_order,
+    test_history_heavy_material_ranks_below_fresh_one,
+    test_soft_penalties_punish_same_person_and_same_source,
     test_hard_constraints_reject_instead_of_penalize,
     test_search_is_deterministic_and_bounded,
     test_versions_differ_from_each_other,
     test_recommendation_is_reproducible,
     test_repeat_rates_are_honest,
 )
+
 
 
 def main() -> int:

@@ -156,25 +156,39 @@ def combine_confidence(waveform_confidence: float | None, chroma_confidence: flo
 
 
 def decide_status(confidence: float, max_deviation: float, offset: float,
-                  source_duration: float, methods_agree: float) -> tuple[str, list[str]]:
+                  source_duration: float, methods_agree: float,
+                  target_duration: float = 0.0) -> tuple[str, list[str]]:
     """定结论，返回 `(status, 原因清单)`。原因是中文短句，直接显示给用户。
 
     判定顺序是从"最确定不能用"往下走，命中即止：
       1. 多窗口偏差过大 → rejected（这是"对错了"，不是"精度差")
-      2. offset 顶到源时长边缘 → rejected（边缘伪峰，参考项目也这么挡）
+      2. offset 顶到可搜索范围的边缘 → rejected（边缘伪峰）
       3. 置信度低于 REJECT_CONFIDENCE → rejected
       4. 两法互证为 0（明确吵架） → disagree
       5. 置信度低于 LOW_CONFIDENCE → low_confidence（可用，但建议人工确认）
       6. 其余 → ok
+
+    第 2 条的上限**分方向**，这是有讲究的（口径：`source_time = target_time - offset`）：
+
+      offset > 0  源视频的内容出现在目标歌里更靠后的位置 → 上限是**目标歌**时长
+      offset < 0  源视频比目标歌先开始           → 上限是**源视频**时长
+
+    用一个对称上限（比如两边都拿源时长比）会误杀真实结果：200 秒的歌配一个
+    20 秒的源，源合法地对在歌的第 19 秒上，offset=+19 就会被"顶到源时长边缘"判死。
     """
     reasons: list[str] = []
-    duration = max(0.0, float(source_duration))
+    source = max(0.0, float(source_duration))
+    target = max(0.0, float(target_duration))
     if float(max_deviation) > REJECT_DEVIATION:
         reasons.append(f"多窗口 offset 最大偏差 {max_deviation:.3f}s 超过 {REJECT_DEVIATION}s")
         return "rejected", reasons
-    if duration > 0 and abs(float(offset)) >= duration * EDGE_RATIO:
-        reasons.append(f"offset {offset:.3f}s 顶到源时长 {duration:.3f}s 的边缘，判为伪峰")
+    value = float(offset)
+    limit = (target or source) if value >= 0 else source
+    if limit > 0 and abs(value) >= limit * EDGE_RATIO:
+        which = "目标歌" if value >= 0 and target else "源视频"
+        reasons.append(f"offset {value:.3f}s 顶到{which}时长 {limit:.3f}s 的边缘，判为伪峰")
         return "rejected", reasons
+
     if float(confidence) < REJECT_CONFIDENCE:
         reasons.append(f"置信度 {confidence:.3f} 低于 {REJECT_CONFIDENCE}")
         return "rejected", reasons

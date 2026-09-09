@@ -168,7 +168,10 @@ class DanceMontageWorker(QThread):
                     recommend_enabled=bool(self.job.get("recommend", True)),
                     manual=self.job.get("manual"),
                     render_video=bool(self.job.get("render", True)),
+                    pool_size=int(self.job.get("pool_size")
+                                  or self.cfg.dance["candidate_pool_size"]),
                     on_log=self._say,
+
                     on_progress=lambda a, b, t: self.progress.emit(a, b, t))
                 self._stage("封装")
                 for version_id, render in made:

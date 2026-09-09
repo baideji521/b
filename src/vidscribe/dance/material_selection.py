@@ -31,8 +31,20 @@ _ORDER_SQL: dict[str, str] = {
     "last_used_at_asc": "m.last_used_at IS NOT NULL, m.last_used_at ASC, m.id ASC",
     "confidence_desc": "m.alignment_confidence DESC, m.id ASC",
     "freshness_desc": "m.last_used_at IS NOT NULL, m.last_used_at ASC, m.use_count ASC",
-    "score_desc": "m.id ASC",          # 占位：真正的排序在 Python 里做
+    # `score_desc` 的真正排序在 Python 里（得分要读历史，SQL 排不了）。
+    # 但这条 SQL 仍然决定**哪一批行会被 LIMIT 留下来**，所以绝不能写成 `m.id ASC`：
+    # 那等于"库里最早入库的 N 条"，一旦某个位置的素材超过 limit，
+    # 新切进来的、一次没用过的素材会在打分之前就被悄悄扔掉（候选池过早截断）。
+    # 这里按"最该被考虑"预取：没出过片 → 没用过 → 出片少 → 用得少 → 对齐好。
+    "score_desc": ("m.output_count ASC, m.use_count ASC, "
+                   "m.alignment_confidence DESC, m.id ASC"),
 }
+
+#: `FilterSpec.limit` 的兜底值。这是**预取上限**而不是候选池上限：
+#: 打分和组合搜索都在这一批之内进行，所以宁可大一点。
+#: 真正进 beam search 的是 `strategy.search["candidate_k"]`。
+DEFAULT_POOL_LIMIT = 500
+
 
 #: 一期第三十三节的七个筛选方案（A~G）。GUI 直接照这个建下拉，
 #: 用户点一下就是一整套条件，不用自己拼

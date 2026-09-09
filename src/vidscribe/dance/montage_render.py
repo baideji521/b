@@ -158,7 +158,8 @@ def remix(db: Database, target_song_id: int, *, out_dir: str | Path,
           slice_duration: float = 2.0, versions: int = 0, strategy_id: int = 0,
           seed: int = 0, spec=None, canvas=None, backend=None, name: str = "",
           recommend_enabled: bool = True, manual: dict[int, int] | None = None,
-          render_video: bool = True, on_log: LogFn | None = None,
+          render_video: bool = True, pool_size: int = 0,
+          on_log: LogFn | None = None,
           on_progress: ProgressFn | None = None) -> list[tuple[int, RenderResult]]:
     """**编排**：候选池 → 推荐 → 组合搜索 → 编辑计划 → 渲染，生成多个版本。
 
@@ -168,13 +169,19 @@ def remix(db: Database, target_song_id: int, *, out_dir: str | Path,
     `recommend_enabled=False` + `manual={位置: 素材id}` 走纯手动路径
     （技术指导第二十节：关掉智能推荐后仍可以纯手动选择）。
 
+    `pool_size` 是每个位置**预取**多少条素材进候选池（0 = 用 FilterSpec 自带的）。
+    它决定"算法能考虑多少条"，调小了会在打分之前就把素材扔掉。
+
     返回 `[(version_id, RenderResult)]`。`render_video=False` 时只出计划不渲染 ——
     界面上"先看看这一版长什么样"用它，不浪费几分钟编码。
     """
+    from dataclasses import replace  # noqa: PLC0415
+
     from . import (  # noqa: PLC0415
         combination_search, material_selection, music_structure, recommendation,
         strategy as strategy_mod,
     )
+
 
     log = on_log or (lambda line: logger.info("%s", line))
     song = repo.get_song(db, target_song_id)
@@ -209,9 +216,15 @@ def remix(db: Database, target_song_id: int, *, out_dir: str | Path,
 
     ctx = material_selection.score_context(db, target_song_id)
     weights = recommendation.weights_for(plan.kind, plan.weights)
-    pools = [material_selection.build_pool(db, target_song_id, index, spec=spec,
+    query = spec if spec is not None else material_selection.FilterSpec()
+    if pool_size and int(pool_size) > 0:
+        query = replace(query, limit=int(pool_size))
+    pools = [material_selection.build_pool(db, target_song_id, index, spec=query,
                                            context=ctx, weights=weights)
              for index in positions]
+    log(f"[混剪] 候选池预取上限 {query.limit} 条/位置，"
+        f"实际取到 {sum(len(p.scored) for p in pools)} 条")
+
     empty = material_selection.empty_positions(pools)
     if empty:
         log(f"[混剪] 有 {len(empty)} 个位置没有素材，成片会短一些：{empty[:10]}")
@@ -221,7 +234,8 @@ def remix(db: Database, target_song_id: int, *, out_dir: str | Path,
     log(f"[混剪] 候选池共 {history.note_candidates(db, pools)} 条素材进入本轮考虑")
 
     run = recommendation.recommend(db, target_song_id, positions, strategy=plan, seed=seed,
-                                   spec=spec, montage_id=montage_id, context=ctx)
+                                   spec=query, montage_id=montage_id, context=ctx)
+
     want = int(versions or (plan.search or {}).get("versions", 3) or 3)
     results = combination_search.search_versions(pools, ctx, plan, count=want,
                                                  seed=run.random_seed)

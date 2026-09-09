@@ -147,8 +147,12 @@ def analyze_target_music_features(pcm: np.ndarray, sample_rate: int = dsp.DEFAUL
     flux = np.concatenate([[0.0], np.maximum(np.diff(rms), 0.0)]).astype(np.float32)
     novelty = np.concatenate([[0.0], np.abs(np.diff(onset))]).astype(np.float32)
 
-    energy_wave = dsp.normalize01(dsp.smooth(rms, 9))
-    brightness = dsp.normalize01(dsp.smooth(centroid, 9))
+    # 能量 / 亮度这两条是"这个音乐位置有多带劲"的依据，走**分位数归一化**：
+    # min-max 会被一下爆音整条压平，评分里的 position_match 就全成了 0。
+    # flux / novelty 仍然走 min-max —— 段落边界靠的正是那些尖峰，不能削
+    energy_wave = dsp.robust_normalize01(dsp.smooth(rms, 9))
+    brightness = dsp.robust_normalize01(dsp.smooth(centroid, 9))
+
     env_rate = float(sample_rate) / float(dsp.HOP)
     _, rhythm_score = dsp.estimate_tempo(onset, env_rate)
     strong = np.sort(onset)[int(onset.size * 0.9):] if onset.size else np.zeros(1)
@@ -204,7 +208,8 @@ def analyze_rhythm_bands(pcm: np.ndarray, sample_rate: int = dsp.DEFAULT_SR) -> 
         energy = dsp.band_energy(mag, sample_rate, dsp.N_FFT, low, high)
         # 击点看的是"能量上冲"而不是"能量高"：持续的低音垫能量也高，但不是击点
         rise = np.concatenate([[0.0], np.maximum(np.diff(energy), 0.0)]).astype(np.float32)
-        curve = dsp.normalize01(dsp.smooth(energy, 3))
+        curve = dsp.robust_normalize01(dsp.smooth(energy, 3))
+
         peaks = dsp.pick_peaks(dsp.normalize01(rise), min_gap, BAND_THRESHOLD)
         tracks[name] = tuple(float(v) for v in curve)
         hits[name] = tuple(round(float(times[p]), 4) for p in peaks if p < times.size)

@@ -205,6 +205,29 @@ def normalize01(track: np.ndarray) -> np.ndarray:
     return ((track - lo) / (hi - lo)).astype(np.float32)
 
 
+def robust_normalize01(track: np.ndarray, low: float = 2.0,
+                       high: float = 98.0) -> np.ndarray:
+    """按分位数裁剪后再拉到 0~1。给**特征曲线**用，不给 onset 包络用。
+
+    和 `normalize01` 的区别只有一件事：用 2/98 分位代替最小值/最大值。
+    为什么要这样：min-max 会被单个瞬态毁掉 —— 一首歌里有一下爆音，
+    整条能量曲线就被压到 0.1 以下，"这个音乐位置有多带劲"全变成 0，
+    评分里的 `position_match` 也就废了。裁掉两端 2% 之后曲线才有动态范围。
+
+    **不能**拿它去归一化 onset 包络：节拍跟踪要的正是那些尖峰，
+    裁掉最高的 2% 等于把最强的鼓点削平，反而更难跟上拍。
+    """
+    track = np.asarray(track, dtype=np.float32).reshape(-1)
+    if track.size == 0:
+        return track
+    lo = float(np.percentile(track, max(0.0, float(low))))
+    hi = float(np.percentile(track, min(100.0, float(high))))
+    if hi - lo <= _EPS:
+        return normalize01(track)
+    return np.clip((track - lo) / (hi - lo), 0.0, 1.0).astype(np.float32)
+
+
+
 def onset_strength(mel_db: np.ndarray, smooth_width: int = 3) -> np.ndarray:
     """谱通量 onset 包络，长度等于帧数，已归一到 0~1。
 

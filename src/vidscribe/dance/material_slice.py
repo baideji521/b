@@ -187,9 +187,12 @@ def render_plan(source: str | Path, plan: SlicePlan, out_dir: Path, *, canvas=No
             log(f"[跳过] 位置 #{spec.segment_index} 封装不完整，不登记")
             try:
                 target.unlink(missing_ok=True)
-            except OSError:
-                pass
+            except OSError as exc:
+                # 删不掉残片不影响正确性（下一轮 is_complete_video 还会判它不完整并重渲），
+                # 但必须留痕：静默 pass 会让"磁盘满/文件被占用"这类真问题查不出来
+                logger.debug("删不掉不完整的素材残片 %s：%s", target, exc)
             continue
+
         done.append((spec, target))
         report(index, total, "渲染素材")
     log(f"[素材] {Path(source).name}：计划 {total} 条，落地 {len(done)} 条，"

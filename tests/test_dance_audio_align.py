@@ -268,8 +268,36 @@ def test_short_source_cannot_reach_top_confidence() -> None:
     assert abs(many - 1.0) < 1e-6, many
 
 
+def test_edge_limit_is_direction_aware() -> None:
+    """边缘伪峰的上限要**分方向**，否则会误杀"短源对在长歌后段"这种正常情况。
+
+    口径 `source_time = target_time - offset`：
+      offset > 0 → 源出现在歌里更靠后 → 上限看**歌**多长
+      offset < 0 → 源比歌先开始       → 上限看**源**多长
+
+    20 秒的源合法地对在 200 秒歌的第 19 秒上（offset=+19）：
+    如果两边都拿源时长比，19 ≥ 20×0.95 就被判成伪峰 —— 这是真会发生的误杀。
+    """
+    ok, reasons = validate.decide_status(0.8, 0.01, 19.0, 20.0, 1.0,
+                                        target_duration=200.0)
+    assert ok == "ok", (ok, reasons)
+    # 同样的 offset，但歌本身只有 20 秒 → 这才是真的顶到边缘
+    bad, reasons = validate.decide_status(0.8, 0.01, 19.0, 20.0, 1.0,
+                                         target_duration=20.0)
+    assert bad == "rejected", (bad, reasons)
+    assert any("边缘" in r for r in reasons), reasons
+    # 负方向仍然按源时长判：源只有 20 秒，却说它比歌早开始 19.5 秒
+    negative, reasons = validate.decide_status(0.8, 0.01, -19.5, 20.0, 1.0,
+                                              target_duration=200.0)
+    assert negative == "rejected", (negative, reasons)
+    # 不知道歌多长时退回原来的行为（拿源时长兜底），不能因为少传一个参数就放行一切
+    fallback, _ = validate.decide_status(0.8, 0.01, 19.0, 20.0, 1.0)
+    assert fallback == "rejected", fallback
+
+
 TESTS = (
     test_same_audio_offset_is_zero,
+
     test_artificial_delay_is_recovered,
     test_negative_offset_is_recovered,
     test_unrelated_audio_is_rejected,
@@ -277,6 +305,8 @@ TESTS = (
     test_multi_window_offsets_are_stable,
     test_window_disagreement_lowers_confidence,
     test_edge_offset_is_rejected,
+    test_edge_limit_is_direction_aware,
+
     test_huge_deviation_is_rejected,
     test_missing_audio_raises_instead_of_faking_zero,
     test_wav_roundtrip_keeps_offset,

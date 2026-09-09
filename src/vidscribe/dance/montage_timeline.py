@@ -125,7 +125,12 @@ def validate(context: DanceMontageContext, *, expected_positions: int = 0) -> li
       - 一格都没有
       - 素材文件不在盘上（渲染必然失败，提前说清楚是哪一条）
       - 成片时间不连续或有重叠（说明排序算错了）
+      - 源区间非法（负数 / 首尾颠倒 / 时长和成片格子对不上）
       - 位置数比预期少（成片会比目标歌短，用户该知道）
+
+    源区间这一项在切片时已经把过一遍关（`material_slice.map_to_source` 越界直接抛），
+    这里再查一次是为了**历史版本重渲染**这条路：库里的行有可能被人手改过，
+    或者素材是被旧版本算法切出来的，不能因为"当时对"就假定现在也对。
     """
     problems: list[str] = []
     if not context.clips:
@@ -140,6 +145,18 @@ def validate(context: DanceMontageContext, *, expected_positions: int = 0) -> li
         if clip.target_end <= clip.target_start:
             problems.append(f"位置 #{clip.segment_index} 的成片区间非法："
                            f"{clip.target_start} → {clip.target_end}")
+        if clip.source_start < -1e-6:
+            problems.append(f"位置 #{clip.segment_index} 的源起点是负数："
+                           f"{clip.source_start:.3f}s（源视频里没有这一段）")
+        if clip.source_end <= clip.source_start:
+            problems.append(f"位置 #{clip.segment_index} 的源区间首尾颠倒："
+                           f"{clip.source_start:.3f} → {clip.source_end:.3f}")
+        elif abs((clip.source_end - clip.source_start) - clip.duration) > 0.05:
+            problems.append(
+                f"位置 #{clip.segment_index} 的源时长 "
+                f"{clip.source_end - clip.source_start:.3f}s 和成片格子 "
+                f"{clip.duration:.3f}s 对不上")
+
     for previous, current in zip(context.clips, context.clips[1:]):
         if abs(current.target_start - previous.target_end) > 1e-3:
             problems.append(f"成片时间不连续：第 {previous.order_index} 格结束于 "

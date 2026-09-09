@@ -229,6 +229,11 @@ DEFAULTS: dict[str, Any] = {
         "candidate_k": 8,
         "beam_width": 6,
         "max_search_nodes": 20000,
+        # 每个音乐位置**预取**多少条素材进候选池再打分。这不是最终选几条，
+        # 而是"允许算法考虑多少条" —— 调小了会在打分之前就把新素材扔掉
+        # （候选池过早截断），所以默认放宽。真正进 beam search 的是 candidate_k
+        "candidate_pool_size": 500,
+
         # 一次 remix 生成几个版本（多版本混剪）
         "versions_per_run": 3,
         # 智能推荐总开关。关掉之后 GUI 仍然可以纯手动选素材（技术指导第二十节）

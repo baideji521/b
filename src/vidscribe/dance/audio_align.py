@@ -206,7 +206,9 @@ def align_arrays(target: np.ndarray, source: np.ndarray,
     confidence = validate.combine_confidence(waveform_confidence, chroma_confidence,
                                              methods_agree, agreement, len(offsets))
     status, reasons = validate.decide_status(confidence, deviation, offset,
-                                            source_duration, methods_agree)
+                                            source_duration, methods_agree,
+                                            target_duration=target_duration)
+
     if chroma_offset is not None and abs(chroma_offset - offset) > validate.METHOD_TOLERANCE:
         reasons.append(f"chroma 全局峰在 {chroma_offset:.3f}s（和声重复所致），"
                        f"但波形 offset {offset:.3f}s 处 chroma 支持度 {support:.3f}")

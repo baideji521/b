@@ -190,6 +190,69 @@ def test_regeneration_keeps_the_old_material(work: Path) -> None:
         db.close()
 
 
+def test_resume_only_redoes_what_is_missing(work: Path) -> None:
+    """断点续跑：重跑一遍不重编已有素材，只补缺的那一条（技术指导第二十四节）。
+
+    这是长期资产系统的硬要求 —— 100 个源视频跑到第 73 个崩了，重启之后
+    只该补剩下的 27 个，而不是把前面 73 个重切一遍。
+    靠三件事实现：对齐缓存命中、`render_plan(skip_existing=True)`、
+    `upsert_material` 按 (歌, 源, 位置, 切片版本) 幂等。
+    """
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    try:
+        song_path, pcm = make_song_file(cfg, "t.wav", bpm=120.0, duration=10.0)
+        source = make_source_video(cfg, "src.mp4", pcm, fps=24.0)
+        song = ingest.register_song(db, song_path)
+
+        first_align = ingest.align_batch(db, song, [source], workers=1)[0]
+        assert first_align.ok and not first_align.cached, "第一次不该命中缓存"
+        first = ingest.slice_and_register(
+            db, song, first_align, slice_duration=2.0,
+            material_dir=cfg.dance_path("material_dir"), canvas=CANVAS)
+        assert first.ok, first.error
+        before = {m.id: Path(m.file_path).stat().st_mtime_ns
+                  for m in repo.get_materials(db, first.material_ids).values()}
+        assert len(before) == 5, before
+
+        # 第二次：对齐命中缓存，素材文件全部复用，一条都不重编
+        again_align = ingest.align_batch(db, song, [source], workers=1)[0]
+        assert again_align.cached, "对齐没命中缓存 —— 会白算一遍"
+        second = ingest.slice_and_register(
+            db, song, again_align, slice_duration=2.0,
+            material_dir=cfg.dance_path("material_dir"), canvas=CANVAS)
+        assert second.ok, second.error
+        assert sorted(second.material_ids) == sorted(first.material_ids), \
+            "重跑产生了新的素材行 —— 幂等性坏了"
+        after = {m.id: Path(m.file_path).stat().st_mtime_ns
+                 for m in repo.get_materials(db, second.material_ids).values()}
+        assert after == before, "素材文件被重编了一遍（skip_existing 没起作用）"
+        total = db.connect().execute(
+            "SELECT COUNT(*) FROM dance_materials WHERE target_song_id = ?",
+            (song.song_id,)).fetchone()[0]
+        assert int(total) == 5, f"重跑之后库里变成 {total} 条"
+
+        # 抽掉一条素材文件：只该补这一条，其余文件不动
+        victim_id = sorted(before)[2]
+        victim = Path(repo.get_material(db, victim_id).file_path)
+        victim.unlink()
+        third = ingest.slice_and_register(
+            db, song, again_align, slice_duration=2.0,
+            material_dir=cfg.dance_path("material_dir"), canvas=CANVAS)
+        assert third.ok, third.error
+        rebuilt = {m.id: Path(m.file_path).stat().st_mtime_ns
+                   for m in repo.get_materials(db, third.material_ids).values()}
+        assert victim.is_file(), "缺的那条没补回来"
+        assert rebuilt[victim_id] != before[victim_id], "缺的那条没重渲"
+        for material_id, stamp in before.items():
+            if material_id != victim_id:
+                assert rebuilt[material_id] == stamp, \
+                    f"素材 #{material_id} 被无谓地重编了"
+        print("  断点续跑：5 条素材复用 4 条、补回 1 条")
+    finally:
+        db.close()
+
+
 TESTS = (
     test_mapping_matches_the_single_convention,
     test_out_of_range_raises_instead_of_clamping,
@@ -198,7 +261,9 @@ TESTS = (
     test_filename_carries_identity,
     test_render_produces_silent_normalized_material,
     test_regeneration_keeps_the_old_material,
+    test_resume_only_redoes_what_is_missing,
 )
+
 
 
 def main() -> int:

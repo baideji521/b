@@ -152,6 +152,18 @@ class DanceMontageWindow(QMainWindow):
             self._song_id = int(str(text).strip())
             self.reload()
 
+    def _pool_spec(self):
+        """给候选池用的筛选条件。
+
+        和素材库列表共用同一套条件，但**换成配置里的候选池上限**：
+        素材库那个「最多显示」是给眼睛看的（300 行够翻了），
+        候选池那个是"算法能考虑多少条"，两者混用会让新素材在打分前就被丢掉。
+        """
+        from dataclasses import replace
+
+        spec = self.filters.spec(self._song_id)
+        return replace(spec, limit=int(self.cfg.dance["candidate_pool_size"]))
+
     def reload(self) -> None:
         """把四个区域全部按当前目标歌刷一遍。全是聚合查询，很快。"""
         if self.db is None:
@@ -162,7 +174,8 @@ class DanceMontageWindow(QMainWindow):
         slice_duration = self.remix.slice_duration()
         self.alignment.refresh(self.db, self._song_id)
         self.candidates.refresh(self.db, self._song_id, slice_duration=slice_duration,
-                                spec=self.filters.spec(self._song_id))
+                                spec=self._pool_spec())
+
         self.recommend.refresh(self.db, self._song_id, slice_duration=slice_duration)
         self.history.refresh(self.db, self._song_id)
         self.statistics.refresh(self.db, self._song_id)

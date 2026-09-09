@@ -226,6 +226,22 @@ manual={位置: 素材id})`。没有手动选择就点开始会被拦住，而�
 跑法：`python tests/test_dance_smoke.py`（本仓库 venv 里没装 pytest，
 所有测试都遵循项目的双入口约定，直接 `python` 跑即可）。
 
+### 审计补丁（2026-09-10）
+
+对照 audio-video-sync / BeatSync-Engine / tubeviz / montage-ai 的**真实源码**
+重新审计了一遍现有实现，查出并修掉 8 处问题，明细见 `DANCE_IMPLEMENTATION_AUDIT.md`。
+其中两处是会真的出错的 bug：
+
+- 对齐的"边缘伪峰"上限原来两个方向都拿源时长比，会把"短源合法地对在长歌后段"
+  判成伪峰（200 秒歌 + 20 秒源、offset=+19 就中招）。改成按方向取上限。
+- `score_desc` 档的候选池预取 SQL 原来是 `ORDER BY m.id ASC LIMIT 500`，
+  某个位置素材超过上限时留下的是"最早入库的 500 条"，新切的、一次没用过的素材
+  在打分之前就被丢掉。改成按"最该被考虑"预取，并把上限做成 `dance.candidate_pool_size`。
+
+pytest 现已装进 venv（`pytest==8.3.4`），全量结果：**445 passed, 2 skipped**（149 秒）。
+那 2 个 skip 是原有的：`conftest.py` 在仓库根缺 `test.mp4` 时跳过真实解码用例，与 Dance 无关。
+
+
 ---
 
 ## 已知限制
