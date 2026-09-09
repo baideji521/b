@@ -32,6 +32,7 @@ def launch(cfg, parent=None) -> int:
             theme.apply(app)
         except Exception as exc:  # noqa: BLE001 - 没主题也要能开
             logger.debug("主题没加载上：%s", exc)
+        _install_excepthook()
 
     window = DanceMontageWindow(cfg, parent)
     window.show()
@@ -41,6 +42,33 @@ def launch(cfg, parent=None) -> int:
             setattr(parent, "_dance_window", window)
         return 0
     return int(app.exec_())
+
+
+def _install_excepthook() -> None:
+    """槽函数里抛出的异常必须能看见。
+
+    PyQt5 里槽抛异常会直接 abort 整个进程；而 `run_kadian.bat` 用的是
+    `pythonw.exe`（没有控制台），于是界面"啪"一下就没了，什么都看不到 ——
+    这类故障根本没法查。装上钩子之后：完整堆栈进日志文件，界面上弹一个框，
+    窗口继续开着。主界面（`gui/main_window.launch`）早就这么干了，这里补齐。
+    """
+    import sys
+    import traceback
+
+    def on_error(kind, value, trace) -> None:
+        text = "".join(traceback.format_exception(kind, value, trace))
+        logger.error("界面异常：%s", text)
+        try:
+            from PyQt5.QtWidgets import QMessageBox
+
+            QMessageBox.critical(None, "AI_卡点舞 出错了",
+                                 f"{kind.__name__}: {value}\n\n"
+                                 f"完整堆栈已写进日志文件。\n\n{text[-1500:]}")
+        except Exception:  # noqa: BLE001 - 弹不出框也不能再抛，否则一样静默死
+            logger.error("连错误提示框都弹不出来")
+
+    sys.excepthook = on_error
+
 
 
 __all__ = ["launch"]

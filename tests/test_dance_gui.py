@@ -259,6 +259,59 @@ def test_worker_stops_cooperatively(work: Path) -> None:
     assert not data.get("outputs"), "已经喊停了却还是出了片"
 
 
+def test_file_pickers_never_touch_the_native_dialog(work: Path) -> None:
+    """选文件一律走 Qt 自己画的对话框，且起始目录不存在时要退回主目录。
+
+    为什么盯这个：Windows 原生对话框会加载 shell 扩展（缩略图/网盘/杀软插件），
+    任何一个卡住整个界面就一起没响应，而且卡在系统代码里，日志上一个字都看不到。
+    """
+    from PyQt5.QtWidgets import QFileDialog
+
+    window, _song_id, _m = _window(work)
+    try:
+        panel = window.remix
+        seen: list[tuple] = []
+
+        def fake(_parent, title, folder, filters, options=0):
+            seen.append((title, folder, int(options)))
+            return ("", "")
+
+        original = QFileDialog.getOpenFileName
+        QFileDialog.getOpenFileName = staticmethod(fake)
+        try:
+            panel._pick_song()                     # noqa: SLF001
+        finally:
+            QFileDialog.getOpenFileName = original
+
+        assert len(seen) == 1, seen
+        _title, folder, options = seen[0]
+        assert options & int(QFileDialog.DontUseNativeDialog), \
+            "选文件用了 Windows 原生对话框 —— 它会被 shell 扩展拖死"
+        assert Path(folder).is_dir(), f"起始目录不存在：{folder}"
+
+        # 起始目录是死路径时退回主目录，而不是把对话框指过去
+        assert Path(panel._start_dir("Z:/根本没有这个盘/x")) == Path.home()   # noqa: SLF001
+        assert Path(panel._start_dir("")) == Path.home()                     # noqa: SLF001
+        assert Path(panel._start_dir(work)) == work                          # noqa: SLF001
+    finally:
+        window.close()
+
+
+def test_launch_installs_an_excepthook() -> None:
+    """槽里抛异常必须能看见：pythonw 下没有控制台，不装钩子就是"啪一下没了"。"""
+    import sys
+
+    from vidscribe.gui import dance_montage
+
+    original = sys.excepthook
+    try:
+        dance_montage._install_excepthook()        # noqa: SLF001
+        assert sys.excepthook is not original, "excepthook 没装上"
+        assert sys.excepthook.__name__ == "on_error", sys.excepthook
+    finally:
+        sys.excepthook = original
+
+
 TESTS = (
     test_window_has_all_four_regions,
     test_panels_show_real_library,
@@ -266,10 +319,13 @@ TESTS = (
     test_slice_presets,
     test_manual_selection_flows_to_remix,
     test_start_refuses_empty_manual_when_recommend_off,
+    test_file_pickers_never_touch_the_native_dialog,
+    test_launch_installs_an_excepthook,
     test_worker_is_isolated_from_analyze_worker,
     test_worker_runs_the_whole_job,
     test_worker_stops_cooperatively,
 )
+
 
 
 

@@ -32,7 +32,11 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from ...logging_setup import get_logger
 from .worker import STAGES
+
+logger = get_logger("dance.gui.remix")
+
 
 #: 一期第二十二节钉的那几档。"自定义"落到 -1，由输入框接管
 SLICE_PRESETS = ((1.0, "1.0 秒（快切）"), (1.5, "1.5 秒"), (2.0, "2.0 秒（常用）"),
@@ -245,8 +249,7 @@ class RemixPanel(QWidget):
         self.slice_changed.emit(self.slice_duration())
 
     def _pick_song(self) -> None:
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选目标歌", str(self.cfg.dance_path("song_dir")), AUDIO_FILTER)
+        path = self._open_file("选目标歌", self.cfg.dance_path("song_dir"), AUDIO_FILTER)
         if path:
             self.song.setText(path)
 
@@ -256,21 +259,69 @@ class RemixPanel(QWidget):
             self.song.setText(data)
 
     def _add_files(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "选源舞蹈视频", str(self.cfg.dance_path("source_dir")), VIDEO_FILTER)
-        for path in paths:
+        for path in self._open_files("选源舞蹈视频", self.cfg.dance_path("source_dir"),
+                                     VIDEO_FILTER):
             self.sources.addItem(path)
 
     def _add_dir(self) -> None:
-        path = QFileDialog.getExistingDirectory(
-            self, "选一个装满源视频的目录", str(self.cfg.dance_path("source_dir")))
+        path = self._open_dir("选一个装满源视频的目录", self.cfg.dance_path("source_dir"))
         if path:
             self.sources.addItem(path)
 
     def _pick_out(self) -> None:
-        path = QFileDialog.getExistingDirectory(self, "成品放哪儿", self.out_dir.text())
+        path = self._open_dir("成品放哪儿", self.out_dir.text())
         if path:
             self.out_dir.setText(path)
+
+    # ---------------------------------------------------- 选文件（统一走这三个）
+    #
+    # 一律用 **Qt 自己画的**对话框（`DontUseNativeDialog`），不用 Windows 原生的。
+    # 原因很实在：原生对话框会加载系统 shell 扩展（缩略图提供程序、网盘/杀软的右键
+    # 菜单插件、"最近使用"里失效的网络路径……），任何一个卡住，整个界面就跟着一起
+    # 没响应，而且卡在系统代码里，日志上一个字都看不到。Qt 自己那个只读文件系统，
+    # 慢也慢不到哪儿去。代价是长得朴素一点 —— 用得动比好看重要。
+    def _dialog_options(self):
+        return QFileDialog.DontUseNativeDialog | QFileDialog.DontResolveSymlinks
+
+    def _start_dir(self, folder) -> str:
+        """起始目录：不存在就退回用户主目录，别把对话框指到一个死路径上。
+
+        空字符串要当"没给"处理 —— `Path("")` 会变成 `.`（当前工作目录），
+        那是启动程序时的随机目录，对用户毫无意义。
+        """
+        text = str(folder or "").strip()
+        if text:
+            try:
+                target = Path(text)
+                if target.is_dir():
+                    return str(target)
+            except OSError as exc:
+                logger.debug("起始目录探不动 %s：%s", folder, exc)
+        return str(Path.home())
+
+
+    def _open_file(self, title: str, folder, filters: str) -> str:
+        logger.info("[选文件] %s：从 %s 开始", title, folder)
+        path, _ = QFileDialog.getOpenFileName(self, title, self._start_dir(folder),
+                                              filters, options=self._dialog_options())
+        logger.info("[选文件] %s：%s", title, path or "（取消）")
+        return path
+
+    def _open_files(self, title: str, folder, filters: str) -> list[str]:
+        logger.info("[选文件] %s：从 %s 开始", title, folder)
+        paths, _ = QFileDialog.getOpenFileNames(self, title, self._start_dir(folder),
+                                                filters, options=self._dialog_options())
+        logger.info("[选文件] %s：选了 %d 个", title, len(paths))
+        return list(paths)
+
+    def _open_dir(self, title: str, folder) -> str:
+        logger.info("[选目录] %s：从 %s 开始", title, folder)
+        path = QFileDialog.getExistingDirectory(self, title, self._start_dir(folder),
+                                                options=self._dialog_options()
+                                                | QFileDialog.ShowDirsOnly)
+        logger.info("[选目录] %s：%s", title, path or "（取消）")
+        return path
+
 
     def _start(self) -> None:
         if self._running:
