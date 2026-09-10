@@ -15,6 +15,7 @@ from .schema import (
     DANCE_V12_TABLES,
     DANCE_V13_TABLES,
     DANCE_V14_TABLES,
+    DANCE_V15_TABLES,
     SCHEMA_VERSION,
     TABLES,
 )
@@ -202,6 +203,12 @@ _STEPS: dict[int, list[str]] = {
     # 每段候选素材的排列顺序。还是**只建新表**。
     # 老库升上来是三张空表 = 还没人编排过，界面照旧从推荐/默认顺序起步。
     14: list(DANCE_V14_TABLES),
+    # v15：人工挑素材的流水账（`dance_manual_selections`）。**只建新表**。
+    # 最终选择那张表会被下一次拖拽覆盖，于是"用户比较过什么、最后挑了谁"这份
+    # 数据留不下来。这张表只追加：以后做自动编排时它就是"人给的答案"。
+    # 老库升上来是一张空表 = 还没人拖过，界面行为一个字不变。
+    15: list(DANCE_V15_TABLES),
+
 
 }
 

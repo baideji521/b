@@ -217,19 +217,22 @@ def test_the_page_is_actually_usable(work: Path) -> None:
     panel, _cfg, db = _panel(work)
     try:
         assert panel.btn_analyze.minimumHeight() >= 40
-        for button in (panel.btn_prev, panel.btn_next, panel.btn_split, panel.btn_merge,
-                       panel.btn_save, panel.btn_undo):
+        for button in (panel.btn_prev, panel.btn_next, panel.btn_split, panel.btn_unsplit,
+                       panel.btn_merge, panel.btn_save, panel.btn_undo):
             assert button.minimumHeight() >= 34, (button.text(), button.minimumHeight())
         for field in (panel.path, panel.step, panel.min_score):
             assert field.minimumHeight() >= 30, field.minimumHeight()
         assert panel.nav.minimumWidth() >= 200
-        # 时间轴：五条带首尾相接，谁也不压谁
+        # 时间轴：三条带首尾相接，谁也不压谁（主可视化区一个就够，右键换显示）
         panel.timeline.resize(1000, 260)
         lanes = panel.timeline._lanes()                           # noqa: SLF001
-        order = ["tick", "spectrum", "wave", "vocal", "segment"]
+        order = ["tick", "view", "segment"]
         for upper, lower in zip(order, order[1:]):
             assert lanes[upper].bottom() <= lanes[lower].top() + 0.01, (upper, lower)
         assert lanes["segment"].bottom() <= 260
+        # 主可视化区分到的高度必须最多：它才是要看的那一块
+        assert lanes["view"].height() > lanes["segment"].height()
+
     finally:
         db.close()
 
@@ -342,30 +345,48 @@ def test_playback_speed_only_changes_playback(work: Path) -> None:
 
 
 
-def test_marks_are_recorded_but_change_nothing(work: Path) -> None:
-    """M10：⭐ 标记落库、再点一次取消；**它一个字都不改分段**。"""
-    from dance_fixtures import fake_song
-    from vidscribe.dance import material_repository as repo
+def test_unsplit_removes_a_boundary_not_a_clip(work: Path) -> None:
+    """M10：× 取消切分删掉的是**最近的那条分段线**（两段合一段），素材一条不动。
 
+    ⭐ 标记那套功能已经整块删掉了：面板上没有标记按钮，也没有标记数据。
+    """
     panel, _cfg, db = _panel(work)
     try:
-        panel._song_id = fake_song(db, duration=20.0)           # noqa: SLF001
         panel.step.setValue(5.0)
         panel._make_uniform()                                   # noqa: SLF001
-        before = panel.template.boundaries
+        assert panel.template.boundaries == (5.0, 10.0, 15.0)   # 内部那几条线
 
-        panel._moved_to(6.4)                                    # noqa: SLF001
-        panel.toggle_mark()
-        assert [round(float(r["moment"]), 3) for r in
-                repo.cut_marks(db, panel._song_id)] == [6.4]    # noqa: SLF001
-        assert panel.marks == [6.4], panel.marks
-        assert panel.template.boundaries == before, "标记居然改了分段"
+        panel._moved_to(9.6)                                    # 离 10.0 那条线最近
+        assert panel.unsplit_here() is True
+        assert panel.template.boundaries == (5.0, 15.0), panel.template.boundaries
+        assert len(panel.template.spans) == 3
 
-        panel.toggle_mark()                                     # 同一处再点 = 取消
-        assert repo.cut_marks(db, panel._song_id) == []         # noqa: SLF001
-        assert panel.marks == []
+        # 撤销能把这条线放回来
+        panel.undo()
+        assert panel.template.boundaries == (5.0, 10.0, 15.0)
+
+
+        # 标记那套东西不许再有
+        assert not hasattr(panel, "toggle_mark")
+        assert not hasattr(panel, "btn_mark")
+        assert not hasattr(panel.timeline, "set_marks")
     finally:
         db.close()
+
+
+def test_the_visualisation_area_switches_what_it_shows(work: Path) -> None:
+    """M12：主可视化区只有一个，右键在 波形 / 人声 / 音谱 之间换；默认波形。"""
+    panel, _cfg, db = _panel(work)
+    try:
+        assert panel.timeline.display_mode == "wave"
+        assert panel.timeline.set_display_mode("spectrum") is True
+        assert panel.timeline.display_mode == "spectrum"
+        assert panel.timeline.set_display_mode("vocal") is True
+        assert panel.timeline.set_display_mode("胡说八道") is False, "不认识的模式该被无视"
+        assert panel.timeline.display_mode == "vocal"
+    finally:
+        db.close()
+
 
 
 def test_playing_one_segment_stops_at_its_end(work: Path) -> None:
@@ -440,7 +461,8 @@ TESTS = (
     test_saving_needs_a_registered_song_and_then_really_saves,
     test_the_page_is_actually_usable,
     test_zoom_and_scroll_share_one_axis,
-    test_marks_are_recorded_but_change_nothing,
+    test_unsplit_removes_a_boundary_not_a_clip,
+    test_the_visualisation_area_switches_what_it_shows,
     test_playing_one_segment_stops_at_its_end,
     test_the_song_picker_really_opens,
     test_dragging_the_track_moves_the_window_not_the_zoom,

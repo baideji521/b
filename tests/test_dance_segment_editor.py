@@ -110,7 +110,39 @@ def test_navigation_answers_where_am_i() -> None:
 
 
 # ================================================================== S1 ~ S6
+def test_three_cuts_on_a_twelve_second_song_make_four_segments() -> None:
+    """S0：切分点数量 + 1 = 段落数量，而且时间是重新算出来的，不是硬编的。
+
+    12 秒的歌在 3 / 5 / 8 秒各切一刀 → S1=0→3、S2=3→5、S3=5→8、S4=8→12。
+    取消 5 秒那条线 → 3 段；把 3 秒那条线拖到 3.5 → 前两段的时间跟着变。
+    """
+    four = seg.from_boundaries(12.0, (3.0, 5.0, 8.0))
+    assert len(four.spans) == 4, [s.to_dict() for s in four.spans]
+    assert [(s.start, s.end) for s in four.spans] == [
+        (0.0, 3.0), (3.0, 5.0), (5.0, 8.0), (8.0, 12.0)]
+    seg.validate(four)
+
+    # 取消切分 = 删掉一条边界（5 秒那条），S2 和 S3 合成一段
+    three = seg.merge_at(four, 2)
+    assert len(three.spans) == 3, [s.to_dict() for s in three.spans]
+    assert three.boundaries == (3.0, 8.0), three.boundaries
+    assert [(s.start, s.end) for s in three.spans] == [
+        (0.0, 3.0), (3.0, 8.0), (8.0, 12.0)]
+
+    # 拖边界：3.0 → 3.5，两边的段落时间重新算，末尾照旧铺到 12
+    moved = seg.move_boundary(four, 0, 3.5)
+    assert moved.boundaries == (3.5, 5.0, 8.0), moved.boundaries
+    assert [(s.start, s.end) for s in moved.spans] == [
+        (0.0, 3.5), (3.5, 5.0), (5.0, 8.0), (8.0, 12.0)]
+    seg.validate(moved)
+
+    # 主音频播到 4 秒 = 落在 S2（列高亮和实时播放行都按这个走）
+    span = four.span_at(4.0)
+    assert span is not None and span.index == 1 and span.name == "S2"
+
+
 def test_uniform_template_covers_the_whole_song() -> None:
+
     """S1：等间隔模板必须铺满整首歌，末尾零头并进最后一段。"""
     plain = seg.uniform(30.0, 2.0)
     assert len(plain.spans) == 15
@@ -382,7 +414,7 @@ def test_cut_zones_wrap_each_pause() -> None:
 
 
 def test_final_selection_is_checked_by_the_database_too(work: Path) -> None:
-    """V5：最终选择、⭐标记、候选顺序都真的落库，而且跨段落的选择**库里也拒绝**。"""
+    """V5：最终选择、人工流水账、候选顺序都真的落库，而且跨段落的选择**库里也拒绝**。"""
     from dance_fixtures import fake_alignment, fake_material, fake_song, fake_video, make_project
     from vidscribe.dance import material_repository as repo
 
@@ -408,22 +440,35 @@ def test_final_selection_is_checked_by_the_database_too(work: Path) -> None:
             raise AssertionError("跨段落的最终选择居然写进库了")
         assert repo.final_selections(db, song_id) == {0: first}, "被拒绝的写入改动了库"
 
-        # ⭐ 标记：加一次、再点一次就是取消
-        repo.add_cut_mark(db, song_id, 7.5)
-        assert [round(float(r["moment"]), 3) for r in repo.cut_marks(db, song_id)] == [7.5]
-        assert repo.remove_cut_mark(db, song_id, 7.5) is True
-        assert repo.cut_marks(db, song_id) == []
+        # 人工选择的流水账：只追加，跨段落连记都不许记
+        logged = repo.log_manual_selection(db, target_song_id=song_id, segment_index=0,
+                                           material_id=first, segment_start=0.0,
+                                           segment_end=2.0)
+        assert logged > 0
+        rows = repo.manual_selections(db, song_id, segment_index=0)
+        assert len(rows) == 1 and int(rows[0]["material_id"]) == first
+        assert rows[0]["decided_by"] == "manual_selection"
+        assert rows[0]["audio_name"], "片段得能追溯到音频名"
+        try:
+            repo.log_manual_selection(db, target_song_id=song_id, segment_index=0,
+                                      material_id=second)
+        except repo.SelectionError as exc:
+            assert "S2" in str(exc), exc
+        else:
+            raise AssertionError("跨段落的人工选择居然记进流水账了")
 
         # 候选顺序：存进去、读出来、按它重排
         repo.save_candidate_order(db, song_id, 0, [second, first])
         assert repo.candidate_order(db, song_id, 0) == [second, first]
-        materials = repo.materials_at(db, song_id, 0)
+        materials = repo.get_candidates(db, song_id, 0)
         assert [m.id for m in repo.order_materials(materials, [first])] == [first]
+
     finally:
         db.close()
 
 
 TESTS = (
+    test_three_cuts_on_a_twelve_second_song_make_four_segments,
 
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -412,37 +413,11 @@ def clear_final_selection(db: Database, target_song_id: int, segment_index: int)
     return cursor.rowcount > 0
 
 
-def add_cut_mark(db: Database, target_song_id: int, moment: float, *,
-                 kind: str = "usable", note: str = "") -> int:
-    """记一个「⭐ 可取」标记。**只是参考**，不改 Segment、不改素材。"""
-    stamp = now()
-    with db.tx() as conn:
-        conn.execute(
-            "INSERT INTO dance_cut_marks (target_song_id, moment, kind, note, created_at) "
-            "VALUES (?,?,?,?,?) ON CONFLICT(target_song_id, moment) DO UPDATE SET "
-            "kind=excluded.kind, note=excluded.note",
-            (int(target_song_id), round(float(moment), 3), kind, note, stamp))
-        row = conn.execute("SELECT id FROM dance_cut_marks WHERE target_song_id = ? "
-                           "AND moment = ?",
-                           (int(target_song_id), round(float(moment), 3))).fetchone()
-    return int(row["id"]) if row is not None else 0
+# 「⭐ 可取标记」这套读写已经删掉了：编排台上不再有标记按钮、标记点和标记数据，
+# 段落边界由用户直接切分决定，不需要第二套"以后也许有用"的记号。
+# v14 建的 `dance_cut_marks` 表留在建表脚本里不动 —— 迁移这条链只许 CREATE，
+# 删表会让"升级上来的库"和"新建的库"schema 文本不一致（v4 踩过的坑）。
 
-
-def cut_marks(db: Database, target_song_id: int) -> list[Any]:
-    return list(db.connect().execute(
-        "SELECT * FROM dance_cut_marks WHERE target_song_id = ? ORDER BY moment",
-        (int(target_song_id),)))
-
-
-def remove_cut_mark(db: Database, target_song_id: int, moment: float,
-                    tolerance: float = 0.05) -> bool:
-    """删掉最近的那个标记（点同一个地方第二下就是取消）。"""
-    with db.tx() as conn:
-        cursor = conn.execute(
-            "DELETE FROM dance_cut_marks WHERE target_song_id = ? "
-            "AND ABS(moment - ?) <= ?",
-            (int(target_song_id), round(float(moment), 3), float(tolerance)))
-    return cursor.rowcount > 0
 
 
 def save_candidate_order(db: Database, target_song_id: int, segment_index: int,
@@ -473,6 +448,115 @@ def order_materials(materials: Sequence[Any], order: Sequence[int]) -> list[Any]
     rank = {int(m): i for i, m in enumerate(order)}
     tail = len(rank)
     return sorted(materials, key=lambda m: (rank.get(int(m.id), tail), int(m.id)))
+
+
+# ============================================== 片段仓库：按「歌 + 段落」隔离的候选池
+#
+# 这一节是自动编排的地基，只有一条硬规则：
+#
+#     一个段落只能用属于这个段落的素材。
+#
+# 所以查询入口就叫 `get_candidates(song, segment)` —— 想拿素材必须同时说清
+# 「哪首歌」和「第几段」，**没有** `get_all_clips(song)` 这种把所有段落混在一起
+# 让人随机挑的口子。素材本身在 `dance_materials` 里就带着 segment_index
+# （切片那一步写的），这里不再另建一份平行的仓库表，免得两份真相打架。
+def get_candidates(db: Database, target_song_id: int, segment_index: int,
+                   *, statuses: Sequence[str] = ("ready",)) -> list[DanceMaterial]:
+    """第 `segment_index` 段的候选池。**跨段落取素材在这一层就不可能。**
+
+    以后自动编排就走这个口子：`score(get_candidates(song, seg))` 选最佳，
+    而不是 `random(all_clips(song))` —— 后者会让画面和音乐错开。
+    """
+    return materials_at(db, target_song_id, segment_index, statuses=statuses)
+
+
+def candidate_counts(db: Database, target_song_id: int,
+                     *, statuses: Sequence[str] = ("ready",)) -> dict[int, int]:
+    """每一段各有几条候选：`{段落: 条数}`。界面上"已生成片段"就是它的和。"""
+    marks = ",".join("?" for _ in statuses) or "''"
+    rows = db.connect().execute(
+        f"SELECT segment_index, COUNT(*) AS n FROM dance_materials "  # noqa: S608
+        f"WHERE target_song_id = ? AND status IN ({marks}) "
+        "GROUP BY segment_index ORDER BY segment_index",
+        (int(target_song_id), *[str(s) for s in statuses])).fetchall()
+    return {int(r["segment_index"]): int(r["n"]) for r in rows}
+
+
+def song_identity(db: Database, target_song_id: int) -> dict[str, Any]:
+    """歌和音频文件的映射，两者**分开**存放，不揉成一个字段。
+
+    `audio_*` 说的是硬盘上那个文件（never_trust_01.mp3），
+    `song_*` 说的是这首歌（Never Trust Prediction）。
+    片段要能追溯到这两样，以后才分得清"同一首歌的不同音频版本"。
+    """
+    row = get_song(db, int(target_song_id))
+    if row is None:
+        return {"song_id": 0, "song_name": "", "audio_id": 0,
+                "audio_name": "", "audio_path": ""}
+    title = str(row["title"] or "").strip()
+    name = str(row["file_name"] or "").strip()
+    return {"song_id": int(row["id"]),
+            # 没填标题就退回文件名（去掉后缀）：宁可重复，也不要空着没法追溯
+            "song_name": title or Path(name).stem,
+            "audio_id": int(row["id"]),          # 一首歌当前只挂一个音频文件
+            "audio_name": name,
+            "audio_path": str(row["file_path"] or "")}
+
+
+def repository_summary(db: Database, target_song_id: int) -> dict[str, Any]:
+    """片段仓库那一栏要显示的东西：音频名、歌名、每段几条、一共几条。"""
+    counts = candidate_counts(db, int(target_song_id))
+    info = song_identity(db, int(target_song_id))
+    info.update({"per_segment": counts, "clip_count": sum(counts.values()),
+                 "segment_count": len(counts)})
+    return info
+
+
+def log_manual_selection(db: Database, *, target_song_id: int, segment_index: int,
+                         material_id: int, segment_start: float = 0.0,
+                         segment_end: float = 0.0, decided_by: str = "manual_selection",
+                         note: str = "") -> int:
+    """记一笔"人工把这条素材拖进了这一段"。**只追加，不覆盖。**
+
+    `dance_final_selections` 只留"现在用谁"，会被下一次拖拽盖掉；这张流水账
+    留的是人做过的每一次判断 —— 以后统计规律、训练自动排序全靠它。
+    源视频、片段路径、歌名/音频名都在写入时定好，素材以后被删也还追得回来。
+    """
+    material = get_material(db, int(material_id))
+    if material is None:
+        raise SelectionError(f"素材 #{material_id} 不在库里")
+    if int(material.segment_index) != int(segment_index):
+        raise SelectionError(
+            f"素材 #{material_id} 绑在 S{int(material.segment_index) + 1}，"
+            f"不能记成 S{int(segment_index) + 1} 的选择")
+    info = song_identity(db, int(target_song_id))
+    with db.tx() as conn:
+        cursor = conn.execute(
+            "INSERT INTO dance_manual_selections("
+            "target_song_id, segment_index, material_id, source_video_id, audio_name,"
+            " song_name, clip_path, segment_start, segment_end, decided_by, note,"
+            " decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (int(target_song_id), int(segment_index), int(material_id),
+             int(getattr(material, "source_video_id", 0) or 0),
+             info["audio_name"], info["song_name"],
+             str(getattr(material, "file_path", "") or ""),
+             round(float(segment_start), 3), round(float(segment_end), 3),
+             str(decided_by), str(note), now()))
+        return int(cursor.lastrowid)
+
+
+def manual_selections(db: Database, target_song_id: int, *, segment_index: int | None = None,
+                      limit: int = 500) -> list[Any]:
+    """人工选择流水账，最近的在前。给统计和以后的自动编排看。"""
+    sql = "SELECT * FROM dance_manual_selections WHERE target_song_id = ?"
+    args: list[Any] = [int(target_song_id)]
+    if segment_index is not None:
+        sql += " AND segment_index = ?"
+        args.append(int(segment_index))
+    sql += " ORDER BY id DESC LIMIT ?"
+    args.append(int(limit))
+    return list(db.connect().execute(sql, tuple(args)).fetchall())
+
 
 
 # ==================================================================== 对齐

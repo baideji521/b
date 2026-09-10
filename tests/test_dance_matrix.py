@@ -37,64 +37,65 @@ _app = QApplication.instance() or QApplication(sys.argv[:1])
 
 
 def _rows(prefix: str, count: int, segment: int) -> list[dict]:
-    """素材 id 从 1 起（库里是自增主键，0 不会出现）。"""
-    return [{"material_id": segment * 100 + i + 1, "label": f"{prefix}{i}.mp4"}
+    """素材 id 从 1 起（库里是自增主键，0 不会出现）；每条素材属于一个视频（= 一行）。"""
+    return [{"material_id": segment * 100 + i + 1, "video_id": i + 1,
+             "video_name": f"{prefix}{i}.mp4", "label": f"{prefix}{i}.mp4",
+             "segment_index": segment, "target_start": segment * 1.0,
+             "target_end": segment * 1.0 + 1.0}
             for i in range(count)]
 
 
 def _payload(material_id: int, segment: int, label: str = "x.mp4") -> dict:
-    return {"material_id": material_id, "segment_index": segment, "label": label}
+    return {"material_id": material_id, "segment_index": segment, "label": label,
+            "video_id": 1, "video_name": label}
 
 
 # ================================================================== X1 ~ X2
-def test_dragging_inside_one_column_changes_who_is_used() -> None:
-    """X1：把第三张卡片拖到最上面 → 这一列的当前使用就换成它，⭐跟着走。"""
-    column = mx.MaterialColumn(2, "S3")
-    column.load(_rows("dancer", 3, 2))
+def test_dragging_a_cell_up_sets_who_this_segment_uses() -> None:
+    """X1：把某个视频在 S3 的格子拖到实时播放行 → 这一段就改用它。"""
+    cell = mx.RealtimeCell(2, "S3")
+    cell.set_material(_payload(201, 2, "dancer0.mp4"))
     picks: list[tuple[int, int]] = []
-    column.reordered.connect(lambda seg, mid: picks.append((seg, mid)))
+    cell.replaced.connect(lambda seg, mid: picks.append((seg, mid)))
 
-    assert column.current_pick() == 201
-    assert column.item(0).text().startswith("⭐")
-
-    assert column.drop_payload(_payload(203, 2, "dancer2.mp4"), 0) is True
-    assert column.current_pick() == 203, column.current_pick()
-    assert column.count() == 3, "拖动是移动，不该多出一张卡片"
-    assert column.item(0).text().startswith("⭐")
-    assert not column.item(1).text().startswith("⭐"), "⭐留在了旧位置"
+    assert cell.material_id == 201
+    assert cell.drop_payload(_payload(203, 2, "dancer2.mp4")) is True
+    assert cell.material_id == 203
+    assert "dancer2.mp4" in cell.body.text()
     assert picks and picks[-1] == (2, 203), picks
 
 
 def test_crossing_segments_is_refused_and_changes_nothing() -> None:
-    """X2：S4 的素材拖到 S1 的列 → 拒绝、一张卡片都不动、而且说清原因。"""
-    column = mx.MaterialColumn(0, "S1")
-    column.load(_rows("a", 2, 0))
-    before = [p["material_id"] for p in column.payloads()]
+    """X2：S4 的素材拖到 S1 那一格 → 拒绝、什么都不改、而且说清原因。"""
+    cell = mx.RealtimeCell(0, "S1")
+    cell.set_material(_payload(1, 0, "a0.mp4"))
     said: list[tuple[int, int]] = []
-    column.refused.connect(lambda target, came: said.append((target, came)))
+    cell.refused.connect(lambda target, came: said.append((target, came)))
 
-    assert column.drop_payload(_payload(303, 3, "e.mp4"), 0) is False
-    assert [p["material_id"] for p in column.payloads()] == before
-    assert column.count() == 2
+    assert cell.drop_payload(_payload(303, 3, "e.mp4")) is False
+    assert cell.material_id == 1, "跨段落居然把这一格改了"
     assert said and said[-1] == (0, 3), said
     assert mx.accepts(0, _payload(303, 3)) is False
     assert mx.accepts(3, _payload(303, 3)) is True
 
 
 # ================================================================== X3 ~ X5
-def test_timeline_slot_follows_the_same_rule() -> None:
-    """X3：FINAL TIMELINE 的槽同一套规则 —— 同段落替换，跨段落纹丝不动。"""
-    slot = mx.TimelineSlot(1, "S2")
-    slot.set_material(101, "b1.mp4")
-    changed: list[tuple[int, int]] = []
-    slot.replaced.connect(lambda seg, mid: changed.append((seg, mid)))
+def test_the_matrix_has_one_column_per_segment() -> None:
+    """X3：列数完全跟着 Segment 走 —— 4 段 4 列，加一刀就 5 列，取消就回 4 列。"""
+    panel = mx.MatrixPanel()
+    four = [{"index": i, "title": f"S{i + 1}", "span": (float(i), float(i + 1)),
+             "materials": _rows("a", 2, i)} for i in range(4)]
+    panel.load(four)
+    assert len(panel.realtime) == 4, len(panel.realtime)
+    assert len(panel.videos) == 2, panel.videos          # 行 = 视频
+    assert len(panel.cells) == 8, len(panel.cells)       # 4 列 × 2 行
 
-    assert slot.drop_payload(_payload(102, 1, "b2.mp4")) is True
-    assert slot.material_id == 102 and "b2.mp4" in slot.body.text()
-    assert changed[-1] == (1, 102)
+    panel.load(four + [{"index": 4, "title": "S5", "span": (4.0, 5.0),
+                        "materials": _rows("a", 2, 4)}])
+    assert len(panel.realtime) == 5, "切了一刀，矩阵没长出第五列"
 
-    assert slot.drop_payload(_payload(400, 4, "d.mp4")) is False
-    assert slot.material_id == 102, "跨段落居然把槽改了"
+    panel.load(four)
+    assert len(panel.realtime) == 4, "取消切分之后列没减回去"
 
 
 def test_mime_packing_ignores_anything_that_is_not_ours() -> None:
@@ -111,22 +112,23 @@ def test_mime_packing_ignores_anything_that_is_not_ours() -> None:
     assert mx.accepts(1, {}) is False
 
 
-def test_panel_picks_reflect_the_final_timeline() -> None:
-    """X5：面板整体 —— picks() 只反映 FINAL TIMELINE 上摆着的那份。"""
+def test_realtime_row_is_what_the_final_cut_reads() -> None:
+    """X5：picks() 只看实时播放行；空着的段落就是空的，不会拿别的段顶上。"""
     panel = mx.MatrixPanel()
     panel.load([
-        {"index": 0, "title": "S1", "materials": _rows("a", 2, 0)},
-        {"index": 1, "title": "S2", "materials": _rows("b", 3, 1)},
-        {"index": 2, "title": "S3", "materials": []},
+        {"index": 0, "title": "S1", "span": (0.0, 1.0), "materials": _rows("a", 2, 0),
+         "current": 1},
+        {"index": 1, "title": "S2", "span": (1.0, 2.0), "materials": _rows("b", 3, 1),
+         "current": 101},
+        {"index": 2, "title": "S3", "span": (2.0, 3.0), "materials": []},
     ])
     seen: list[dict] = []
     panel.picks_changed.connect(seen.append)
 
-    assert len(panel.columns) == 3 and len(panel.slots) == 3
     assert panel.picks() == {0: 1, 1: 101}, panel.picks()   # S3 没有候选，就是空的
+    assert panel.current_payload(2) == {}, "S3 明明没素材"
 
-    # 在 S2 那一列把第三张拖到最上面 → 槽和 picks 一起变
-    panel.columns[1].drop_payload(_payload(103, 1, "b2.mp4"), 0)
+    assert panel.choose(1, 103) is True
     assert panel.picks()[1] == 103, panel.picks()
     assert seen and seen[-1][1] == 103
 
@@ -134,13 +136,26 @@ def test_panel_picks_reflect_the_final_timeline() -> None:
     words: list[str] = []
     panel.refused.connect(words.append)
     before = panel.picks()
-    assert panel.slots[0].drop_payload(_payload(103, 1)) is False
+    assert panel.realtime[0].drop_payload(_payload(103, 1)) is False
     assert panel.picks() == before
     assert words and "S2" in words[-1] and "S1" in words[-1], words
+    assert panel.choose(0, 103) is False, "跨段落连 choose() 也不许"
 
 
-def test_the_panel_saves_and_restores_the_final_timeline() -> None:
-    """X6：拖一下就落库；重新建一个面板按库里那份恢复 —— 界面状态不是唯一真相。"""
+def test_current_segment_follows_the_master_audio() -> None:
+    """X6：主音频播到哪一段，就是哪一列在亮 —— 它只是显示，不改任何选择。"""
+    panel = mx.MatrixPanel()
+    panel.load([{"index": i, "title": f"S{i + 1}", "span": (float(i), float(i + 1)),
+                 "materials": _rows("a", 1, i)} for i in range(3)])
+    before = panel.picks()
+    panel.set_current_segment(1)
+    assert panel.current_segment == 1
+    assert panel.realtime[1].styleSheet() != panel.realtime[0].styleSheet()
+    assert panel.picks() == before, "只是高亮，居然把选择改了"
+
+
+def test_the_panel_saves_and_restores_the_realtime_row() -> None:
+    """X7：拖一下就落库（最终选择 + 候选顺序 + 人工流水账）；重开面板能恢复。"""
     from dance_fixtures import (
         fake_alignment,
         fake_material,
@@ -161,25 +176,34 @@ def test_the_panel_saves_and_restores_the_final_timeline() -> None:
         first = fake_material(db, song_id, video_id, 0)
         second = fake_material(db, song_id, other, 0)
 
-        rows = [{"material_id": first, "label": "a.mp4"},
-                {"material_id": second, "label": "b.mp4"}]
+        rows = [{"material_id": first, "video_id": video_id, "video_name": "a.mp4",
+                 "label": "a.mp4", "segment_index": 0},
+                {"material_id": second, "video_id": other, "video_name": "b.mp4",
+                 "label": "b.mp4", "segment_index": 0}]
         panel = mx.MatrixPanel(db=db, song_id=song_id)
-        panel.load([{"index": 0, "title": "S1", "materials": rows}])
+        panel.load([{"index": 0, "title": "S1", "span": (0.0, 2.0),
+                     "current": first, "materials": rows}])
         assert panel.picks() == {0: first}
 
-        panel.columns[0].drop_payload(_payload(second, 0, "b.mp4"), 0)
+        assert panel.choose(0, second) is True
         assert panel.picks() == {0: second}
         assert repo.final_selections(db, song_id) == {0: second}, "拖完没落库"
-        assert repo.candidate_order(db, song_id, 0) == [second, first]
+        assert repo.candidate_order(db, song_id, 0) == [first, second]
+        logged = repo.manual_selections(db, song_id)
+        assert logged and int(logged[0]["material_id"]) == second, "人工选择没记流水账"
+        assert float(logged[0]["segment_end"]) == 2.0
 
         # 重新开一个面板：按库里那份摆回来（这就是"重开工程能恢复"）
         again = mx.MatrixPanel(db=db, song_id=song_id)
-        ordered = repo.order_materials(repo.materials_at(db, song_id, 0),
+        ordered = repo.order_materials(repo.get_candidates(db, song_id, 0),
                                        repo.candidate_order(db, song_id, 0))
-        again.load([{"index": 0, "title": "S1", "current": second, "materials": [
-            {"material_id": m.id, "label": Path(m.file_path).name} for m in ordered]}])
+        again.load([{"index": 0, "title": "S1", "span": (0.0, 2.0), "current": second,
+                     "materials": [
+                         {"material_id": m.id, "video_id": int(m.source_video_id),
+                          "video_name": Path(m.file_path).name,
+                          "label": Path(m.file_path).name, "segment_index": 0}
+                         for m in ordered]}])
         assert again.picks() == {0: second}, again.picks()
-        assert again.columns[0].item(0).text().startswith("⭐ CURRENT")
 
         # 撤销 → 回到上一份，而且库里也跟着回去
         assert again.undo() is False, "刚打开就有可撤销的东西？"
@@ -193,15 +217,58 @@ def test_the_panel_saves_and_restores_the_final_timeline() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_candidate_pools_are_isolated_per_segment() -> None:
+    """X8：仓库按「歌 + 段落」隔离 —— 查 S1 只会拿到 S1 的候选，绝不串段。"""
+    from dance_fixtures import (
+        fake_alignment,
+        fake_material,
+        fake_song,
+        fake_video,
+        make_project,
+    )
+    from vidscribe.dance import material_repository as repo
+
+    work = Path(tempfile.mkdtemp(prefix="dancepool_"))
+    cfg, db = make_project(work)
+    try:
+        song_id = fake_song(db, duration=12.0)
+        first = fake_video(db, "a.mp4")
+        second = fake_video(db, "b.mp4")
+        fake_alignment(db, song_id, first)
+        fake_alignment(db, song_id, second, offset=1.0)
+        made = {}
+        for segment in (0, 1, 2):
+            made[segment] = {fake_material(db, song_id, first, segment),
+                             fake_material(db, song_id, second, segment)}
+
+        for segment in (0, 1, 2):
+            pool = repo.get_candidates(db, song_id, segment)
+            assert {m.id for m in pool} == made[segment], segment
+            assert all(int(m.segment_index) == segment for m in pool), "候选池串段了"
+        assert repo.candidate_counts(db, song_id) == {0: 2, 1: 2, 2: 2}
+
+        # 歌 / 音频两个名字分开存，片段能追溯到这两样
+        info = repo.repository_summary(db, song_id)
+        assert info["clip_count"] == 6, info
+        assert info["audio_name"] and info["song_name"], info
+        assert info["song_id"] == song_id
+    finally:
+        db.close()
+        shutil.rmtree(work, ignore_errors=True)
+
+
 TESTS = (
 
-    test_dragging_inside_one_column_changes_who_is_used,
+    test_dragging_a_cell_up_sets_who_this_segment_uses,
     test_crossing_segments_is_refused_and_changes_nothing,
-    test_timeline_slot_follows_the_same_rule,
+    test_the_matrix_has_one_column_per_segment,
     test_mime_packing_ignores_anything_that_is_not_ours,
-    test_panel_picks_reflect_the_final_timeline,
-    test_the_panel_saves_and_restores_the_final_timeline,
+    test_realtime_row_is_what_the_final_cut_reads,
+    test_current_segment_follows_the_master_audio,
+    test_the_panel_saves_and_restores_the_realtime_row,
+    test_candidate_pools_are_isolated_per_segment,
 )
+
 
 
 def main() -> int:

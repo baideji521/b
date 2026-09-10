@@ -52,7 +52,38 @@ def _window(work: Path):
     return window, song_id, materials
 
 
+def test_the_master_audio_drives_the_realtime_row(work: Path) -> None:
+    """主音频位置 → 当前 Segment → 矩阵那一列 → 实时画面；**没素材就不播**。"""
+    from vidscribe.dance import segment_template as seg
+
+    window, song_id, _m = _window(work)
+    try:
+        window._song_id = song_id                          # noqa: SLF001
+        window.reload()
+        # 12 秒的歌，3 秒一段 → S1~S4；主音频那条时间轴是唯一权威
+        window.master._adopt(seg.uniform(12.0, 3.0), remember=False)   # noqa: SLF001
+        window.master._duration = 12.0                     # noqa: SLF001
+
+        window._master_moved(4.0)                          # noqa: SLF001
+        assert window.matrix.current_segment == 1, window.matrix.current_segment
+        window._master_moved(9.5)                          # noqa: SLF001
+        assert window.matrix.current_segment == 3
+
+        # 这一段没素材：画面保持空，绝不拿别的段顶上
+        window._sync_live({}, 9.5)                         # noqa: SLF001
+        assert window._live_material == 0                  # noqa: SLF001
+        assert "没有素材" in window.live_note.text(), window.live_note.text()
+        assert not window.live.is_playing()
+
+        # 片段仓库那一栏说得出音频名 / 歌名 / 已生成片段
+        text = window.repo_note.text()
+        assert "音频名称" in text and "已生成片段" in text, text
+    finally:
+        window.close()
+
+
 def test_window_has_all_four_regions(work: Path) -> None:
+
     """一期第二十四节的四个区域，面板一个都不能少。"""
     window, _song_id, _m = _window(work)
     try:
@@ -63,14 +94,18 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.alignment is not None
         assert window.bench is not None             # 源视频对齐 / 切片入库（在编排台里）
         assert window.master is not None            # 主音频编辑区（段落模板）
-        assert window.matrix is not None            # 素材矩阵 + FINAL TIMELINE
+        assert window.matrix is not None            # 素材矩阵（就在编排台里）
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert titles == ["🎵 编排台（主音频→分段→素材→成片）", "素材资产", "音频对齐",
-                          "选择与推荐", "📦 素材矩阵/成片", "历史与统计"], titles
-        # 编排台一页：最上边是「源视频/目标歌/开始音频对齐」，下面是主音频编辑区
+                          "选择与推荐", "历史与统计"], titles
+        # 编排台一页走完：一行工具栏 → 视频位置+主音频编辑区 → 素材矩阵+实时播放
         assert window.tabs.widget(0) is window.studio
         assert window.studio_split.widget(0) is window.bench
-        assert window.studio_split.widget(1) is window.master
+        assert window.studio_split.widget(1).isAncestorOf(window.master)
+        assert window.studio_split.widget(1).isAncestorOf(window.coverage)
+        assert window.studio_split.widget(2).isAncestorOf(window.matrix)
+        assert window.studio_split.widget(2).isAncestorOf(window.live)
+
         for button in (window.btn_preview_final, window.btn_save_all,
                        window.btn_export_final):
             assert button.minimumHeight() >= 38, button.text()
@@ -464,6 +499,7 @@ def test_every_panel_fills_its_table_with_real_rows(work: Path) -> None:
 
 
 TESTS = (
+    test_the_master_audio_drives_the_realtime_row,
     test_window_has_all_four_regions,
     test_panels_show_real_library,
     test_every_panel_fills_its_table_with_real_rows,

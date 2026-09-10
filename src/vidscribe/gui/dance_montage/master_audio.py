@@ -37,6 +37,7 @@ from PyQt5.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -51,7 +52,7 @@ from PyQt5.QtWidgets import (
 from ...logging_setup import get_logger
 from .. import theme
 from . import dialogs
-from .master_timeline import MasterTimeline
+from .master_timeline import DISPLAY_LABELS, DISPLAY_MODES, MasterTimeline
 
 logger = get_logger("dance.gui.master")
 
@@ -160,7 +161,6 @@ class MasterAudioPanel(QWidget):
         self._song_id = 0
         self._undo: list[Any] = []     # 每次改动前的模板，用来撤销
         self._redo: list[Any] = []     # 撤销掉的那些，用来重做
-        self._marks: list[float] = []  # 用户「⭐ 可取」标记（库里那份）
         self._stop_at: float | None = None   # 「播放当前段」到这里自动停
         self._analyzed_path = ""       # 上一次分析的是哪首，免得同一首分析两遍
 
@@ -331,9 +331,13 @@ class MasterAudioPanel(QWidget):
         column.setSpacing(6)
 
         self.timeline = MasterTimeline(holder)
-        self.timeline.setToolTip("左键点＝定位／拖分段线；中键拖（或 Alt+左键拖）＝抓着音轨左右挪；\n"
-                                 "滚轮＝缩放，Shift+滚轮＝横向滚动。")
+        self.timeline.setToolTip("左键按住＝拖动播放位置；拖分段线＝改段落边界；\n"
+                                 "中键拖（或 Alt+左键拖）＝抓着音轨左右挪；\n"
+                                 "滚轮＝缩放，Shift+滚轮＝横向滚动；右键＝换显示 / 切分。")
+        self.timeline.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.timeline.customContextMenuRequested.connect(self._timeline_menu)
         column.addWidget(self.timeline, 1)
+
 
 
         # 横向滚动条：窗口小于全曲时才有意义，所以跨度变了就跟着调
@@ -396,30 +400,79 @@ class MasterAudioPanel(QWidget):
             self.anchor.addItem(text, key)
         self.btn_prev = _big(QPushButton("◀ 上一个停顿", holder))
         self.btn_next = _big(QPushButton("▶ 下一个停顿", holder))
-        self.btn_split = _big(QPushButton("✂ 在这里分段", holder), bold=True)
-        self.btn_merge = _big(QPushButton("并进前一段", holder))
-        self.btn_mark = _big(QPushButton("⭐ 标记为可取", holder))
+        self.btn_split = _big(QPushButton("✂ 切分", holder), bold=True)
+        self.btn_unsplit = _big(QPushButton("× 取消切分", holder))
+        self.btn_unsplit.setToolTip("删掉离播放位置最近的那条分段线（两段合成一段）。\n"
+                                   "它删的是**边界**，一条素材都不会动。")
+        self.btn_merge = _big(QPushButton("⇆ 合并前一段", holder))
         self.btn_play_span = _big(QPushButton("▶ 播放当前段", holder))
 
         row.addWidget(self.status, 1)
         for widget in (self.anchor, self.btn_prev, self.btn_next, self.btn_split,
-                       self.btn_merge, self.btn_mark, self.btn_play_span):
+                       self.btn_unsplit, self.btn_merge, self.btn_play_span):
             row.addWidget(widget)
 
         self.btn_prev.clicked.connect(lambda: self._jump(-1))
         self.btn_next.clicked.connect(lambda: self._jump(1))
         self.btn_split.clicked.connect(self._split_here)
+        self.btn_unsplit.clicked.connect(self.unsplit_here)
         self.btn_merge.clicked.connect(self._merge_here)
-        self.btn_mark.clicked.connect(self.toggle_mark)
         self.btn_play_span.clicked.connect(self.play_current_segment)
         return holder
 
+    def _timeline_menu(self, point) -> None:
+        """时间轴右键菜单。
+
+        点在分段线上 → 只给「取消切分」（它删的是边界，不是素材）；
+        点在段落里   → 播放当前段 / 在此处切分；
+        另外永远有一层「显示」用来换波形 / 人声 / 音谱。
+        菜单里**没有任何"标记"** —— 那个功能已经整块删掉了。
+        """
+        moment = self.timeline.time_at(point.x())
+        boundary = self.timeline.boundary_near(point.x())
+        menu = QMenu(self)
+        show = menu.addMenu("显示")
+        for key in DISPLAY_MODES:
+            action = show.addAction(DISPLAY_LABELS[key])
+            action.setCheckable(True)
+            action.setChecked(self.timeline.display_mode == key)
+            action.triggered.connect(lambda _c=False, k=key: self.timeline.set_display_mode(k))
+        menu.addSeparator()
+        if boundary >= 0:
+            menu.addAction("× 取消切分").triggered.connect(
+                lambda _c=False, m=moment: self.unsplit_here(m))
+        else:
+            menu.addAction("播放到此处").triggered.connect(
+                lambda _c=False, m=moment: self._seek_and_play(m))
+            if self.timeline.segment_at(moment) >= 0:
+                menu.addAction("▶ 播放当前段").triggered.connect(
+                    lambda _c=False, m=moment: self._play_segment_at(m))
+            menu.addAction("✂ 在此处切分").triggered.connect(
+                lambda _c=False, m=moment: self._split_at(m))
+        menu.exec_(self.timeline.mapToGlobal(point))
+
+    def _seek_and_play(self, moment: float) -> None:
+        """「播放到此处」：先跳过去再放，播放位置永远是主音频说了算。"""
+        self._moved_to(float(moment))
+        self.player.setPosition(int(max(0.0, float(moment)) * 1000))
+        self.play()
+
+    def _play_segment_at(self, moment: float) -> None:
+        self._moved_to(float(moment))
+        self.play_current_segment()
+
+    def _split_at(self, moment: float) -> None:
+        """在右键点的那一刻切一刀（先把播放位置挪过去，再走同一条切分路径）。"""
+        self._moved_to(float(moment))
+        self._split_here()
+
     # ---------------------------------------------------------------- 快捷键
+
     def _install_shortcuts(self) -> None:
         """这一页自己的快捷键。作用域是**本控件及其子控件**，不抢主窗口那几个。
 
         Space / K 播放暂停、← J 上一个停顿、→ L 下一个停顿、
-        S 在这里分段、M 标记为可取。
+        S 在这里切分、Delete 取消最近的那条切分。
         """
         def bind(keys: str, handler) -> None:
             shortcut = QShortcut(QKeySequence(keys), self)
@@ -433,7 +486,8 @@ class MasterAudioPanel(QWidget):
         bind("Right", lambda: self._jump(1))
         bind("L", lambda: self._jump(1))
         bind("S", self._split_here)
-        bind("M", self.toggle_mark)
+        bind("Delete", self.unsplit_here)
+
 
     # ---------------------------------------------------------------- 分析
     def _pick(self) -> None:
@@ -496,7 +550,6 @@ class MasterAudioPanel(QWidget):
         if chosen:
             self.player.setMedia(
                 QMediaContent(QUrl.fromLocalFile(str(Path(chosen).resolve()))))
-        self._reload_marks()
         self._fill_navigator()
         self._load_saved_template()
         pauses = len(self._activity.pauses) if self._activity is not None else 0
@@ -578,6 +631,17 @@ class MasterAudioPanel(QWidget):
         self.timeline.set_cursor_time(self._at)
         self.seek_requested.emit(round(self._at, 3))
         self._refresh_status()
+
+    def seek_to(self, moment: float) -> None:
+        """外面（视频位置那条带子、右键菜单）要求跳到某一秒：**播放器也真的跟着跳**。
+
+        主音频是唯一时间权威，所以定位只能从这一个入口进，别处不许自己算时间。
+        """
+        self._moved_to(float(moment))
+        if self._duration > 0:
+            self.player.setPosition(int(max(0.0, float(moment)) * 1000))
+        self.timeline.ensure_visible(float(moment))
+
 
     def _refresh_status(self) -> None:
         if self._duration <= 0:
@@ -663,35 +727,8 @@ class MasterAudioPanel(QWidget):
         self.scroll.setValue(int(start * 1000))
         self.scroll.blockSignals(False)
 
-    # ------------------------------------------------------------ ⭐ 可取标记
-    def toggle_mark(self) -> None:
-        """在当前位置加/去掉一个「可取」标记。**只是记号**，不改分段、不改素材。"""
-        if self.db is None or self._song_id <= 0:
-            QMessageBox.information(self, "还没登记这首歌", "先点「分析主音频」。")
-            return
-        from ...dance import material_repository as repo  # noqa: PLC0415
-
-        moment = round(self._at, 3)
-        if repo.remove_cut_mark(self.db, self._song_id, moment):
-            self.status.setText(f"取消了 {moment:.3f}s 的可取标记")
-        else:
-            repo.add_cut_mark(self.db, self._song_id, moment)
-            self.status.setText(f"记下了：{moment:.3f}s 可取（只是记号，不动分段）")
-        self._reload_marks()
-
-    def _reload_marks(self) -> None:
-        if self.db is None or self._song_id <= 0:
-            return
-        from ...dance import material_repository as repo  # noqa: PLC0415
-
-        self._marks = [float(row["moment"]) for row in repo.cut_marks(self.db, self._song_id)]
-        self.timeline.set_marks(self._marks)
-
-    @property
-    def marks(self) -> list[float]:
-        return list(self._marks)
-
     # ------------------------------------------------------------ 段落编辑
+
     def _editor(self):
         from ...dance import segment_template as editor  # noqa: PLC0415
 
@@ -751,7 +788,35 @@ class MasterAudioPanel(QWidget):
         except editor.SegmentError as exc:
             self._complain(exc)
 
+    def unsplit_here(self, moment: float | None = None) -> bool:
+        """× 取消切分：删掉离 `moment`（默认当前播放位置）**最近的那条分段线**。
+
+        它删的是边界，不是素材 —— `S2 | S3` 的线没了就变成一段 `S2+S3`。
+        走的还是 `segment_template.merge_at`，所以"合不合法"仍然只有一处判定。
+        整首歌只剩一段时没有内部边界可删，说清楚就好，不硬来。
+        """
+        if self._template is None:
+            return False
+        editor = self._editor()
+        spans = list(self._template.spans)
+        if len(spans) < 2:
+            self.status.setText("只有一段，没有分段线可以取消")
+            return False
+        at = self._at if moment is None else float(moment)
+        # 内部边界 = 第 1..n-1 段的起点；挑离目标最近的那条
+        index = min(range(1, len(spans)), key=lambda i: abs(spans[i].start - at))
+        line = spans[index].start
+        try:
+            self._adopt(editor.merge_at(self._template, index))
+        except editor.SegmentError as exc:
+            self._complain(exc)
+            return False
+        self.status.setText(f"取消了 {line:.3f}s 那条分段线"
+                            f"（现在 {len(self._template.spans)} 段）")
+        return True
+
     def _merge_here(self) -> None:
+
         if self._template is None:
             return
         editor = self._editor()
@@ -856,6 +921,12 @@ class MasterAudioPanel(QWidget):
 
     def set_playhead(self, moment: float | None) -> None:
         self.timeline.set_playhead(moment)
+
+    @property
+    def at(self) -> float:
+        """当前播放位置（秒）。别的面板要跟着它走，就读这一个。"""
+        return float(self._at)
+
 
     def state(self) -> dict[str, Any]:
         return {"path": self.path.text().strip(), "step": float(self.step.value()),

@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
@@ -872,6 +872,45 @@ DANCE_V14_TABLES = (
 )
 
 TABLES = TABLES + DANCE_V14_TABLES
+
+#: v15：**人工挑素材的流水账**（`dance_manual_selections`）。
+#:
+#: `dance_final_selections` 只留"现在这一段用谁"——它会被下一次拖拽覆盖，
+#: 于是"用户当时到底比较过什么、最后挑了谁"这份最值钱的数据就丢了。
+#: 这张表只追加不覆盖：每次人工把某条候选拖进实时播放行就记一行，
+#: 带上歌、音频、段落、素材、源视频和当时的片段路径。
+#: 以后做自动编排时，它就是"人给的答案"，用来统计规律、训练排序。
+#:
+#: 还是**只建新表**：不给 dance_final_selections 加列，升级库和新建库的
+#: SQL 文本才能逐字一致（v4 那个坑不再踩第二遍）。
+DANCE_V15_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS dance_manual_selections (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_song_id INTEGER NOT NULL
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        segment_index  INTEGER NOT NULL,
+        material_id    INTEGER NOT NULL
+                       REFERENCES dance_materials(id) ON DELETE CASCADE,
+        source_video_id INTEGER NOT NULL DEFAULT 0,
+        audio_name     TEXT    NOT NULL DEFAULT '',
+        song_name      TEXT    NOT NULL DEFAULT '',
+        clip_path      TEXT    NOT NULL DEFAULT '',
+        segment_start  REAL    NOT NULL DEFAULT 0,
+        segment_end    REAL    NOT NULL DEFAULT 0,
+        decided_by     TEXT    NOT NULL DEFAULT 'manual_selection',
+        note           TEXT    NOT NULL DEFAULT '',
+        decided_at     TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_manual_selections_song "
+    "ON dance_manual_selections(target_song_id, segment_index)",
+    "CREATE INDEX IF NOT EXISTS idx_dance_manual_selections_material "
+    "ON dance_manual_selections(material_id)",
+)
+
+TABLES = TABLES + DANCE_V15_TABLES
+
 
 
 

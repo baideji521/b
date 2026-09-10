@@ -225,6 +225,8 @@ class AlignBenchPanel(QWidget):
         self.more_hint = QLabel("批量：0 个", holder)
         self.more_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         btn_more = _big(QPushButton("批量选视频…", holder), 30)
+        self.btn_folder = _big(QPushButton("选视频文件夹…", holder), 30)
+        self.btn_folder.setToolTip("挑一个文件夹，里面所有视频一次全进批量清单")
         btn_clear = _big(QPushButton("清空批量", holder), 30)
 
         # 这一页只有两个"主"按钮（开始对齐、播放卡点），它们比别的高一档，
@@ -246,7 +248,7 @@ class AlignBenchPanel(QWidget):
 
         actions = QHBoxLayout()
         actions.setSpacing(6)
-        for widget in (btn_more, btn_clear, self.more_hint):
+        for widget in (btn_more, self.btn_folder, btn_clear, self.more_hint):
             actions.addWidget(widget)
         actions.addSpacing(12)
         actions.addWidget(self.btn_start, 2)
@@ -259,6 +261,7 @@ class AlignBenchPanel(QWidget):
         btn_source.clicked.connect(self._pick_source)
         self.btn_target.clicked.connect(self._pick_target)
         btn_more.clicked.connect(self._pick_more)
+        self.btn_folder.clicked.connect(self._pick_folder)
         btn_clear.clicked.connect(self._clear_more)
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
@@ -674,6 +677,34 @@ class AlignBenchPanel(QWidget):
     def _clear_more(self) -> None:
         self.more.clear()
         self._show_more_count()
+
+    #: 文件夹里认这些后缀（和 dialogs.VIDEO_FILTER 保持一致）
+    VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi", ".flv", ".wmv", ".m4v", ".webm")
+
+    def _pick_folder(self, folder: str = "") -> int:
+        """挑一个文件夹 → 里面的视频一次全进批量清单，返回加了几个。
+
+        素材通常是"一个文件夹几十条舞蹈视频"，一条条勾太慢。
+        重复的路径不再加第二遍；子文件夹也一起找（`rglob`），
+        名字排序后再加，顺序稳定，跑批的日志才对得上。
+        """
+        chosen = str(folder or dialogs.open_dir(
+            self, "选视频文件夹", self.cfg.dance_path("source_dir"), "dance.source_dir"))
+        if not chosen:
+            return 0
+        existing = {self.more.item(i).text() for i in range(self.more.count())}
+        found = sorted(str(p) for p in Path(chosen).rglob("*")
+                       if p.is_file() and p.suffix.lower() in self.VIDEO_SUFFIXES)
+        added = 0
+        for path in found:
+            if path in existing:
+                continue
+            self.more.addItem(path)
+            added += 1
+        self._show_more_count()
+        self.say(f"从文件夹加了 {added} 个视频（{chosen}）")
+        return added
+
 
     def _show_more_count(self) -> None:
         count = int(self.more.count())
