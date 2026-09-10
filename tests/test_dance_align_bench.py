@@ -749,8 +749,21 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
 
         # 编排台上半部分只剩一行工具栏：对齐台那一大片全收起来了
         assert not window.bench._stack.isVisible()           # noqa: SLF001
-        # 留下的是真正干活的那几件：选视频、开始对齐、入库
+        # 那一行就是画里的三组：主音频 / 视频文件夹 / 音频对齐
+        assert window.bench.isAncestorOf(window.master.path), "主音频不在顶栏里"
+        assert window.bench.folder.isVisibleTo(window.bench), "视频文件夹那一栏不见了"
+        assert window.bench.btn_folder.isVisibleTo(window.bench)
         assert window.bench.btn_start.isVisibleTo(window.bench)
+        # 源视频单选、批量那两个按钮、进度条都不在这一页上
+        assert not window.bench.source.isVisibleTo(window.bench)
+        assert not window.bench.bar.isVisibleTo(window.bench)
+        # 「开始音频对齐」必须整颗露在顶栏里 —— 被裁掉过一次，从此有测试盯着
+        top = window.bench.btn_start.mapTo(window.bench,
+                                           window.bench.btn_start.rect().topLeft()).y()
+        assert top >= 0, top
+        assert top + window.bench.btn_start.height() <= window.bench.minimumHeight(), \
+            (top, window.bench.btn_start.height(), window.bench.minimumHeight())
+
 
         # 入库三个按钮钉在整页页脚，不再夹在对齐区和主音频编辑区中间
         assert window.studio_ingest.parent() is window.studio

@@ -364,24 +364,24 @@ class MasterAudioPanel(QWidget):
         self.min_score.setMinimumHeight(FIELD_HEIGHT)
         btn_uniform = _big(QPushButton("等间隔起步", holder))
         btn_by_pause = _big(QPushButton("照人声停顿分", holder))
-        self.btn_undo = _big(QPushButton("撤销上一步", holder))
-        self.btn_undo.setEnabled(False)
         self.btn_save = _big(QPushButton("保存这份分段", holder), bold=True)
 
+        # 这一行是"起步参数"：偶尔动一次。真正天天点的（切分/取消/合并/撤销/重做）
+        # 全在下面那一行，和画里的顺序一致
         for widget in (self.step, btn_uniform, self.min_score, btn_by_pause):
             tools.addWidget(widget)
         tools.addStretch(1)
-        tools.addWidget(self.btn_undo)
         tools.addWidget(self.btn_save)
         column.addLayout(tools)
+
 
         self.timeline.seeked.connect(self._moved_to)
         self.timeline.boundary_dragged.connect(self._drag_preview)
         self.timeline.boundary_committed.connect(self._drag_commit)
         btn_uniform.clicked.connect(self._make_uniform)
         btn_by_pause.clicked.connect(self._make_by_pause)
-        self.btn_undo.clicked.connect(self._undo_once)
         self.btn_save.clicked.connect(self.save_template)
+        # 撤销/重做那两个按钮在下面那一行建（照画里的顺序），接线也在那儿
         return holder
 
     # ------------------------------------------------------------ 下：状态栏
@@ -406,10 +406,17 @@ class MasterAudioPanel(QWidget):
                                    "它删的是**边界**，一条素材都不会动。")
         self.btn_merge = _big(QPushButton("⇆ 合并前一段", holder))
         self.btn_play_span = _big(QPushButton("▶ 播放当前段", holder))
+        self.btn_undo = _big(QPushButton("↶ 撤销", holder))
+        self.btn_undo.setEnabled(False)
+        self.btn_redo = _big(QPushButton("↷ 重做", holder))
+        self.btn_redo.setEnabled(False)
 
+        # 顺序照画里那一行走：播放当前段 → 切分 → 取消切分 → 合并 → 撤销 → 重做。
+        # 停顿导航（◀▶ + 锚点）挨在它们前面，都是同一行，天天点的东西不分两处
         row.addWidget(self.status, 1)
-        for widget in (self.anchor, self.btn_prev, self.btn_next, self.btn_split,
-                       self.btn_unsplit, self.btn_merge, self.btn_play_span):
+        for widget in (self.anchor, self.btn_prev, self.btn_next, self.btn_play_span,
+                       self.btn_split, self.btn_unsplit, self.btn_merge,
+                       self.btn_undo, self.btn_redo):
             row.addWidget(widget)
 
         self.btn_prev.clicked.connect(lambda: self._jump(-1))
@@ -418,7 +425,18 @@ class MasterAudioPanel(QWidget):
         self.btn_unsplit.clicked.connect(self.unsplit_here)
         self.btn_merge.clicked.connect(self._merge_here)
         self.btn_play_span.clicked.connect(self.play_current_segment)
+        self.btn_undo.clicked.connect(self._undo_once)
+        self.btn_redo.clicked.connect(self._redo_once)
         return holder
+
+    def use_wide_layout(self) -> None:
+        """编排台里让主可视化区**通栏**：左边那列「人声导航」收起来。
+
+        画里主可视化区是横铺满整页的；导航那列 260 像素占着，波形就被挤窄了。
+        停顿之间跳转仍然有 ◀▶ 两个按钮（和 J/L 快捷键），功能一点没少。
+        """
+        self._body.widget(0).setVisible(False)
+
 
     def _timeline_menu(self, point) -> None:
         """时间轴右键菜单。
@@ -645,16 +663,17 @@ class MasterAudioPanel(QWidget):
 
     def _refresh_status(self) -> None:
         if self._duration <= 0:
-            self.status.setText("当前：—")
+            self.status.setText("当前段：—")
             return
-        parts = [f"当前 {_clock(self._at)}"]
+        parts = []
         if self._template is not None:
             span = self._template.span_at(self._at)
             if span is not None:
-                parts.append(f"{span.name}（{span.start:.3f}→{span.end:.3f}，"
-                             f"{span.duration:.3f}s）")
+                parts.append(f"当前段：{span.name}　{_clock(span.start)} → "
+                             f"{_clock(span.end)}　{span.duration:.3f}s")
         else:
-            parts.append("还没分段")
+            parts.append("当前段：还没分段")
+        parts.append(f"播放位置 {_clock(self._at)}")
         if self._activity is not None:
             parts.append("人声中" if self._activity.speaking_at(self._at) else "停顿中")
             nxt = self._activity.next_pause(self._at)
@@ -863,9 +882,15 @@ class MasterAudioPanel(QWidget):
             return
         if self._template is not None:
             self._redo.append(self._template)
+            self.btn_redo.setEnabled(True)
         self._adopt(self._undo.pop(), remember=False)
         self.btn_undo.setEnabled(bool(self._undo))
         self.status.setText("撤销了上一步")
+
+    def _redo_once(self) -> None:
+        """按钮走的也是 `redo()` 那一条路，两处不许各写一套。"""
+        self.redo()
+
 
     def undo(self) -> None:
         """Ctrl+Z（主窗口转过来的）。"""
@@ -880,6 +905,7 @@ class MasterAudioPanel(QWidget):
             self._undo.append(self._template)
             self.btn_undo.setEnabled(True)
         self._adopt(self._redo.pop(), remember=False)
+        self.btn_redo.setEnabled(bool(self._redo))
         self.status.setText("重做了一步")
 
     # ---------------------------------------------------------------- 存/读

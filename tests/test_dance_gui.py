@@ -98,13 +98,18 @@ def test_window_has_all_four_regions(work: Path) -> None:
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert titles == ["🎵 编排台（主音频→分段→素材→成片）", "素材资产", "音频对齐",
                           "选择与推荐", "历史与统计"], titles
-        # 编排台一页走完：一行工具栏 → 视频位置+主音频编辑区 → 素材矩阵+实时播放
+        # 编排台一页走完：一行工具栏 → 视频（上）+ 音谱（下）→ 素材矩阵
         assert window.tabs.widget(0) is window.studio
         assert window.studio_split.widget(0) is window.bench
-        assert window.studio_split.widget(1).isAncestorOf(window.master)
-        assert window.studio_split.widget(1).isAncestorOf(window.coverage)
-        assert window.studio_split.widget(2).isAncestorOf(window.matrix)
-        assert window.studio_split.widget(2).isAncestorOf(window.live)
+        stage = window.studio_split.widget(1)
+        assert stage.isAncestorOf(window.live), "视频画面不在音谱那一块里"
+        assert stage.isAncestorOf(window.coverage)
+        assert stage.isAncestorOf(window.master)
+        # 上边视频、下边音谱：拿它们在同一个布局里的纵坐标比一下
+        assert window.stage_split.widget(0).isAncestorOf(window.live)
+        assert window.stage_split.widget(1).isAncestorOf(window.master)
+        assert window.studio_split.widget(2) is window.matrix
+
 
         for button in (window.btn_preview_final, window.btn_save_all,
                        window.btn_export_final):

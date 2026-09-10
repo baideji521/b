@@ -200,10 +200,9 @@ class DanceMontageWindow(QMainWindow):
         """编排台：**主音频 → 分段 → 素材 → 成片**，一页从上到下走完：
 
             ① 一行工具栏：源视频 / 视频文件夹 / 主音频（＝目标歌）/ [开始音频对齐]
-            ② 视频位置：一条总览带，已对齐视频在主音频上盖住哪一段
-            ③ 主可视化区（波形 / 人声 / 音谱，右键换）+ 段落条 + 播放位置
-            ④ 素材矩阵：列＝Segment，行＝视频，第一行＝实时播放（成片就读它）
-            ⑤ 页脚：入库三件事 + 片段仓库 + 预览/保存/导出
+            ② 视频 + 音谱同一块：**上边实时播放画面，下边视频位置 + 波形/人声/音谱 + 段落条**
+            ③ 素材矩阵：列＝Segment，行＝视频，第一行＝实时播放（成片就读它）
+            ④ 页脚：入库三件事 + 片段仓库 + 预览/保存/导出
 
         主音频那条时间轴是**唯一的时间权威**：段落、素材、实时播放全按它算，
         每个 mp4 不自己维护一条时间轴。
@@ -218,14 +217,18 @@ class DanceMontageWindow(QMainWindow):
         self.bench.use_compact_layout()   # 对齐台只留顶上那一行工具栏
         # 主音频就是目标歌：把主音频那一条并进顶栏，界面上一首歌只填一处
         self.bench.adopt_song_row(self.master.take_song_row())
+        self.master.use_wide_layout()      # 主可视化区通栏，左边那列导航收起来
         self.master.path.textChanged.connect(self._song_picked)
         stack.addWidget(self.bench)      # 一行：源视频 / 批量选 / 主音频 / 开始对齐
         stack.addWidget(self._build_stage())
-        stack.addWidget(self._build_board())
+        stack.addWidget(self.matrix)
         stack.setStretchFactor(0, 0)
         stack.setStretchFactor(1, 3)
         stack.setStretchFactor(2, 2)
-        stack.setSizes([110, 560, 340])
+        # 顶栏那一条按它自己要的高度给，别硬编一个数字把「开始音频对齐」压掉；
+        # 矩阵至少留 300 像素：实时播放行 + 几行视频要一眼看得全
+        self.matrix.setMinimumHeight(300)
+        stack.setSizes([self.bench.minimumHeight() or 120, 480, 420])
         self.studio_split = stack
         column.addWidget(stack, 1)
 
@@ -267,25 +270,64 @@ class DanceMontageWindow(QMainWindow):
         return holder
 
     def _build_stage(self) -> QWidget:
-        """② 视频位置 + ③ 主音频编辑区：两样都挂在**同一条**主音频时间轴上。"""
+        """② 视频 + ③ 音谱区：**同一个布局里，上边视频、下边音谱**。
+
+            ┌──────────────────────────────┐
+            │  ▶ 实时播放（视频画面）        │  ← 上
+            ├──────────────────────────────┤
+            │  视频位置（一条总览带）        │
+            ├──────────────────────────────┤
+            │  播放条 + 波形/人声/音谱 + 段落 │  ← 下
+            └──────────────────────────────┘
+
+        视频和音谱共用主音频那条唯一时间轴，所以必须上下贴在一起看 ——
+        眼睛在同一列上下扫，就能对上"这一刻的画面 vs 这一刻的音"。
+        """
         holder = QWidget(self)
         column = QVBoxLayout(holder)
         column.setContentsMargins(0, 0, 0, 0)
         column.setSpacing(2)
 
+        stack = QSplitter(Qt.Vertical, holder)     # 视频/音谱各占多高由用户拖
+        video = QWidget(stack)
+        vbox = QVBoxLayout(video)
+        vbox.setContentsMargins(0, 0, 0, 0)
+        vbox.setSpacing(2)
+        self.live = FramePlayer(video)
+        # 声音只由主音频出：素材自己的原声会和主音频打架
+        self.live.set_audio_enabled(False)
+        self.live.setMinimumHeight(180)
+        self.live_note = QLabel("▶ 实时播放：还没开始播", video)
+        self.live_note.setWordWrap(True)
+        self.live_note.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        vbox.addWidget(self.live, 1)
+        vbox.addWidget(self.live_note)
+        stack.addWidget(video)
+
+        below = QWidget(stack)
+        bbox = QVBoxLayout(below)
+        bbox.setContentsMargins(0, 0, 0, 0)
+        bbox.setSpacing(2)
         head = QHBoxLayout()
         head.setContentsMargins(8, 0, 8, 0)
-        head.addWidget(QLabel("视频位置", holder))
-        self.coverage_note = QLabel("", holder)
+        head.addWidget(QLabel("视频位置", below))
+        self.coverage_note = QLabel("", below)
         self.coverage_note.setStyleSheet(f"color:{theme.TEXT_DIM};")
         head.addWidget(self.coverage_note, 1)
-        column.addLayout(head)
-
-        self.coverage = VideoCoverageBar(holder)
+        bbox.addLayout(head)
+        self.coverage = VideoCoverageBar(below)
         self.coverage.seeked.connect(self.master.seek_to)
-        column.addWidget(self.coverage)
-        column.addWidget(self.master, 1)
+        bbox.addWidget(self.coverage)
+        bbox.addWidget(self.master, 1)
+        stack.addWidget(below)
+
+        stack.setStretchFactor(0, 2)
+        stack.setStretchFactor(1, 3)
+        stack.setSizes([260, 420])
+        self.stage_split = stack
+        column.addWidget(stack, 1)
         return holder
+
 
     def _build_repository(self) -> QWidget:
         """💾 片段仓库：这首歌的候选片段一共有多少、按段落各多少，一键全存。"""
@@ -339,37 +381,6 @@ class DanceMontageWindow(QMainWindow):
         self.statusBar().showMessage("正在把所有候选片段切出来入库…", 4000)
         self.start()          # 和「切片并加入素材库」同一条正式流水线
 
-
-    def _build_board(self) -> QWidget:
-        """④ 素材矩阵 + 实时播放画面。
-
-        **整页只有这一个视频播放器**：矩阵格子只是文本卡片，
-        100 个视频 × 50 段也不会去建 N×M 个播放器（那会直接把机器拖死）。
-        """
-        split = QSplitter(Qt.Horizontal, self)
-        split.addWidget(self.matrix)
-
-        right = QWidget(split)
-        col = QVBoxLayout(right)
-        col.setContentsMargins(4, 4, 4, 4)
-        col.setSpacing(4)
-        col.addWidget(QLabel("▶ 实时播放（跟着主音频走）", right))
-        self.live = FramePlayer(right)
-        # 声音只由主音频出：素材自己的原声会和主音频打架
-        self.live.set_audio_enabled(False)
-        self.live.setMinimumSize(240, 160)
-        col.addWidget(self.live, 1)
-        self.live_note = QLabel("还没开始播", right)
-        self.live_note.setWordWrap(True)
-        self.live_note.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        col.addWidget(self.live_note)
-
-        split.addWidget(right)
-        split.setStretchFactor(0, 3)
-        split.setStretchFactor(1, 1)
-        split.setSizes([980, 360])
-        self.board_split = split
-        return split
 
     def _master_moved(self, moment: float) -> None:
         """主音频走到 `moment` 秒了 —— 这一条把整页串起来。
@@ -665,6 +676,12 @@ class DanceMontageWindow(QMainWindow):
                      target_positions(duration, self.remix.slice_duration())]
 
         chosen = repo.final_selections(self.db, self._song_id)
+        # 每个源视频给一个短号（001 / 002 …）：矩阵格子里只写这个，
+        # 全名放在行首和悬浮提示里 —— 一格 130 像素塞不下 tiktok 那种长文件名
+        numbers: dict[int, int] = {}
+        for index, _title, _start, _end in spans:
+            for material in repo.get_candidates(self.db, self._song_id, index):
+                numbers.setdefault(int(material.source_video_id), len(numbers) + 1)
         segments = []
         for index, title, start, end in spans:
             # 候选池只从这一段拿：`get_candidates(song, segment)` 没有"全曲随便挑"的口子
@@ -679,7 +696,8 @@ class DanceMontageWindow(QMainWindow):
                      "video_id": int(m.source_video_id),
                      "video_name": (getattr(m, "source_name", "")
                                     or Path(m.file_path).stem or f"#{m.source_video_id}"),
-                     "label": f"{m.person or Path(m.file_path).stem[:16]}",
+                     # 格子里只写短号（视频在矩阵里的行号 + 素材号），全名在行首和悬浮里
+                     "label": f"{numbers.get(int(m.source_video_id), 0):03d}",
                      "detail": f"源 {m.source_start:.2f}→{m.source_end:.2f}s",
                      "path": m.file_path,
                      "source_start": float(m.source_start),

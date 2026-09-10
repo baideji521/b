@@ -169,6 +169,7 @@ class AlignBenchPanel(QWidget):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
         scroll.setWidget(page)
+        self._scroll = scroll
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
@@ -225,9 +226,13 @@ class AlignBenchPanel(QWidget):
         self.more_hint = QLabel("批量：0 个", holder)
         self.more_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         btn_more = _big(QPushButton("批量选视频…", holder), 30)
-        self.btn_folder = _big(QPushButton("选视频文件夹…", holder), 30)
-        self.btn_folder.setToolTip("挑一个文件夹，里面所有视频一次全进批量清单")
+        self._folder_label = QLabel("📁 视频文件夹", holder)
+        self.folder = _tall(QLineEdit(holder))
+        self.folder.setPlaceholderText(r"素材文件夹，例如 D:\Videos（里面的视频一次全对齐）")
+        self.btn_folder = _big(QPushButton("选择文件夹", holder), 30)
+        self.btn_folder.setToolTip("挑一个文件夹，里面所有视频（含子目录）一次全进对齐清单")
         btn_clear = _big(QPushButton("清空批量", holder), 30)
+
 
         # 这一页只有两个"主"按钮（开始对齐、播放卡点），它们比别的高一档，
         # 眼睛一扫就知道该点哪个
@@ -262,11 +267,17 @@ class AlignBenchPanel(QWidget):
         self.btn_target.clicked.connect(self._pick_target)
         btn_more.clicked.connect(self._pick_more)
         self.btn_folder.clicked.connect(self._pick_folder)
+        self.folder.editingFinished.connect(self._folder_typed)
         btn_clear.clicked.connect(self._clear_more)
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
         self.btn_reset.clicked.connect(self.reset)
+        self._source_row = (QLabel("源视频", holder), self.source, btn_source)
+        self._batch_row = (btn_more, btn_clear)
+        self._song_row: QWidget | None = None      # 编排台把主音频那一条塞进来
         return holder
+
+
 
     def _build_body(self) -> QWidget:
         body = QSplitter(Qt.Horizontal, self)
@@ -295,19 +306,54 @@ class AlignBenchPanel(QWidget):
         return body
 
     def use_compact_layout(self) -> None:
-        """编排台上半部分只留**一行工具栏**：源视频 / 批量选 / 主音频 / 开始对齐 / 进度。
+        """编排台上半场就是画里那一行：**主音频 / 视频文件夹 / 音频对齐**。
 
-        对齐台原来那一大片（结果、单点卡点、播这一格、全曲卡点表、批量结果、
-        时间映射、手动 Offset、日志）在编排台全部不显示 —— 那一页要的是
-        「选片 → 对齐 → 入库」，中间的诊断信息去「音频对齐」那一页看。
+            🎵 主音频 [xxx.mp3][选择音频]  📁 视频文件夹 [D:\\Videos][选择文件夹]
+            🔗 音频对齐 [▶ 开始音频对齐]
 
-        控件本身没删：对齐算完照旧往它们里写结果，所以逻辑和它的测试都不动，
-        只是不占版面。
+        对齐台原来那一大片（源视频单选、结果、单点卡点、全曲卡点表、批量结果、
+        时间映射、手动 Offset、日志、进度条）在编排台都不显示 —— 诊断信息去
+        「音频对齐」那一页看。留下「停止」是因为一个文件夹几十条视频要跑很久，
+        中途必须停得下来。
+
+        顶栏从滚动区里搬出来直接当本控件的内容，滚动区整块收起：这样本控件的
+        高度就正好等于这一行，不用去猜一个 `setMaximumHeight`（上一版就是猜错了，
+        把「开始音频对齐」裁掉一截）。
+
+        控件本身没删：对齐算完照旧往它们里写结果，逻辑和它的测试都不动。
         """
-        self._stack.setVisible(False)          # 整个主体收起来，只剩顶栏那一行
+        self._header_frame.setParent(self)
+        self._outer.insertWidget(0, self._header_frame)
+        self._scroll.setVisible(False)
+        self._stack.setVisible(False)
         self._page.setMinimumHeight(0)
-        self.setMaximumHeight(self._header_frame.sizeHint().height() + 16)
 
+        # 画里没有的一律收起来：源视频单选、批量那两个按钮、重置、忽略缓存、进度条
+        for widget in (*self._source_row, *self._batch_row, self.more_hint,
+                       self.btn_reset, self.force, self.bar,
+                       self._target_label, self.target, self.btn_target):
+            widget.setVisible(False)
+
+        grid = self._header_grid
+        while grid.count():                     # 重排成画里那一行
+            grid.takeAt(0)
+        for column in range(6):
+            grid.setColumnStretch(column, 0)
+        grid.addWidget(QLabel("🎵 主音频", self._header_frame), 0, 0)
+        if self._song_row is not None:
+            grid.addWidget(self._song_row, 0, 1)
+        grid.addWidget(self._folder_label, 0, 2)
+        grid.addWidget(self.folder, 0, 3)
+        grid.addWidget(self.btn_folder, 0, 4)
+        grid.addWidget(QLabel("🔗 音频对齐", self._header_frame), 0, 5)
+        grid.addWidget(self.btn_start, 0, 6)
+        grid.addWidget(self.btn_stop, 0, 7)
+        grid.setColumnStretch(1, 3)             # 两个路径框占大头
+        grid.setColumnStretch(3, 2)
+        for widget in (self._folder_label, self.folder, self.btn_folder,
+                       self.btn_start, self.btn_stop):
+            widget.setVisible(True)
+        self.setMinimumHeight(self._header_frame.minimumSizeHint().height() + 14)
 
     def adopt_song_row(self, row: QWidget) -> None:
         """把主音频那一条塞进本页顶栏 —— **主音频就是目标歌**，一首歌只填一次。
@@ -320,7 +366,9 @@ class AlignBenchPanel(QWidget):
         self.target.setVisible(False)
         self.btn_target.setVisible(False)
         row.setParent(self._header_frame)
-        self._header_grid.addWidget(row, 0, 3, 1, 3)
+        self._song_row = row
+        self._header_grid.addWidget(row, 0, 1)
+
 
     def take_save_row(self) -> QWidget:
         """把「确认之后才入库」那一条交出去，让调用方钉在**整页**最底下。
@@ -678,7 +726,14 @@ class AlignBenchPanel(QWidget):
         self.more.clear()
         self._show_more_count()
 
+    def _folder_typed(self) -> None:
+        """文件夹路径手打完（或被外面填上）→ 立刻把里面的视频装进对齐清单。"""
+        chosen = self.folder.text().strip()
+        if chosen and Path(chosen).is_dir():
+            self._pick_folder(chosen)
+
     #: 文件夹里认这些后缀（和 dialogs.VIDEO_FILTER 保持一致）
+
     VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".avi", ".flv", ".wmv", ".m4v", ".webm")
 
     def _pick_folder(self, folder: str = "") -> int:
@@ -692,6 +747,10 @@ class AlignBenchPanel(QWidget):
             self, "选视频文件夹", self.cfg.dance_path("source_dir"), "dance.source_dir"))
         if not chosen:
             return 0
+        if self.folder.text().strip() != chosen:
+            self.folder.blockSignals(True)      # 免得又反过来触发一次扫描
+            self.folder.setText(chosen)
+            self.folder.blockSignals(False)
         existing = {self.more.item(i).text() for i in range(self.more.count())}
         found = sorted(str(p) for p in Path(chosen).rglob("*")
                        if p.is_file() and p.suffix.lower() in self.VIDEO_SUFFIXES)

@@ -146,10 +146,12 @@ class RealtimeCell(QFrame):
         box.setContentsMargins(6, 3, 6, 3)
         box.setSpacing(0)
         self.body = QLabel(PLACEHOLDER, self)
-        self.hint = QLabel("拖一格上来", self)
+        self.hint = QLabel("", self)
         self.hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         box.addWidget(self.body)
         box.addWidget(self.hint)
+        self.setToolTip("成片这一段用谁。把下面同一列的格子拖上来就是换人；"
+                        "空着 = 这一段没素材，播放时画面就是空的。")
         self._paint_state(False)
 
     def _paint_state(self, playing: bool) -> None:
@@ -167,7 +169,7 @@ class RealtimeCell(QFrame):
         self.material_id = int(self.payload.get("material_id") or 0)
         self.body.setText(str(self.payload.get("label") or PLACEHOLDER))
         self.hint.setText(str(self.payload.get("video_name") or "")
-                          if self.material_id else "拖一格上来")
+                          if self.material_id else "")
         self._paint_state(False)
 
     def dragEnterEvent(self, event) -> None:             # noqa: N802
