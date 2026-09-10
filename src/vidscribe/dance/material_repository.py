@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
+
 
 from ..db.db import Database
 from ..logging_setup import get_logger
@@ -106,9 +107,130 @@ def get_song_by_path(db: Database, file_path: str):
                                 (str(file_path),)).fetchone()
 
 
-def list_songs(db: Database) -> list[Any]:
-    return list(db.connect().execute(
-        "SELECT * FROM dance_target_songs ORDER BY updated_at DESC, id DESC"))
+def list_songs(db: Database, *, include_retired: bool = False) -> list[Any]:
+    """目标歌清单。默认**不含已下架的** —— 界面下拉框只该看到还在用的那几首。"""
+    sql = ("SELECT s.*, r.retired_at, r.reason AS retired_reason "
+           "FROM dance_target_songs s "
+           "LEFT JOIN dance_song_retirement r ON r.target_song_id = s.id ")
+    if not include_retired:
+        sql += "WHERE r.target_song_id IS NULL "
+    sql += "ORDER BY s.updated_at DESC, s.id DESC"
+    return list(db.connect().execute(sql))
+
+
+# ------------------------------------------------------------ 下架 / 恢复 / 删除
+#: `song_usage()` 各项的中文名。返回的字典键保持英文（给代码用、稳定），
+#: 摆给用户看的时候一律走这张表 —— CLI、界面、异常信息共用同一份措辞
+USAGE_LABELS = {
+    "materials": "素材",
+    "alignments": "对齐",
+    "montages": "混剪",
+    "versions": "成片版本",
+    "events": "使用事件",
+}
+
+
+def describe_usage(usage: Mapping[str, int], *, only_nonzero: bool = True) -> str:
+    """把 `song_usage()` 的结果写成一句中文，比如"素材 6、混剪 1、成片版本 1"。"""
+    parts = [f"{USAGE_LABELS.get(key, key)} {usage.get(key, 0)}"
+             for key in USAGE_LABELS
+             if not only_nonzero or usage.get(key, 0)]
+    return "、".join(parts) or "没有任何附属数据"
+
+
+def song_usage(db: Database, song_id: int) -> dict[str, int]:
+
+    """这首歌下面挂着多少东西。删之前必须先把这几个数摆给用户看。"""
+    conn = db.connect()
+
+    def count(sql: str) -> int:
+        return int(conn.execute(sql, (int(song_id),)).fetchone()[0])
+
+    materials = count("SELECT COUNT(*) FROM dance_materials WHERE target_song_id = ?")
+    return {
+        "materials": materials,
+        "alignments": count(
+            "SELECT COUNT(*) FROM dance_audio_alignments WHERE target_song_id = ?"),
+        "montages": count("SELECT COUNT(*) FROM dance_montages WHERE target_song_id = ?"),
+        "versions": count(
+            "SELECT COUNT(*) FROM dance_montage_versions v "
+            "JOIN dance_montages m ON m.id = v.montage_id WHERE m.target_song_id = ?"),
+        "events": count(
+            "SELECT COUNT(*) FROM dance_material_usage_events e "
+            "JOIN dance_materials m ON m.id = e.material_id WHERE m.target_song_id = ?"),
+    }
+
+
+def retire_song(db: Database, song_id: int, *, reason: str, operator: str = "") -> bool:
+    """把目标歌**下架**：从界面上消失，但素材/对齐/历史成片一条都不动。
+
+    这是"删除目标歌"的默认答案。为什么不直接删：`dance_materials` /
+    `dance_audio_alignments` / `dance_montages` 都是 `ON DELETE CASCADE`，
+    真删下去会连带把素材、对齐、历史成片和它们的事件流水全部抹掉 ——
+    而这个项目的整个立足点就是"素材是长期资产、历史永不删除"。
+
+    `reason` 留空直接抛 ValueError：和人工修正 offset 一样，
+    任何让东西从界面上消失的操作都不许静默进行。
+    """
+    if not str(reason).strip():
+        raise ValueError("下架目标歌必须写理由（禁止静默隐藏）")
+    if get_song(db, int(song_id)) is None:
+        raise ValueError(f"目标歌 #{song_id} 不存在")
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO dance_song_retirement(target_song_id, reason, operator, retired_at) "
+            "VALUES(?,?,?,?) ON CONFLICT(target_song_id) DO UPDATE SET "
+            "reason=excluded.reason, operator=excluded.operator, retired_at=excluded.retired_at",
+            (int(song_id), str(reason).strip(), str(operator), now()))
+    logger.info("目标歌 #%d 已下架：%s", int(song_id), reason)
+    return True
+
+
+def restore_song(db: Database, song_id: int) -> bool:
+    """撤销下架。下架本来就是可逆的，这就是那条回头路。"""
+    with db.tx() as conn:
+        changed = conn.execute(
+            "DELETE FROM dance_song_retirement WHERE target_song_id = ?",
+            (int(song_id),)).rowcount
+    if changed:
+        logger.info("目标歌 #%d 已恢复", int(song_id))
+    return bool(changed)
+
+
+def song_retirement(db: Database, song_id: int):
+    """这首歌的下架记录，没下架就返回 None。"""
+    return db.connect().execute(
+        "SELECT * FROM dance_song_retirement WHERE target_song_id = ?",
+        (int(song_id),)).fetchone()
+
+
+def delete_song(db: Database, song_id: int, *, confirm: bool = False) -> dict[str, int]:
+    """**彻底删除**目标歌，连带级联删掉它的素材/对齐/混剪/事件。返回删掉了多少东西。
+
+    只在一种情况下适合用它：歌是误加进来的（选错文件、重复导入），
+    下面那些素材本来就不该存在。
+
+    `confirm=False` 时，只要下面还挂着任何东西就**拒绝执行**并抛 ValueError ——
+    调用方必须先把 `song_usage()` 的数字摆给用户看、拿到明确同意，再带 `confirm=True`
+    回来。素材文件本身**不删**：盘上的东西留着，用户想清理可以自己去目录里删。
+    """
+    row = get_song(db, int(song_id))
+    if row is None:
+        raise ValueError(f"目标歌 #{song_id} 不存在")
+    usage = song_usage(db, int(song_id))
+    attached = {k: v for k, v in usage.items() if v}
+    if attached and not confirm:
+        raise ValueError(
+            f"目标歌 #{song_id}《{row['title']}》下面还挂着 {describe_usage(usage)}；"
+            "彻底删除会把这些连带删掉。确认要删就带 confirm=True 再来一次，"
+            "只想让它从界面上消失请用 retire_song()")
+    with db.tx() as conn:
+        conn.execute("DELETE FROM dance_target_songs WHERE id = ?", (int(song_id),))
+    logger.warning("目标歌 #%d《%s》已彻底删除，连带 %s（磁盘上的素材文件保留）",
+                   int(song_id), row["title"], describe_usage(usage))
+    return usage
+
+
 
 
 def song_sections(db: Database, song_id: int) -> list[dict[str, Any]]:

@@ -1690,18 +1690,23 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
 
     action = args.action
     if action == "songs":
-        rows = repo.list_songs(db)
+        if args.hide or args.restore or args.drop:
+            return _dance_song_admin(cfg, args, db, repo)
+        rows = repo.list_songs(db, include_retired=True)
         if not rows:
             print("库里还没有目标歌。用 `dance-montage align --song <歌文件>` 登记第一首。")
             return 0
-        print(f"{'ID':>4}  {'时长':>8}  {'BPM':>6}  {'素材':>5}  歌名")
+        print(f"{'ID':>4}  {'时长':>8}  {'BPM':>6}  {'素材':>5}  {'状态':<6}  歌名")
         for row in rows:
             count = db.connect().execute(
                 "SELECT COUNT(*) FROM dance_materials WHERE target_song_id = ?",
                 (int(row["id"]),)).fetchone()[0]
+            state = "已下架" if row["retired_at"] else "在用"
             print(f"{int(row['id']):>4}  {float(row['duration'] or 0):>7.2f}s  "
-                  f"{float(row['bpm'] or 0):>6.1f}  {int(count):>5}  {row['title']}")
+                  f"{float(row['bpm'] or 0):>6.1f}  {int(count):>5}  {state:<6}  {row['title']}"
+                  + (f"（下架理由：{row['retired_reason']}）" if row["retired_at"] else ""))
         return 0
+
 
     if not args.song:
         raise ValueError(f"{action} 需要 --song <歌id 或 歌文件路径>")
@@ -1872,8 +1877,52 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
     raise ValueError(f"未知动作 {action!r}")
 
 
+def _dance_song_admin(cfg: Config, args: argparse.Namespace, db: Any, repo: Any) -> int:
+    """`songs --hide / --restore / --delete`：下架、恢复、彻底删除目标歌。
+
+    下架是可逆的、也是推荐做法；彻底删除会连带级联删掉素材/对齐/历史成片，
+    所以必须显式再加 `--yes`。
+    """
+    if args.restore:
+        song_id = int(args.restore)
+        if repo.restore_song(db, song_id):
+            print(f"[目标歌] #{song_id} 已恢复")
+            return 0
+        print(f"[目标歌] #{song_id} 本来就没有下架")
+        return 0
+
+    if args.hide:
+        song_id = int(args.hide)
+        if not (args.reason or "").strip():
+            logger.error("下架必须写理由：--hide %s --reason \"为什么\"", song_id)
+            return 2
+        repo.retire_song(db, song_id, reason=args.reason.strip(), operator="cli")
+        print(f"[目标歌] #{song_id} 已下架：{args.reason.strip()}"
+              "（素材、对齐、历史成片一条都没动，随时可以 --restore 回来）")
+        return 0
+
+    song_id = int(args.drop)
+    row = repo.get_song(db, song_id)
+    if row is None:
+        logger.error("库里没有目标歌 #%s", song_id)
+        return 2
+    usage = repo.song_usage(db, song_id)
+    print(f"[目标歌] #{song_id}《{row['title']}》下面挂着：{repo.describe_usage(usage)}")
+    if not args.yes:
+        logger.error("彻底删除会连带删掉上面这些，且不可撤销。确认请加 --yes；"
+                     "只想从界面上隐藏请用 --hide")
+        return 2
+    removed = repo.delete_song(db, song_id, confirm=True)
+    print(f"[目标歌] 已彻底删除，连带 {repo.describe_usage(removed)}"
+          "（磁盘上的素材文件保留）")
+    return 0
+
+
+
 def cmd_dance_gui(cfg: Config, args: argparse.Namespace) -> int:
     """启动 AI_卡点舞 独立界面。和主界面各开各的，互不影响。"""
+
+
     _apply_mirror(cfg)
     try:
         from vidscribe.gui.dance_montage import launch  # noqa: PLC0415
@@ -2119,6 +2168,18 @@ def build_parser() -> argparse.ArgumentParser:
                          help="重跑一次历史推荐，验证结果可复现")
     p_dance.add_argument("--recount", action="store_true",
                          help="按事件流水把所有计数重算一遍（history 动作专用）")
+    p_dance.add_argument("--hide", type=int, default=None, metavar="歌ID",
+                         help="下架一首目标歌（songs 动作）：只从界面上隐藏，"
+                              "素材/对齐/历史成片一条都不动，要配 --reason")
+    p_dance.add_argument("--restore", type=int, default=None, metavar="歌ID",
+                         help="恢复一首已下架的目标歌（songs 动作）")
+    p_dance.add_argument("--delete", dest="drop", type=int, default=None, metavar="歌ID",
+                         help="彻底删除一首目标歌（songs 动作）：连带级联删掉它的素材、"
+                              "对齐、混剪和事件流水，不可撤销，必须再加 --yes")
+    p_dance.add_argument("--reason", default=None, help="下架理由（--hide 必填）")
+    p_dance.add_argument("--yes", action="store_true",
+                         help="确认执行不可撤销的操作（配 --delete）")
+
     p_dance.set_defaults(func=cmd_dance_montage)
     return parser
 

@@ -25,7 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from dance_fixtures import fake_library, make_project              # noqa: E402
+from dance_fixtures import fake_library, fake_song, make_project      # noqa: E402
+
 from vidscribe.dance import history                                # noqa: E402
 from vidscribe.dance import material_repository as repo            # noqa: E402
 from vidscribe.dance import material_selection as selection        # noqa: E402
@@ -306,6 +307,105 @@ def test_statistics_come_from_sql_not_guesses(work: Path) -> None:
         db.close()
 
 
+def test_song_can_be_retired_and_restored(work: Path) -> None:
+    """下架目标歌：从清单里消失，但**素材、对齐、历史一条都不动**，而且能恢复。
+
+    这是"删除目标歌"的默认答案 —— 真删下去会级联抹掉素材和历史成片，
+    而素材是长期资产。
+    """
+    cfg, db = make_project(work)
+    try:
+        song_id, _videos, materials = fake_library(db, positions=3, people=("小A", "小B"))
+        other = fake_song(db, title="另一首", fingerprint="fp-other")
+        assert {int(r["id"]) for r in repo.list_songs(db)} == {song_id, other}
+
+        # 没理由不许下架
+        try:
+            repo.retire_song(db, song_id, reason="  ")
+        except ValueError as exc:
+            assert "理由" in str(exc), str(exc)
+        else:
+            raise AssertionError("没写理由竟然下架成功了")
+
+        repo.retire_song(db, song_id, reason="选错文件了", operator="test")
+        assert [int(r["id"]) for r in repo.list_songs(db)] == [other], "下架后还在清单里"
+        assert {int(r["id"]) for r in repo.list_songs(db, include_retired=True)} == \
+            {song_id, other}
+        mark = repo.song_retirement(db, song_id)
+        assert mark is not None and str(mark["reason"]) == "选错文件了"
+        assert str(mark["operator"]) == "test" and str(mark["retired_at"])
+
+        # 下架**不动**任何数据
+        assert len(repo.get_materials(db, list(materials.values()))) == len(materials)
+        assert repo.get_song(db, song_id) is not None
+        usage = repo.song_usage(db, song_id)
+        assert usage["materials"] == 6, usage
+
+        # 恢复
+        assert repo.restore_song(db, song_id) is True
+        assert repo.song_retirement(db, song_id) is None
+        assert {int(r["id"]) for r in repo.list_songs(db)} == {song_id, other}
+        assert repo.restore_song(db, song_id) is False, "没下架的歌不该报恢复成功"
+
+    finally:
+        db.close()
+
+
+def test_song_hard_delete_needs_confirmation(work: Path) -> None:
+    """彻底删除会级联抹掉素材/对齐/混剪，所以没 confirm 就必须拒绝。"""
+    cfg, db = make_project(work)
+    try:
+        song_id, videos, materials = fake_library(db, positions=3, people=("小A", "小B"))
+        montage_id = repo.ensure_montage(db, target_song_id=song_id, name="t",
+                                         slice_duration=2.0)
+        clips = _clips(materials, ("小A", "小B"), 3)
+        version_id = repo.save_version(db, montage_id=montage_id, version_index=1,
+                                       signature="sig", strategy_id=None,
+                                       recommendation_run_id=None, clips=clips,
+                                       duration=6.0, repeat=None, timeline_json={})
+        history.note_montage(db, version_id, montage_id, clips)
+
+        usage = repo.song_usage(db, song_id)
+        assert usage["materials"] == 6 and usage["montages"] == 1
+        assert usage["versions"] == 1 and usage["events"] >= 3, usage
+
+        # 不带 confirm：拒绝，且把数量写进异常里让调用方能摆给用户看
+        try:
+            repo.delete_song(db, song_id)
+        except ValueError as exc:
+            assert "素材 6" in str(exc), str(exc)
+            assert "retire_song" in str(exc), "拒绝时要指路到下架那条安全路径"
+        else:
+            raise AssertionError("没确认就把歌删了")
+        assert repo.get_song(db, song_id) is not None, "被拒绝了却还是删掉了"
+
+        # 带 confirm：真删，并且级联干净
+        removed = repo.delete_song(db, song_id, confirm=True)
+        assert removed["materials"] == 6, removed
+        assert repo.get_song(db, song_id) is None
+        for table, column in (("dance_materials", "target_song_id"),
+                              ("dance_audio_alignments", "target_song_id"),
+                              ("dance_montages", "target_song_id")):
+            left = db.connect().execute(
+                f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (song_id,)).fetchone()[0]
+            assert int(left) == 0, f"{table} 里还剩 {left} 行"
+        assert int(db.connect().execute(
+            "SELECT COUNT(*) FROM dance_montage_versions").fetchone()[0]) == 0
+        assert int(db.connect().execute(
+            "SELECT COUNT(*) FROM dance_material_usage_events").fetchone()[0]) == 0
+        # 源视频是主项目的资产，绝不能跟着一起删
+        for video_id in videos.values():
+            assert db.connect().execute("SELECT COUNT(*) FROM videos WHERE id=?",
+                                        (video_id,)).fetchone()[0] == 1, "把 videos 也删了"
+
+        # 干净的歌（下面什么都没挂）不用 confirm 也能删
+        spare = fake_song(db, title="空的", fingerprint="fp-spare")
+        assert repo.delete_song(db, spare)["materials"] == 0
+        assert repo.get_song(db, spare) is None
+    finally:
+        db.close()
+
+
 TESTS = (
     test_four_counts_do_not_cover_for_each_other,
     test_render_failure_never_touches_output_count,
@@ -315,7 +415,10 @@ TESTS = (
     test_versions_are_never_overwritten,
     test_validate_catches_broken_plans,
     test_statistics_come_from_sql_not_guesses,
+    test_song_can_be_retired_and_restored,
+    test_song_hard_delete_needs_confirmation,
 )
+
 
 
 def main() -> int:

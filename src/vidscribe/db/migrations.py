@@ -10,7 +10,8 @@ from __future__ import annotations
 import sqlite3
 
 from ..logging_setup import get_logger
-from .schema import DANCE_TABLES, SCHEMA_VERSION, TABLES
+from .schema import DANCE_TABLES, DANCE_V12_TABLES, SCHEMA_VERSION, TABLES
+
 
 
 logger = get_logger(__name__)
@@ -178,6 +179,13 @@ _STEPS: dict[int, list[str]] = {
     # 语句直接复用 schema.DANCE_TABLES，所以"升级上来的表"和"新建库的表"逐字相同，
     # 不会出现历史上 v4 那种「ADD COLUMN 加不上 REFERENCES、两条路径外键不等价」的分叉。
     11: list(DANCE_TABLES),
+    # v12：目标歌的「下架」记录（`dance_song_retirement`）。同样**只建新表**。
+    # 有了它，误加进来的目标歌能从界面上隐藏掉，而素材、对齐、历史成片一条都不动；
+    # 想彻底删除是另一条必须二次确认的路（见 material_repository.delete_song）。
+    # 之所以不给 dance_target_songs 加一列：ADD COLUMN 会让"升级上来的表"和
+    # "新建库的表"的 SQL 文本不再逐字相同 —— 那正是 v4 踩过的坑。
+    12: list(DANCE_V12_TABLES),
+
 }
 
 

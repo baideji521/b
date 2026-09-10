@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
@@ -749,6 +749,34 @@ DANCE_FEEDBACK_VERDICTS = ("accepted", "rejected", "replaced")
 # 新建库时一次把舞蹈那几张表也建好；老库靠 migrations 的 v11 走同一批语句，
 # 两条路径**用的是同一份 SQL**，不会出现"升级上来的表和新建的表不一样"。
 TABLES = TABLES + DANCE_TABLES
+
+
+#: v12：目标歌的"下架"记录。
+#:
+#: 为什么单开一张表、而不是给 `dance_target_songs` 加一列：加列只能靠
+#: `ALTER TABLE ADD COLUMN`，而新建库那条路会把这一列写在 CREATE TABLE 里，
+#: 于是两条路径的 `sqlite_master.sql` 不再逐字相同（v4 就是这么走散的，
+#: `test_dance_migration.py` 现在专门盯着这件事）。新建一张表则天然一致 ——
+#: 两条路径跑的是**同一个**建表语句。
+#:
+#: 顺带把"为什么下架、谁下架的、什么时候"一并记下：和人工修正 offset 一样，
+#: 这个项目里任何"让东西从界面上消失"的操作都不许静默进行。
+DANCE_V12_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS dance_song_retirement (
+        target_song_id INTEGER PRIMARY KEY
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        reason         TEXT    NOT NULL DEFAULT '',
+        operator       TEXT    NOT NULL DEFAULT '',
+        retired_at     TEXT    NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_song_retirement_at "
+    "ON dance_song_retirement(retired_at DESC)",
+)
+
+TABLES = TABLES + DANCE_V12_TABLES
+
 
 
 

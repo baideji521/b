@@ -68,12 +68,14 @@ def fresh_db(work: Path, name: str = "fresh.db") -> sqlite3.Connection:
 def legacy_db(work: Path, name: str = "legacy.db") -> sqlite3.Connection:
     """造一个 v10 老库：建除 dance_* 之外的全部表，再把 user_version 钉成 10。"""
     conn = _open(work / name)
+    later = set(schema.DANCE_TABLES) | set(schema.DANCE_V12_TABLES)
     for statement in schema.TABLES:
-        if statement in schema.DANCE_TABLES:
-            continue
+        if statement in later:
+            continue                      # v11/v12 才有的舞蹈表，老库里当然没有
         conn.execute(statement)
     conn.execute("PRAGMA user_version=10")
     return conn
+
 
 
 def _objects(conn: sqlite3.Connection, kind: str) -> dict[str, str]:
@@ -98,10 +100,13 @@ def test_fresh_db_lands_on_v11_with_all_dance_tables(work: Path) -> None:
     conn = fresh_db(work)
     try:
         version = int(conn.execute("PRAGMA user_version").fetchone()[0])
-        assert version == schema.SCHEMA_VERSION == 11, \
-            f"新建库该是 v11，实际 user_version={version}，SCHEMA_VERSION={schema.SCHEMA_VERSION}"
+        assert version == schema.SCHEMA_VERSION, \
+            f"新建库该是 v{schema.SCHEMA_VERSION}，实际 user_version={version}"
+
         meta = conn.execute("SELECT value FROM schema_meta WHERE key='version'").fetchone()
-        assert meta and meta["value"] == "11", "schema_meta 里的版本也要写对"
+        assert meta and meta["value"] == str(schema.SCHEMA_VERSION), \
+            "schema_meta 里的版本也要写对"
+
 
         tables = _objects(conn, "table")
         missing = [name for name in DANCE_TABLE_NAMES if name not in tables]
@@ -123,7 +128,8 @@ def test_upgrade_from_v10_touches_no_existing_table(work: Path) -> None:
         before = _non_dance(legacy, "table")
         before_idx = _non_dance(legacy, "index")
         version = migrations.apply(legacy)
-        assert version == 11, version
+        assert version == schema.SCHEMA_VERSION, version
+
 
         after = _non_dance(legacy, "table")
         assert after == before, "v11 不许改动任何已有表的定义"
@@ -163,9 +169,10 @@ def test_apply_is_idempotent(work: Path) -> None:
     conn = fresh_db(work)
     try:
         again = migrations.apply(conn)
-        assert again == 11, again
+        assert again == schema.SCHEMA_VERSION, again
         third = migrations.apply(conn)
-        assert third == 11, third
+        assert third == schema.SCHEMA_VERSION, third
+
         assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     finally:
         conn.close()
@@ -196,6 +203,27 @@ def test_v11_only_creates_never_drops() -> None:
         assert "UPDATE " not in upper, f"v11 不许改数据：{statement[:80]}"
     # 而且必须逐字等于 schema.DANCE_TABLES，保证两条路径不会走散
     assert steps == list(schema.DANCE_TABLES), "v11 必须直接复用 schema.DANCE_TABLES"
+
+
+def test_v12_only_creates_never_drops() -> None:
+    """v12（目标歌下架表）同样只许 CREATE，且必须直接复用 schema.DANCE_V12_TABLES。
+
+    为什么不给 dance_target_songs 加一列：ADD COLUMN 会让"升级上来的表"和
+    "新建库的表"的 SQL 文本不再逐字相同 —— 那正是 v4 走散的原因，
+    上面 test_both_paths_produce_identical_schema 就是盯这个的。
+    """
+    steps = migrations._STEPS[12]                                  # noqa: SLF001 - 就是要盯它
+    assert steps, "v12 不能是空的"
+    for statement in steps:
+        head = " ".join(statement.strip().split()[:2]).upper()
+        assert head.startswith("CREATE"), f"v12 只允许 CREATE，出现了：{head}"
+        upper = statement.upper()
+        assert "ALTER TABLE" not in upper, f"v12 不许 ALTER 已有表：{statement[:80]}"
+        assert " DROP " not in f" {upper} ", f"v12 不许出现 DROP：{statement[:80]}"
+    assert steps == list(schema.DANCE_V12_TABLES), "v12 必须直接复用 schema.DANCE_V12_TABLES"
+    # 下架表不能出现在 v11 那一批里，否则老库升级顺序会乱
+    assert not (set(schema.DANCE_TABLES) & set(schema.DANCE_V12_TABLES))
+
 
 
 # ------------------------------------------------------------------ 造数据
@@ -379,8 +407,9 @@ def test_health_check_passes_on_v11(work: Path) -> None:
     try:
         report = db_admin.health_check(db)
         assert report["ok"], f"v11 库该体检通过，问题：{report['problems']}"
-        assert report["version"] == 11, report["version"]
-        assert report["expected_version"] == 11, report["expected_version"]
+        assert report["version"] == schema.SCHEMA_VERSION, report["version"]
+        assert report["expected_version"] == schema.SCHEMA_VERSION, report["expected_version"]
+
         assert not report["missing_tables"], report["missing_tables"]
         assert not report["missing_indexes"], report["missing_indexes"]
         assert str(report["integrity"]).lower() == "ok", report["integrity"]
@@ -403,6 +432,8 @@ TESTS = (
     test_apply_is_idempotent,
     test_newer_db_is_left_alone,
     test_v11_only_creates_never_drops,
+    test_v12_only_creates_never_drops,
+
     test_foreign_keys_cascade,
     test_orphan_reference_is_refused,
     test_material_uniqueness,

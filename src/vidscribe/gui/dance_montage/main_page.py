@@ -19,6 +19,7 @@ from typing import Any
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import (
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -28,6 +29,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
 
 from ...logging_setup import get_logger
 from .alignment_panel import AlignmentPanel
@@ -126,6 +128,9 @@ class DanceMontageWindow(QMainWindow):
         self.remix.stop_requested.connect(self.stop)
         self.remix.song_changed.connect(self._song_typed)
         self.remix.slice_changed.connect(lambda _v: self.reload())
+        self.remix.remove_song_requested.connect(self._remove_song)
+        self.remix.show_retired.stateChanged.connect(lambda _s: self.reload())
+
         self.filters.btn_apply.clicked.connect(self._reload_materials)
         self.filters.changed.connect(lambda _spec: self._reload_materials())
         self.library.changed.connect(self.reload)
@@ -170,7 +175,9 @@ class DanceMontageWindow(QMainWindow):
             return
         from ...dance import material_repository as repo
 
-        self.remix.set_songs(repo.list_songs(self.db))
+        self.remix.set_songs(repo.list_songs(
+            self.db, include_retired=self.remix.show_retired.isChecked()))
+
         slice_duration = self.remix.slice_duration()
         self.alignment.refresh(self.db, self._song_id)
         self.candidates.refresh(self.db, self._song_id, slice_duration=slice_duration,
@@ -203,6 +210,89 @@ class DanceMontageWindow(QMainWindow):
     def _adopt(self, picks: dict) -> None:
         self.candidates.adopt(dict(picks))
         self.remix.set_manual(self.candidates.manual())
+
+    # ------------------------------------------------------------ 下架 / 删除
+    def _remove_song(self, song_id: int) -> None:
+        """移除一首目标歌。**下架是默认答案，彻底删除要额外一次确认。**
+
+        为什么不给一个干脆的"删除"了事：`dance_materials` / `dance_audio_alignments` /
+        `dance_montages` 都是 `ON DELETE CASCADE`，真删下去会把素材、对齐、
+        历史成片和它们的事件流水一起抹掉。而这个项目的立足点就是"素材是长期资产"。
+        所以这里先把挂在它下面的数量摆出来，让用户自己选。
+        """
+        from ...dance import material_repository as repo
+
+        if self.db is None:
+            return
+        row = repo.get_song(self.db, int(song_id))
+        if row is None:
+            QMessageBox.warning(self, "找不到", f"库里没有目标歌 #{song_id}")
+            self.reload()
+            return
+        title = str(row["title"] or f"#{song_id}")
+
+        # 已经下架的：这一步变成"恢复"
+        if repo.song_retirement(self.db, int(song_id)) is not None:
+            answer = QMessageBox.question(
+                self, "恢复目标歌",
+                f"《{title}》现在是已下架状态。要恢复它吗？\n"
+                "（下架期间素材和历史一条都没动，恢复后立刻能继续用）",
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+            if answer == QMessageBox.Yes:
+                repo.restore_song(self.db, int(song_id))
+                self.reload()
+            return
+
+        usage = repo.song_usage(self.db, int(song_id))
+        detail = repo.describe_usage(usage)
+
+
+        box = QMessageBox(self)
+        box.setWindowTitle("移除目标歌")
+        box.setIcon(QMessageBox.Question)
+        box.setText(f"《{title}》下面挂着：{detail}")
+        box.setInformativeText(
+            "下架（推荐）：只是从界面上隐藏，素材、对齐、历史成片一条都不动，随时能恢复。\n\n"
+            "彻底删除：连带删掉上面列出的全部数据库记录，**不可撤销**。\n"
+            "只有在这首歌是误加进来的（选错文件、重复导入）时才该用它。\n"
+            "磁盘上已经切好的素材文件不会被删，需要的话自己去素材目录清理。")
+        hide = box.addButton("下架（可恢复）", QMessageBox.AcceptRole)
+        drop = box.addButton("彻底删除", QMessageBox.DestructiveRole)
+        box.addButton("取消", QMessageBox.RejectRole)
+        box.setDefaultButton(hide)
+        box.exec_()
+        clicked = box.clickedButton()
+
+        if clicked is hide:
+            reason, ok = QInputDialog.getText(
+                self, "写个理由", "为什么下架这首歌？（会连同时间一起存档）")
+            if not ok or not reason.strip():
+                QMessageBox.information(self, "没有下架",
+                                        "没写理由，这次不下架 —— 不允许静默隐藏。")
+                return
+            repo.retire_song(self.db, int(song_id), reason=reason.strip(), operator="gui")
+            self.remix.append_log(f"[目标歌] 《{title}》已下架：{reason.strip()}")
+        elif clicked is drop:
+            again = QMessageBox.warning(
+                self, "最后确认",
+                f"真的要彻底删除《{title}》吗？\n\n"
+                f"连带删除：{detail}\n"
+                "这一步不可撤销。想留后路请改用「下架」。",
+                QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Cancel)
+            if again != QMessageBox.Yes:
+                return
+            removed = repo.delete_song(self.db, int(song_id), confirm=True)
+            self.remix.append_log(
+                f"[目标歌] 《{title}》已彻底删除，连带 {repo.describe_usage(removed)}")
+
+        else:
+            return
+
+        if int(song_id) == self._song_id:          # 当前正看着它，得把界面切回空
+            self._song_id = 0
+            self.remix.song.clear()
+        self.reload()
+
 
 
     # ------------------------------------------------------------------ 跑活

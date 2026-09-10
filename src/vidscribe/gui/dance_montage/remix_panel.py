@@ -53,6 +53,8 @@ class RemixPanel(QWidget):
     stop_requested = pyqtSignal()
     song_changed = pyqtSignal(str)
     slice_changed = pyqtSignal(float)
+    remove_song_requested = pyqtSignal(int)
+
 
     def __init__(self, cfg, parent=None) -> None:
         super().__init__(parent)
@@ -77,10 +79,22 @@ class RemixPanel(QWidget):
         btn_song = QPushButton("选歌…", box)
         self.songs = QComboBox(box)
         self.songs.addItem("（库里已有的目标歌）", "")
+        self.btn_remove_song = QPushButton("移除这首…", box)
+        self.btn_remove_song.setToolTip("把下拉框里选中的目标歌从界面上移除。\n"
+                                       "默认是「下架」：素材、对齐、历史成片一条都不动，随时能恢复。\n"
+                                       "确实是误加进来的，才走「彻底删除」那一档。")
+        self.show_retired = QCheckBox("含已下架", box)
+        self.show_retired.setToolTip("勾上之后下拉框里也列出已下架的歌，选中它再点「移除这首…」就能恢复")
+        song_tools = QHBoxLayout()
+        song_tools.setContentsMargins(0, 0, 0, 0)
+        song_tools.addWidget(self.show_retired)
+        song_tools.addWidget(self.btn_remove_song)
         grid.addWidget(QLabel("目标歌", box), 0, 0)
         grid.addWidget(self.song, 0, 1)
         grid.addWidget(btn_song, 0, 2)
-        grid.addWidget(self.songs, 1, 1, 1, 2)
+        grid.addWidget(self.songs, 1, 1)
+        grid.addLayout(song_tools, 1, 2)
+
 
         self.sources = QListWidget(box)
         self.sources.setMaximumHeight(110)
@@ -97,8 +111,10 @@ class RemixPanel(QWidget):
         btn_add.clicked.connect(self._add_files)
         btn_dir.clicked.connect(self._add_dir)
         btn_drop.clicked.connect(self.sources.clear)
+        self.btn_remove_song.clicked.connect(self._ask_remove_song)
         self.song.textChanged.connect(self.song_changed.emit)
         self.songs.currentIndexChanged.connect(self._pick_known_song)
+
         return box
 
     def _build_options(self) -> QGroupBox:
@@ -228,19 +244,26 @@ class RemixPanel(QWidget):
             + ("（智能推荐已关，出片就用这份）" if not self.recommend.isChecked() else ""))
 
     def set_songs(self, rows) -> None:
-        """把库里已有的目标歌铺进下拉框。"""
+        """把库里已有的目标歌铺进下拉框。已下架的加个前缀标出来。"""
         current = self.songs.currentData()
         self.songs.blockSignals(True)
         self.songs.clear()
         self.songs.addItem("（库里已有的目标歌）", "")
         for row in rows:
+            retired = False
+            try:                       # 老调用方可能传不带 retired_at 的行，不能因此崩
+                retired = bool(row["retired_at"])
+            except (IndexError, KeyError, TypeError):
+                retired = False
             self.songs.addItem(
-                f"#{int(row['id'])} {row['title']}（{float(row['duration'] or 0):.1f}s，"
-                f"BPM {float(row['bpm'] or 0):.0f}）", str(int(row["id"])))
+                f"{'【已下架】' if retired else ''}#{int(row['id'])} {row['title']}"
+                f"（{float(row['duration'] or 0):.1f}s，BPM {float(row['bpm'] or 0):.0f}）",
+                str(int(row["id"])))
         index = self.songs.findData(current)
         if index >= 0:
             self.songs.setCurrentIndex(index)
         self.songs.blockSignals(False)
+
 
     # ------------------------------------------------------------------ 交互
     def _slice_mode(self) -> None:
@@ -257,6 +280,19 @@ class RemixPanel(QWidget):
         data = str(self.songs.currentData() or "")
         if data:
             self.song.setText(data)
+
+    def _ask_remove_song(self) -> None:
+        """把下拉框里选中的那首歌交给主窗口处理（要查库、要摆数字，逻辑不放这一层）。"""
+        from PyQt5.QtWidgets import QMessageBox
+
+        data = str(self.songs.currentData() or "").strip()
+        if not data.isdigit():
+            QMessageBox.information(self, "先选一首",
+                                    "请先在下拉框里选中一首库里已有的目标歌。\n"
+                                    "（上面输入框里填的文件路径还没入库，谈不上移除）")
+            return
+        self.remove_song_requested.emit(int(data))
+
 
     def _add_files(self) -> None:
         for path in self._open_files("选源舞蹈视频", self.cfg.dance_path("source_dir"),
