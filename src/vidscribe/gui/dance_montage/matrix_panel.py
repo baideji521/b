@@ -28,6 +28,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
+    QPushButton,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -82,6 +83,7 @@ class MaterialColumn(QListWidget):
         super().__init__(parent)
         self.segment_index = int(segment_index)
         self.title = title or f"S{self.segment_index + 1}"
+        self.current_id = 0
         self.setObjectName(f"column_{self.segment_index}")
         self.setDragDropMode(QAbstractItemView.DragDrop)
         self.setDefaultDropAction(Qt.MoveAction)
@@ -91,29 +93,55 @@ class MaterialColumn(QListWidget):
         self.setUniformItemSizes(True)
 
     # ------------------------------------------------------------------ 数据
-    def load(self, rows) -> None:
-        """`rows` 是 `[{material_id, label, note}]`，第一条即当前使用。"""
+    def load(self, rows, current_id: int = 0) -> None:
+        """`rows` 是 `[{material_id, label, score, path, note}]`。
+
+        `current_id` 是**库里存着的最终选择**；给了就按它标 ⭐ CURRENT，
+        没给（0）就按第一条算 —— 前者才是"重新打开工程后恢复"的依据。
+        """
         self.clear()
+        self.current_id = int(current_id or 0)
         for index, row in enumerate(rows or ()):
-            self.addItem(self._item(row, index == 0))
+            material_id = int(row.get("material_id") or 0)
+            chosen = (material_id == self.current_id) if self.current_id else index == 0
+            self.addItem(self._item(row, chosen))
+        if not self.current_id and self.count():
+            self.current_id = int((self.payloads()[0] or {}).get("material_id") or 0)
 
     def _item(self, row: dict[str, Any], current: bool) -> QListWidgetItem:
-        star = "⭐ " if current else ""
-        item = QListWidgetItem(f"{star}{row.get('label') or row.get('material_id')}"
-                               f"　/　{self.title}")
-        item.setData(Qt.UserRole, {"material_id": int(row.get("material_id") or 0),
-                                   "segment_index": self.segment_index,
-                                   "label": str(row.get("label") or "")})
-        item.setToolTip(str(row.get("note") or "拖到最上面 = 这一格改用它"))
+        payload = {"material_id": int(row.get("material_id") or 0),
+                   "segment_index": self.segment_index,
+                   "label": str(row.get("label") or ""),
+                   "path": str(row.get("path") or ""),
+                   "score": float(row.get("score") or 0.0)}
+        item = QListWidgetItem(self._caption(payload, current))
+        item.setData(Qt.UserRole, payload)
+        item.setToolTip(str(row.get("note") or "")
+                        + "\n拖到最上面 = 这一格改用它（只能在本列内拖）")
         item.setSizeHint(QSize(COLUMN_WIDTH - 24, CARD_HEIGHT))
         return item
+
+    def _caption(self, payload: dict[str, Any], current: bool) -> str:
+        """卡片一行说清四件事：是否当前使用、素材名、评分、绑在哪一段。"""
+        label = payload.get("label") or payload.get("material_id")
+        score = float(payload.get("score") or 0.0)
+        mark = "⭐ CURRENT　" if current else ""
+        rating = f"　⭐{score:.0f}" if score > 0 else ""
+        return f"{mark}{label}{rating}　/　{self.title}"
 
     def payloads(self) -> list[dict[str, Any]]:
         return [self.item(i).data(Qt.UserRole) for i in range(self.count())]
 
     def current_pick(self) -> int:
-        """排第一的那条素材 id；列是空的就 0。"""
+        """这一格当前用哪条素材。**排第一的就是它**（拖到最上面 = 改用它）。"""
         return int(self.payloads()[0]["material_id"]) if self.count() else 0
+
+    def set_current(self, material_id: int) -> bool:
+        """「设为当前」按钮：把某条素材提到最上面。不在本列里就返回 False。"""
+        for payload in self.payloads():
+            if int(payload.get("material_id") or 0) == int(material_id):
+                return self.drop_payload(payload, 0)
+        return False
 
     # ------------------------------------------------------------------ 拖拽
     def mimeTypes(self) -> list[str]:            # noqa: N802 - Qt 的名字
@@ -172,13 +200,12 @@ class MaterialColumn(QListWidget):
         return True
 
     def _restar(self) -> None:
-        """⭐只跟着"排第一"这件事走，别的都不带。"""
+        """⭐ CURRENT 只跟着"排第一"这件事走，别的都不带。"""
+        self.current_id = self.current_pick()
         for index in range(self.count()):
             item = self.item(index)
             payload = item.data(Qt.UserRole) or {}
-            label = payload.get("label") or payload.get("material_id")
-            star = "⭐ " if index == 0 else ""
-            item.setText(f"{star}{label}　/　{self.title}")
+            item.setText(self._caption(payload, index == 0))
 
 
 class TimelineSlot(QFrame):
@@ -192,6 +219,7 @@ class TimelineSlot(QFrame):
         self.segment_index = int(segment_index)
         self.title = title or f"S{self.segment_index + 1}"
         self.material_id = 0
+        self.span: tuple[float, float] | None = None
         self.setAcceptDrops(True)
         self.setFrameShape(QFrame.StyledPanel)
         self.setMinimumSize(SLOT_WIDTH, SLOT_HEIGHT)
@@ -204,8 +232,18 @@ class TimelineSlot(QFrame):
         self.body = QLabel("拖一张卡片进来", self)
         self.body.setWordWrap(True)
         self.body.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        self.time = QLabel("", self)
+        self.time.setStyleSheet(f"color:{theme.TEXT_DIM};")
         column.addWidget(self.head)
         column.addWidget(self.body, 1)
+        column.addWidget(self.time)
+
+    def set_span(self, start: float, end: float) -> None:
+        """这一格在**主音频**上的起止。它来自 Segment Template，这里只显示，永远不改。"""
+        self.span = (round(float(start), 3), round(float(end), 3))
+        self.time.setText(f"{self.span[0]:.3f}→{self.span[1]:.3f}"
+                          f"（{self.span[1] - self.span[0]:.3f}s）")
+        self.head.setText(f"{self.title}")
 
     def set_material(self, material_id: int, label: str = "") -> None:
         self.material_id = int(material_id or 0)
@@ -246,22 +284,37 @@ class TimelineSlot(QFrame):
 
 
 class MatrixPanel(QWidget):
-    """② 素材池（一列一个段落）+ ③ FINAL TIMELINE。拖完只发 `picks_changed`。"""
+    """② 素材池（一列一个段落）+ ③ FINAL TIMELINE。
+
+    每一次改动（拖排序、替换、设为当前）都**立刻落库**：
+    `dance_final_selections`（这一段用谁）+ `dance_candidate_order`（候选顺序）。
+    重新打开工程时按这两张表恢复 —— 界面状态不是唯一真相。
+
+    库里那一步还会**再校验一次**素材的 segment_index（`repo.set_final_selection`），
+    所以跨段落的选择拦两道：界面不给落，业务层也不给写。
+    """
 
     picks_changed = pyqtSignal(dict)           # {段落: 素材id}
     refused = pyqtSignal(str)                  # 给状态栏的一句人话
+    preview_requested = pyqtSignal(str)        # 素材文件路径
+    saved = pyqtSignal(str)                    # 落库之后的一句人话
 
-    def __init__(self, parent=None) -> None:
+    def __init__(self, parent=None, db=None, song_id: int = 0) -> None:
         super().__init__(parent)
+        self.db = db
+        self.song_id = int(song_id or 0)
         self.columns: list[MaterialColumn] = []
         self.slots: list[TimelineSlot] = []
+        self._history: list[dict[int, int]] = []      # 撤销栈：每步存一份 picks
+        self._future: list[dict[int, int]] = []       # 重做栈
+        self._quiet = False                           # 恢复/撤销时不再往栈里压
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
         layout.addWidget(QLabel("📦 素材池：同一列里随便拖，拖到最上面就是这一格改用它"
-                                "（跨段落拖不进去）", self))
+                                "（跨段落拖不进去；每次改动立刻存库）", self))
         self.pool_area = QScrollArea(self)
         self.pool_area.setWidgetResizable(True)
         self.pool = QWidget(self.pool_area)
@@ -271,7 +324,8 @@ class MatrixPanel(QWidget):
         self.pool_area.setWidget(self.pool)
         layout.addWidget(self.pool_area, 3)
 
-        layout.addWidget(QLabel("🎬 FINAL TIMELINE：从上面拖一张卡片下来替换这一格", self))
+        layout.addWidget(QLabel("🎬 FINAL TIMELINE：从上面拖一张卡片下来替换这一格"
+                                "（只换「谁负责这一段」，段落起止一个字都不动）", self))
         self.line_area = QScrollArea(self)
         self.line_area.setWidgetResizable(True)
         self.line_area.setMaximumHeight(SLOT_HEIGHT + 28)
@@ -286,14 +340,24 @@ class MatrixPanel(QWidget):
         self.hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         layout.addWidget(self.hint)
 
+    def attach(self, db, song_id: int) -> None:
+        """换库 / 换歌。落库和恢复都认这两个。"""
+        self.db = db
+        self.song_id = int(song_id or 0)
+        self._history.clear()
+        self._future.clear()
+
     # ------------------------------------------------------------------ 数据
     def load(self, segments) -> None:
-        """`segments` 是 `[{"index":0,"title":"S1","materials":[{material_id,label,note}]}]`。"""
+        """`segments` = `[{"index":0,"title":"S1","materials":[{material_id,label,score,path,note}],
+        "current":素材id}]`。`current` 一般来自库里的最终选择。"""
         self._clear()
+        self._quiet = True
         for spec in segments or ():
             index = int(spec.get("index", 0))
             title = str(spec.get("title") or f"S{index + 1}")
             rows = list(spec.get("materials") or ())
+            current = int(spec.get("current") or 0)
 
             box = QWidget(self.pool)
             column_layout = QVBoxLayout(box)
@@ -301,17 +365,36 @@ class MatrixPanel(QWidget):
             column_layout.setSpacing(2)
             column_layout.addWidget(QLabel(f"{title}　（{len(rows)} 条候选）", box))
             column = MaterialColumn(index, title, box)
-            column.load(rows)
+            column.load(rows, current)
             column.reordered.connect(self._pick_changed)
             column.refused.connect(self._say_refused)
             column_layout.addWidget(column, 1)
+
+            buttons = QHBoxLayout()
+            buttons.setSpacing(4)
+            pick = QPushButton("设为当前", box)
+            pick.setMinimumHeight(28)
+            pick.clicked.connect(lambda _c=False, c=column: self._set_current(c))
+            play = QPushButton("▶ 预览", box)
+            play.setMinimumHeight(28)
+            play.clicked.connect(lambda _c=False, c=column: self._preview(c))
+            buttons.addWidget(pick)
+            buttons.addWidget(play)
+            column_layout.addLayout(buttons)
+
             self.pool_row.addWidget(box)
             self.columns.append(column)
 
             slot = TimelineSlot(index, title, self.line)
-            if rows:
-                slot.set_material(int(rows[0].get("material_id") or 0),
-                                  str(rows[0].get("label") or ""))
+            chosen = current or (int(rows[0].get("material_id") or 0) if rows else 0)
+            label = ""
+            for row in rows:
+                if int(row.get("material_id") or 0) == chosen:
+                    label = str(row.get("label") or "")
+            span = spec.get("span") or ()
+            if len(span) == 2:
+                slot.set_span(float(span[0]), float(span[1]))
+            slot.set_material(chosen, label)
             slot.replaced.connect(self._slot_replaced)
             slot.refused.connect(self._say_refused)
             self.line_row.addWidget(slot)
@@ -319,8 +402,11 @@ class MatrixPanel(QWidget):
 
         self.pool_row.addStretch(1)
         self.line_row.addStretch(1)
+        self._quiet = False
         total = sum(c.count() for c in self.columns)
+        chosen = len(self.picks())
         self.hint.setText(f"{len(self.columns)} 段　·　共 {total} 条候选素材"
+                          f"　·　已定 {chosen} 段"
                           if self.columns else
                           "还没有素材。先在「主音频/分段」定好分段，再切片入库。")
 
@@ -340,19 +426,122 @@ class MatrixPanel(QWidget):
         return {slot.segment_index: slot.material_id
                 for slot in self.slots if slot.material_id}
 
-    def _pick_changed(self, segment_index: int, material_id: int) -> None:
-        """列里的顺序变了 → 那一格的 FINAL TIMELINE 也跟着换成新的第一名。"""
+    def _column(self, segment_index: int):
+        for column in self.columns:
+            if column.segment_index == int(segment_index):
+                return column
+        return None
+
+    def _slot(self, segment_index: int):
         for slot in self.slots:
             if slot.segment_index == int(segment_index):
-                label = ""
-                for column in self.columns:
-                    if column.segment_index == int(segment_index) and column.count():
-                        label = str((column.payloads()[0] or {}).get("label") or "")
-                slot.set_material(int(material_id), label)
+                return slot
+        return None
+
+    def _label_of(self, segment_index: int, material_id: int) -> str:
+        column = self._column(segment_index)
+        for payload in (column.payloads() if column is not None else ()):
+            if int(payload.get("material_id") or 0) == int(material_id):
+                return str(payload.get("label") or "")
+        return ""
+
+    def _pick_changed(self, segment_index: int, material_id: int) -> None:
+        """列里的顺序变了 → FINAL TIMELINE 那一格跟着换成新的第一名，并立刻落库。"""
+        before = self.picks()
+        slot = self._slot(segment_index)
+        if slot is not None:
+            slot.set_material(int(material_id), self._label_of(segment_index, material_id))
+        if not self._quiet:
+            self._history.append(before)
+            self._future.clear()
+        self._persist(segment_index, int(material_id))
         self.picks_changed.emit(self.picks())
 
-    def _slot_replaced(self, _segment_index: int, _material_id: int) -> None:
+    def _slot_replaced(self, segment_index: int, material_id: int) -> None:
+        """往槽里拖 = 这一段改用它，池子里那一列的 ⭐ 也要跟着走（同一条路落库）。"""
+        column = self._column(segment_index)
+        if column is not None and column.current_pick() != int(material_id):
+            column.set_current(int(material_id))       # 会走 _pick_changed，落库在那儿
+            return
+        self._persist(segment_index, int(material_id))
         self.picks_changed.emit(self.picks())
+
+    def _persist(self, segment_index: int, material_id: int) -> None:
+        """落库：最终选择 + 这一段的候选顺序。库里再校验一次跨段落。"""
+        if self.db is None or self.song_id <= 0 or material_id <= 0:
+            return
+        from ...dance import material_repository as repo  # noqa: PLC0415
+
+        column = self._column(segment_index)
+        try:
+            repo.set_final_selection(self.db, self.song_id, int(segment_index),
+                                     int(material_id))
+        except repo.SelectionError as exc:
+            # 业务层拒绝了（界面理论上拦得住，拦漏了就在这儿兜住）
+            self.refused.emit(f"没存：{exc}")
+            return
+        if column is not None:
+            repo.save_candidate_order(
+                self.db, self.song_id, int(segment_index),
+                [int(p.get("material_id") or 0) for p in column.payloads()])
+        self.saved.emit(f"已存：S{int(segment_index) + 1} 用素材 #{material_id}")
+
+    def _set_current(self, column) -> None:
+        """「设为当前」：把这一列里选中的那条提到最上面。"""
+        item = column.currentItem() or (column.item(0) if column.count() else None)
+        if item is None:
+            return
+        payload = item.data(Qt.UserRole) or {}
+        column.set_current(int(payload.get("material_id") or 0))
+
+    def _preview(self, column) -> None:
+        """「▶ 预览」：把选中素材的路径发出去，由外面那个播放器播。"""
+        item = column.currentItem() or (column.item(0) if column.count() else None)
+        payload = (item.data(Qt.UserRole) if item is not None else None) or {}
+        path = str(payload.get("path") or "")
+        if not path:
+            self.refused.emit("这条素材没有文件路径，播不了")
+            return
+        self.preview_requested.emit(path)
+
+    # -------------------------------------------------------------- 撤销/重做
+    def undo(self) -> bool:
+        if not self._history:
+            return False
+        self._future.append(self.picks())
+        return self._apply_snapshot(self._history.pop())
+
+    def redo(self) -> bool:
+        if not self._future:
+            return False
+        self._history.append(self.picks())
+        return self._apply_snapshot(self._future.pop())
+
+    def _apply_snapshot(self, picks: dict[int, int]) -> bool:
+        """把某一份 `{段落: 素材}` 套回界面并落库。撤销/重做共用它。"""
+        self._quiet = True
+        try:
+            for segment_index, material_id in picks.items():
+                column = self._column(segment_index)
+                if column is not None:
+                    column.set_current(int(material_id))
+                slot = self._slot(segment_index)
+                if slot is not None:
+                    slot.set_material(int(material_id),
+                                      self._label_of(segment_index, material_id))
+                self._persist(int(segment_index), int(material_id))
+        finally:
+            self._quiet = False
+        self.picks_changed.emit(self.picks())
+        return True
+
+    def save(self) -> int:
+        """Ctrl+S：把当前这份编排整份写一遍（平时每步都自动存，这里是"再确认一次"）。"""
+        picks = self.picks()
+        for segment_index, material_id in picks.items():
+            self._persist(int(segment_index), int(material_id))
+        self.saved.emit(f"已保存整份编排：{len(picks)} 段")
+        return len(picks)
 
     def _say_refused(self, target: int, came_from: int) -> None:
         self.refused.emit(f"拖不过去：那条素材绑在 S{int(came_from) + 1}，"

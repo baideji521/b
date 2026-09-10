@@ -26,11 +26,14 @@ TICK_BAND = 20
 SPECTRUM_HEIGHT = 92
 WAVE_HEIGHT = 44
 VOCAL_HEIGHT = 30
+ZONE_HEIGHT = 22
 SEGMENT_HEIGHT = 36
 #: 左右留白：边界拖到最边上也得有地方下手
 PAD = 8.0
 #: 鼠标离边界这么近（像素）就算"抓住了它"
 GRAB_PIXELS = 6.0
+#: 缩放能看到的最短窗口（秒）。再细下去一屏放不下一个字
+MIN_VIEW_SECONDS = 2.0
 
 
 class MasterTimeline(QWidget):
@@ -40,6 +43,7 @@ class MasterTimeline(QWidget):
     boundary_dragged = pyqtSignal(int, float)
     boundary_committed = pyqtSignal(int, float)
     segment_clicked = pyqtSignal(int)
+    view_changed = pyqtSignal(float, float)      # 可见窗口 (起点, 跨度)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -56,11 +60,15 @@ class MasterTimeline(QWidget):
         self._vocal: list[tuple[float, float, str]] = []
         self._pauses: list[tuple[float, float, float]] = []   # start, end, score
         self._spans: list[tuple[float, float, str]] = []
+        self._zones: list[tuple[float, float, float, str]] = []
+        self._marks: list[float] = []
         self._beats: list[float] = []
         self._snap: list[float] = []
         self._playhead: float | None = None
         self._cursor_time = 0.0
         self._dragging = -1                 # 正在拖第几个内部分割点，-1 = 没拖
+        self._view_start = 0.0              # 可见窗口起点（秒）
+        self._view_span = 0.0               # 可见窗口跨度；0 = 看全曲
 
     # ------------------------------------------------------------------ 输入
     def set_song(self, duration: float, envelope: list[float] | None = None) -> None:
@@ -101,6 +109,59 @@ class MasterTimeline(QWidget):
         self._refresh_snap()
         self.update()
 
+    def set_zones(self, zones) -> None:
+        """可取区间：`[(start, end, score, level), …]`，来自 `vocal_activity.cut_zones`。"""
+        self._zones = [(float(a), float(b), float(s), str(t)) for a, b, s, t in zones or ()]
+        self.update()
+
+    def set_marks(self, moments) -> None:
+        """用户「⭐ 标记为可取」的时刻（库里读出来的）。"""
+        self._marks = sorted(float(m) for m in moments or ())
+        self.update()
+
+    # ------------------------------------------------------------ 缩放/滚动
+    def set_view(self, start: float, span: float) -> None:
+        """设可见窗口。`span<=0` 或大于全曲 = 看全曲。所有横带共用它，绝不各画一套。"""
+        total = self._duration
+        span = 0.0 if span <= 0 or (total > 0 and span >= total) else max(MIN_VIEW_SECONDS,
+                                                                          float(span))
+        if span <= 0:
+            self._view_start, self._view_span = 0.0, 0.0
+        else:
+            self._view_span = span
+            self._view_start = max(0.0, min(float(start), max(0.0, total - span)))
+        self.view_changed.emit(self._view_start, self._view_span)
+        self.update()
+
+    def view(self) -> tuple[float, float]:
+        """`(起点, 跨度)`；跨度 0 表示全曲。"""
+        return self._view_start, self._view_span
+
+    def visible_span(self) -> tuple[float, float]:
+        """真正画出来的那一段 `(左, 右)`。"""
+        if self._view_span <= 0:
+            return 0.0, self._duration if self._duration > 0 else 1.0
+        return self._view_start, self._view_start + self._view_span
+
+    def zoom(self, factor: float, center: float | None = None) -> None:
+        """缩放。`factor<1` 放大（窗口变短），围绕 `center`（默认当前光标）不动。"""
+        left, right = self.visible_span()
+        span = (right - left) * max(0.05, float(factor))
+        pivot = self._cursor_time if center is None else float(center)
+        self.set_view(pivot - span / 2.0, span)
+
+    def scroll_to(self, start: float) -> None:
+        self.set_view(float(start), self._view_span)
+
+    def ensure_visible(self, moment: float) -> None:
+        """播放头跑出可见范围时把窗口挪过去（自动跟随）。全曲视图什么都不用做。"""
+        if self._view_span <= 0:
+            return
+        left, right = self.visible_span()
+        if left <= float(moment) <= right:
+            return
+        self.set_view(float(moment) - self._view_span * 0.25, self._view_span)
+
     def set_playhead(self, moment: float | None) -> None:
         self._playhead = None if moment is None else max(0.0, float(moment))
         self.update()
@@ -113,8 +174,10 @@ class MasterTimeline(QWidget):
         self._duration = 0.0
         self._image, self._raw = None, b""
         self._env, self._vocal, self._pauses, self._spans = [], [], [], []
+        self._zones, self._marks = [], []
         self._beats, self._snap = [], []
         self._playhead, self._cursor_time, self._dragging = None, 0.0, -1
+        self._view_start, self._view_span = 0.0, 0.0
         self.update()
 
     def _refresh_snap(self) -> None:
@@ -127,14 +190,18 @@ class MasterTimeline(QWidget):
 
     # ------------------------------------------------------------------ 坐标
     def _x_of(self, moment: float) -> float:
-        total = self._duration if self._duration > 0 else 1.0
+        left, right = self.visible_span()
+        span = max(1e-6, right - left)
         usable = max(1.0, self.width() - 2 * PAD)
-        return PAD + float(moment) / total * usable
+        return PAD + (float(moment) - left) / span * usable
 
     def _time_of(self, x: float) -> float:
-        total = self._duration if self._duration > 0 else 1.0
+        left, right = self.visible_span()
+        span = max(1e-6, right - left)
         usable = max(1.0, self.width() - 2 * PAD)
-        return min(total, max(0.0, (float(x) - PAD) / usable * total))
+        moment = left + (float(x) - PAD) / usable * span
+        top = self._duration if self._duration > 0 else right
+        return min(top, max(0.0, moment))
 
     def _lanes(self) -> dict[str, QRectF]:
         """从上到下切带。多出来的高度按 6:2:1:1 分给音谱图/波形/人声/段落 ——
@@ -142,15 +209,16 @@ class MasterTimeline(QWidget):
         """
         width = float(self.width())
         spare = max(0.0, self.height() - TICK_BAND - SPECTRUM_HEIGHT - WAVE_HEIGHT
-                    - VOCAL_HEIGHT - SEGMENT_HEIGHT - 10)
+                    - VOCAL_HEIGHT - ZONE_HEIGHT - SEGMENT_HEIGHT - 12)
         top = 2.0
         tick = QRectF(0, top, width, TICK_BAND)
         spectrum = QRectF(0, tick.bottom(), width, SPECTRUM_HEIGHT + spare * 0.6)
         wave = QRectF(0, spectrum.bottom() + 2, width, WAVE_HEIGHT + spare * 0.2)
         vocal = QRectF(0, wave.bottom() + 2, width, VOCAL_HEIGHT + spare * 0.1)
-        segment = QRectF(0, vocal.bottom() + 2, width, SEGMENT_HEIGHT + spare * 0.1)
+        zone = QRectF(0, vocal.bottom() + 2, width, ZONE_HEIGHT)
+        segment = QRectF(0, zone.bottom() + 2, width, SEGMENT_HEIGHT + spare * 0.1)
         return {"tick": tick, "spectrum": spectrum, "wave": wave,
-                "vocal": vocal, "segment": segment}
+                "vocal": vocal, "zone": zone, "segment": segment}
 
     def _boundary_at(self, x: float, y: float) -> int:
         """鼠标底下是第几个内部分割点？不在段落带上、或没抓到就返回 -1。"""
@@ -213,18 +281,34 @@ class MasterTimeline(QWidget):
         self._draw_spectrum(painter, lanes["spectrum"])
         self._draw_wave(painter, lanes["wave"])
         self._draw_vocal(painter, lanes["vocal"])
+        self._draw_zones(painter, lanes["zone"])
         self._draw_segments(painter, lanes["segment"])
         self._draw_heads(painter, lanes)
 
+    def wheelEvent(self, event) -> None:                      # noqa: N802 - Qt 的名字
+        """滚轮 = 缩放（围绕鼠标那一刻），Shift+滚轮 = 横向滚动。"""
+        if self._duration <= 0:
+            return
+        steps = event.angleDelta().y() / 120.0
+        if not steps:
+            return
+        if event.modifiers() & Qt.ShiftModifier:
+            left, right = self.visible_span()
+            self.scroll_to(self._view_start - steps * (right - left) * 0.2)
+            return
+        self.zoom(0.8 if steps > 0 else 1.25, self._time_of(event.x()))
+
     def _draw_ticks(self, painter: QPainter, lanes: dict[str, QRectF]) -> None:
+        left, right = self.visible_span()
+        span = max(1e-6, right - left)
         step = 1.0
-        for candidate in (1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0):
+        for candidate in (0.5, 1.0, 2.0, 5.0, 10.0, 15.0, 30.0, 60.0):
             step = candidate
-            if self._duration / candidate <= 14:
+            if span / candidate <= 14:
                 break
         top, bottom = lanes["spectrum"].top(), lanes["segment"].bottom()
-        moment = 0.0
-        while moment <= self._duration:
+        moment = float(int(left / step) * step)
+        while moment <= right:
             x = self._x_of(moment)
             painter.setPen(QPen(QColor(theme.LINE), 1))
             painter.drawLine(int(x), int(top), int(x), int(bottom))
@@ -241,10 +325,42 @@ class MasterTimeline(QWidget):
             painter.setPen(QColor(theme.TEXT_DIM))
             painter.drawText(inner, Qt.AlignCenter, "音谱图算好之后画在这里")
             return
-        painter.drawImage(inner, self._image)
+        # 缩放时只画可见那一段的列：图是整曲的，源矩形按时间比例裁
+        left, right = self.visible_span()
+        total = self._duration if self._duration > 0 else max(1e-6, right)
+        columns = float(self._image.width())
+        x0 = max(0.0, min(columns, left / total * columns))
+        x1 = max(x0 + 1.0, min(columns, right / total * columns))
+        source = QRectF(x0, 0.0, x1 - x0, float(self._image.height()))
+        painter.drawImage(inner, self._image, source)
         painter.setPen(QColor(theme.TEXT_DIM))
         painter.drawText(inner.adjusted(4, 2, -4, 0), Qt.AlignLeft | Qt.AlignTop,
                          "音谱图（上=高频）")
+
+    def _draw_zones(self, painter: QPainter, box: QRectF) -> None:
+        """可取区间 + 用户的 ⭐ 标记。**只是参考**，不改任何分段。"""
+        painter.setPen(QPen(QColor(theme.LINE), 1))
+        painter.drawRect(box.adjusted(PAD, 0, -PAD, -1))
+        if not self._zones and not self._marks:
+            painter.setPen(QColor(theme.TEXT_DIM))
+            painter.drawText(box.adjusted(PAD + 4, 0, -PAD, 0),
+                             Qt.AlignLeft | Qt.AlignVCenter, "可取区间：还没分析")
+            return
+        for start, end, score, level in self._zones:
+            x0, x1 = self._x_of(start), self._x_of(end)
+            alpha = 40 + int(min(1.0, max(0.0, score)) * 90)
+            painter.fillRect(QRectF(x0, box.top() + 3, max(1.0, x1 - x0),
+                                    box.height() - 6), QColor(90, 190, 120, alpha))
+            if x1 - x0 > 46:
+                painter.setPen(QColor(theme.TEXT))
+                painter.drawText(QRectF(x0, box.top(), x1 - x0, box.height()),
+                                 Qt.AlignCenter, level)
+        for moment in self._marks:
+            x = self._x_of(moment)
+            painter.setPen(QPen(QColor(theme.ACCENT), 2))
+            painter.drawLine(int(x), int(box.top() + 1), int(x), int(box.bottom() - 1))
+            painter.drawText(QRectF(x - 12, box.top(), 24, box.height()),
+                             Qt.AlignCenter, "⭐")
 
     def _draw_wave(self, painter: QPainter, box: QRectF) -> None:
         painter.setPen(QPen(QColor(theme.LINE), 1))
@@ -254,11 +370,16 @@ class MasterTimeline(QWidget):
         painter.setPen(QPen(QColor(theme.ACCENT), 1))
         middle = box.center().y()
         half = box.height() / 2.0 - 3.0
-        begin, end = self._x_of(0.0), self._x_of(self._duration)
-        step = (end - begin) / float(len(self._env))
-        for index, value in enumerate(self._env):
-            x = begin + index * step
-            tall = max(1.0, value * half)
+        total = self._duration if self._duration > 0 else 1.0
+        left, right = self.visible_span()
+        buckets = len(self._env)
+        # 只画可见那一段的桶：缩放之后照样是同一条时间轴，不会和别的带错开
+        first = max(0, int(left / total * buckets) - 1)
+        last = min(buckets, int(right / total * buckets) + 2)
+        for index in range(first, last):
+            moment = (index + 0.5) / buckets * total
+            x = self._x_of(moment)
+            tall = max(1.0, float(self._env[index]) * half)
             painter.drawLine(int(x), int(middle - tall), int(x), int(middle + tall))
 
     def _draw_vocal(self, painter: QPainter, box: QRectF) -> None:
@@ -326,7 +447,8 @@ def _clock(seconds: float) -> str:
 
 
 __all__ = ["TICK_BAND", "SPECTRUM_HEIGHT", "WAVE_HEIGHT", "VOCAL_HEIGHT",
-           "SEGMENT_HEIGHT", "GRAB_PIXELS", "MasterTimeline"]
+           "ZONE_HEIGHT", "SEGMENT_HEIGHT", "GRAB_PIXELS", "MIN_VIEW_SECONDS",
+           "MasterTimeline"]
 
 
 

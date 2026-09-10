@@ -226,12 +226,72 @@ class DanceMontageWindow(QMainWindow):
         # 矩阵里拖出来的选择就是"手动指定这一格用谁"，和候选面板同一个出口
         self.matrix.picks_changed.connect(self.remix.set_manual)
         self.matrix.refused.connect(lambda text: self.statusBar().showMessage(text, 6000))
+        self.matrix.saved.connect(lambda text: self.statusBar().showMessage(text, 4000))
+        self.matrix.preview_requested.connect(self._preview_material)
         self.master.template_changed.connect(lambda _t: self._reload_matrix())
+        self._install_shortcuts()
         self.recommend.adopted.connect(self._adopt)
         self.recommend.changed.connect(self.reload)
         self.history.rerender_requested.connect(self._rerender)
 
     # ------------------------------------------------------------------ 库
+    def _install_shortcuts(self) -> None:
+        """全局快捷键。**只加不抢**：先看主界面有没有占用，这里挑的都是没人用的。
+
+        Ctrl+S 保存当前编排、Ctrl+Z 撤销、Ctrl+Y 重做。
+        播放/停顿导航那几个（Space / ← → / J K L / S / M）放在「主音频/分段」页里，
+        因为它们只在那一页有意义（见 `MasterAudioPanel`）。
+        """
+        from PyQt5.QtGui import QKeySequence
+        from PyQt5.QtWidgets import QShortcut
+
+        def bind(keys: str, handler) -> None:
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(handler)
+
+        bind("Ctrl+S", self._save_everything)
+        bind("Ctrl+Z", self._undo)
+        bind("Ctrl+Y", self._redo)
+
+    def _save_everything(self) -> None:
+        """Ctrl+S：当前页该存什么就存什么（分段在主音频页，编排在矩阵页）。"""
+        current = self.tabs.currentWidget()
+        if current is self.master:
+            self.master.save_template()
+        else:
+            self.matrix.save()
+        self.save_settings()
+
+    def _undo(self) -> None:
+        if self.tabs.currentWidget() is self.master:
+            self.master.undo()
+            return
+        if not self.matrix.undo():
+            self.statusBar().showMessage("没有可以撤销的编排改动", 3000)
+
+    def _redo(self) -> None:
+        if self.tabs.currentWidget() is self.master:
+            self.master.redo()
+            return
+        if not self.matrix.redo():
+            self.statusBar().showMessage("没有可以重做的编排改动", 3000)
+
+    def _preview_material(self, path: str) -> None:
+        """预览一条素材：复用素材库那个播放器，不另造一个。"""
+        target = Path(str(path))
+        if not target.is_file():
+            self.statusBar().showMessage(f"文件不在了：{target}", 6000)
+            return
+        opened = getattr(self.library, "preview", None)
+        if callable(opened):
+            opened(str(target))
+            return
+        from PyQt5.QtCore import QUrl
+        from PyQt5.QtGui import QDesktopServices
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
     def _open_db(self) -> None:
         from ...db import open_db
 
@@ -301,31 +361,45 @@ class DanceMontageWindow(QMainWindow):
         self.library.show_materials(self.db, self._song_id, found)
 
     def _reload_matrix(self) -> None:
-        """素材矩阵：一列一个段落。段落用用户拍板的模板，没模板就按等间隔位置。"""
+        """素材矩阵：一列一个段落。段落用用户拍板的模板，没模板就按等间隔位置。
+
+        候选顺序和"这一段用谁"都从库里读（`dance_candidate_order` /
+        `dance_final_selections`）—— 重新打开工程之后能长回上次的样子就靠这两张表。
+        """
         if self.db is None or not self._song_id:
             self.matrix.load([])
             return
         from ...dance import material_repository as repo
         from ...dance.music_structure import target_positions
 
+        self.matrix.attach(self.db, self._song_id)
         row = repo.get_song(self.db, self._song_id)
         duration = float(row["duration"] or 0.0) if row is not None else 0.0
         template = repo.active_segment_template(self.db, self._song_id)
         if template is not None:
-            spans = [(s.index, s.name) for s in template.spans]
+            spans = [(s.index, s.name, s.start, s.end) for s in template.spans]
         else:
-            spans = [(p.index, f"S{p.index + 1}") for p in
+            spans = [(p.index, f"S{p.index + 1}", p.start, p.end) for p in
                      target_positions(duration, self.remix.slice_duration())]
 
+        chosen = repo.final_selections(self.db, self._song_id)
         segments = []
-        for index, title in spans:
-            materials = repo.materials_at(self.db, self._song_id, index)
-            segments.append({"index": index, "title": title, "materials": [
-                {"material_id": m.id,
-                 "label": f"{m.person or Path(m.file_path).stem[:18]}",
-                 "note": f"素材 #{m.id}｜置信 {m.alignment_confidence:.3f}"
-                         f"｜用过 {m.use_count} 次"}
-                for m in materials]})
+        for index, title, start, end in spans:
+            materials = repo.order_materials(
+                repo.materials_at(self.db, self._song_id, index),
+                repo.candidate_order(self.db, self._song_id, index))
+            segments.append({
+                "index": index, "title": title, "span": (start, end),
+                "current": int(chosen.get(index, 0)),
+                "materials": [
+                    {"material_id": m.id,
+                     "label": f"{m.person or Path(m.file_path).stem[:18]}",
+                     "path": m.file_path,
+                     "score": round(float(m.quality or 0.0) * 100.0, 0),
+                     "note": f"素材 #{m.id}｜{Path(m.file_path).name}\n"
+                             f"对齐置信 {m.alignment_confidence:.3f}｜"
+                             f"质量 {float(m.quality or 0.0):.2f}｜用过 {m.use_count} 次"}
+                    for m in materials]})
         self.matrix.load(segments)
         if template is not None:
             self.matrix.hint.setText(

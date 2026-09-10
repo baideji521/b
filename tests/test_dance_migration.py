@@ -69,10 +69,10 @@ def legacy_db(work: Path, name: str = "legacy.db") -> sqlite3.Connection:
     """造一个 v10 老库：建除 dance_* 之外的全部表，再把 user_version 钉成 10。"""
     conn = _open(work / name)
     later = (set(schema.DANCE_TABLES) | set(schema.DANCE_V12_TABLES)
-             | set(schema.DANCE_V13_TABLES))
+             | set(schema.DANCE_V13_TABLES) | set(schema.DANCE_V14_TABLES))
     for statement in schema.TABLES:
         if statement in later:
-            continue                      # v11~v13 才有的舞蹈表，老库里当然没有
+            continue                      # v11~v14 才有的舞蹈表，老库里当然没有
         conn.execute(statement)
     conn.execute("PRAGMA user_version=10")
     return conn
@@ -243,6 +243,25 @@ def test_v13_only_creates_never_drops() -> None:
     assert steps == list(schema.DANCE_V13_TABLES), "v13 必须直接复用 schema.DANCE_V13_TABLES"
     assert not (set(schema.DANCE_TABLES) & set(schema.DANCE_V13_TABLES))
     assert not (set(schema.DANCE_V12_TABLES) & set(schema.DANCE_V13_TABLES))
+
+
+def test_v14_only_creates_never_drops() -> None:
+    """v14（最终选择 / 可取标记 / 候选顺序）同样只许 CREATE。
+
+    这三张表存的都是**用户拍板的结果**，所以必须落库；老库升上来是空表 =
+    还没人编排过，界面照旧从默认顺序起步，行为不变。
+    """
+    steps = migrations._STEPS[14]                                  # noqa: SLF001 - 就是要盯它
+    assert steps, "v14 不能是空的"
+    for statement in steps:
+        head = " ".join(statement.strip().split()[:2]).upper()
+        assert head.startswith("CREATE"), f"v14 只允许 CREATE，出现了：{head}"
+        upper = statement.upper()
+        assert "ALTER TABLE" not in upper, f"v14 不许 ALTER 已有表：{statement[:80]}"
+        assert " DROP " not in f" {upper} ", f"v14 不许出现 DROP：{statement[:80]}"
+    assert steps == list(schema.DANCE_V14_TABLES), "v14 必须直接复用 schema.DANCE_V14_TABLES"
+    for earlier in (schema.DANCE_TABLES, schema.DANCE_V12_TABLES, schema.DANCE_V13_TABLES):
+        assert not (set(earlier) & set(schema.DANCE_V14_TABLES))
 
 
 
@@ -454,6 +473,8 @@ TESTS = (
     test_v11_only_creates_never_drops,
     test_v12_only_creates_never_drops,
     test_v13_only_creates_never_drops,
+    test_v14_only_creates_never_drops,
+
 
 
     test_foreign_keys_cascade,

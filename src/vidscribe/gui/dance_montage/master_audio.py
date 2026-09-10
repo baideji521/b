@@ -23,10 +23,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt5.QtGui import QKeySequence
+from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QHBoxLayout,
@@ -37,6 +40,9 @@ from PyQt5.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QScrollBar,
+    QShortcut,
+    QSlider,
     QSplitter,
     QVBoxLayout,
     QWidget,
@@ -153,11 +159,22 @@ class MasterAudioPanel(QWidget):
         self._at = 0.0                 # 当前时间（秒）
         self._song_id = 0
         self._undo: list[Any] = []     # 每次改动前的模板，用来撤销
+        self._redo: list[Any] = []     # 撤销掉的那些，用来重做
+        self._marks: list[float] = []  # 用户「⭐ 可取」标记（库里那份）
+        self._stop_at: float | None = None   # 「播放当前段」到这里自动停
+
+        # 主音频播放器：QtMultimedia 自带位置回调，播放头能真的跟着走。
+        # 素材预览那边用的是 FramePlayer（要出画面），这里只放音，两者不冲突。
+        self.player = QMediaPlayer(self)
+        self.player.setNotifyInterval(50)
+        self.player.positionChanged.connect(self._position_changed)
+        self.player.stateChanged.connect(lambda _s: self._refresh_status())
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
         layout.addWidget(self._build_header())
+        layout.addWidget(self._build_transport())
         body = QSplitter(Qt.Horizontal, self)
         body.addWidget(self._build_navigator())
         body.addWidget(self._build_stage())
@@ -167,6 +184,7 @@ class MasterAudioPanel(QWidget):
         self._body = body
         layout.addWidget(body, 1)
         layout.addWidget(self._build_status())
+        self._install_shortcuts()
 
     # ---------------------------------------------------------------- 顶部
     def _build_header(self) -> QWidget:
@@ -197,6 +215,51 @@ class MasterAudioPanel(QWidget):
 
         btn_pick.clicked.connect(self._pick)
         self.btn_analyze.clicked.connect(self.analyze)
+        return holder
+
+    # ------------------------------------------------------------ 播放控制条
+    def _build_transport(self) -> QWidget:
+        """🎵 MASTER AUDIO 的播放条：播放/暂停/停止、音量、时间、缩放、滚动。"""
+        holder = QFrame(self)
+        holder.setFrameShape(QFrame.StyledPanel)
+        row = QHBoxLayout(holder)
+        row.setContentsMargins(8, 4, 8, 4)
+        row.setSpacing(6)
+
+        self.btn_play = _big(QPushButton("▶ 播放", holder), bold=True)
+        self.btn_pause = _big(QPushButton("⏸ 暂停", holder))
+        self.btn_stop = _big(QPushButton("■ 停止", holder))
+        self.clock = QLabel("0:00.000 / 0:00.000", holder)
+        self.volume = QSlider(Qt.Horizontal, holder)
+        self.volume.setRange(0, 100)
+        self.volume.setValue(70)
+        self.volume.setMaximumWidth(120)
+        self.player.setVolume(self.volume.value())
+
+        self.follow = QCheckBox("播放时自动跟随", holder)
+        self.follow.setChecked(True)
+        self.zooms = QComboBox(holder)
+        self.zooms.setMinimumHeight(FIELD_HEIGHT)
+        for text, span in (("全曲", 0.0), ("1 分钟", 60.0), ("30 秒", 30.0),
+                           ("10 秒", 10.0)):
+            self.zooms.addItem(text, span)
+        btn_in = _big(QPushButton("放大 +", holder), FIELD_HEIGHT)
+        btn_out = _big(QPushButton("缩小 −", holder), FIELD_HEIGHT)
+
+        for widget in (self.btn_play, self.btn_pause, self.btn_stop, self.clock,
+                       QLabel("音量", holder), self.volume):
+            row.addWidget(widget)
+        row.addStretch(1)
+        for widget in (self.follow, QLabel("视图", holder), self.zooms, btn_in, btn_out):
+            row.addWidget(widget)
+
+        self.btn_play.clicked.connect(self.play)
+        self.btn_pause.clicked.connect(self.player.pause)
+        self.btn_stop.clicked.connect(self.stop)
+        self.volume.valueChanged.connect(self.player.setVolume)
+        self.zooms.currentIndexChanged.connect(self._zoom_preset)
+        btn_in.clicked.connect(lambda: self.timeline.zoom(0.5))
+        btn_out.clicked.connect(lambda: self.timeline.zoom(2.0))
         return holder
 
     # ------------------------------------------------------------ 左：导航
@@ -232,6 +295,14 @@ class MasterAudioPanel(QWidget):
 
         self.timeline = MasterTimeline(holder)
         column.addWidget(self.timeline, 1)
+
+        # 横向滚动条：窗口小于全曲时才有意义，所以跨度变了就跟着调
+        self.scroll = QScrollBar(Qt.Horizontal, holder)
+        self.scroll.setEnabled(False)
+        self.scroll.valueChanged.connect(
+            lambda value: self.timeline.scroll_to(value / 1000.0))
+        self.timeline.view_changed.connect(self._view_changed)
+        column.addWidget(self.scroll)
 
         tools = QHBoxLayout()
         tools.setSpacing(6)
@@ -278,20 +349,51 @@ class MasterAudioPanel(QWidget):
         row.setSpacing(8)
 
         self.status = QLabel("当前：—", holder)
+        self.anchor = QComboBox(holder)
+        self.anchor.setMinimumHeight(FIELD_HEIGHT)
+        for text, key in (("跳到停顿开始", "start"), ("跳到停顿中心", "middle"),
+                          ("跳到停顿结束", "end")):
+            self.anchor.addItem(text, key)
         self.btn_prev = _big(QPushButton("◀ 上一个停顿", holder))
         self.btn_next = _big(QPushButton("▶ 下一个停顿", holder))
         self.btn_split = _big(QPushButton("✂ 在这里分段", holder), bold=True)
         self.btn_merge = _big(QPushButton("并进前一段", holder))
+        self.btn_mark = _big(QPushButton("⭐ 标记为可取", holder))
+        self.btn_play_span = _big(QPushButton("▶ 播放当前段", holder))
 
         row.addWidget(self.status, 1)
-        for widget in (self.btn_prev, self.btn_next, self.btn_split, self.btn_merge):
+        for widget in (self.anchor, self.btn_prev, self.btn_next, self.btn_split,
+                       self.btn_merge, self.btn_mark, self.btn_play_span):
             row.addWidget(widget)
 
         self.btn_prev.clicked.connect(lambda: self._jump(-1))
         self.btn_next.clicked.connect(lambda: self._jump(1))
         self.btn_split.clicked.connect(self._split_here)
         self.btn_merge.clicked.connect(self._merge_here)
+        self.btn_mark.clicked.connect(self.toggle_mark)
+        self.btn_play_span.clicked.connect(self.play_current_segment)
         return holder
+
+    # ---------------------------------------------------------------- 快捷键
+    def _install_shortcuts(self) -> None:
+        """这一页自己的快捷键。作用域是**本控件及其子控件**，不抢主窗口那几个。
+
+        Space / K 播放暂停、← J 上一个停顿、→ L 下一个停顿、
+        S 在这里分段、M 标记为可取。
+        """
+        def bind(keys: str, handler) -> None:
+            shortcut = QShortcut(QKeySequence(keys), self)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(handler)
+
+        bind("Space", self.toggle_play)
+        bind("K", self.toggle_play)
+        bind("Left", lambda: self._jump(-1))
+        bind("J", lambda: self._jump(-1))
+        bind("Right", lambda: self._jump(1))
+        bind("L", lambda: self._jump(1))
+        bind("S", self._split_here)
+        bind("M", self.toggle_mark)
 
     # ---------------------------------------------------------------- 分析
     def _pick(self) -> None:
@@ -334,11 +436,22 @@ class MasterAudioPanel(QWidget):
         self.timeline.set_beats(self._beats)
         if self._activity is not None:
             self.timeline.set_vocal(self._activity.spans, self._activity.pauses)
+            from ...dance import vocal_activity as vocal  # noqa: PLC0415
+
+            self.timeline.set_zones(vocal.cut_zones(self._activity))
+        self.timeline.set_view(0.0, 0.0)
+        # 播放器指向这个文件：从这一刻起播放头是真的跟着音频走
+        chosen = self.path.text().strip()
+        if chosen:
+            self.player.setMedia(
+                QMediaContent(QUrl.fromLocalFile(str(Path(chosen).resolve()))))
+        self._reload_marks()
         self._fill_navigator()
         self._load_saved_template()
         pauses = len(self._activity.pauses) if self._activity is not None else 0
         self.info.setText(f"{_clock(self._duration)}　·　{data.get('bpm', 0.0):.1f} BPM"
                           f"　·　{pauses} 处停顿")
+        self._refresh_clock()
         self._refresh_status()
 
     # ------------------------------------------------------------ 导航列表
@@ -352,7 +465,7 @@ class MasterAudioPanel(QWidget):
                 continue
             star = " ⭐" if pause.score >= 0.6 else ""
             item = QListWidgetItem(f"⏸ {_clock(pause.start)}　停顿 {pause.duration:.2f}s{star}")
-            item.setData(Qt.UserRole, pause.middle)
+            item.setData(Qt.UserRole, pause.index)
             item.setToolTip(f"推荐度 {pause.score:.2f}"
                             + (f"，最近拍点 {pause.nearest_beat:.3f}s"
                                if pause.nearest_beat >= 0 else "，这首歌没有可用拍网格"))
@@ -360,14 +473,26 @@ class MasterAudioPanel(QWidget):
         if self.nav.count() == 0:
             self.nav.addItem(QListWidgetItem("（没有够格的停顿，把门槛调低看看）"))
 
+    def _anchor_of(self, pause) -> float:
+        """按当前「跳到哪里」的选择给出落点：停顿开始 / 中心 / 结束。"""
+        key = str(self.anchor.currentData() or "start")
+        if key == "middle":
+            return pause.middle
+        if key == "end":
+            return pause.end
+        return pause.start
+
     def _nav_picked(self, row: int) -> None:
-        if row < 0:
+        if row < 0 or self._activity is None:
             return
         item = self.nav.item(row)
-        moment = item.data(Qt.UserRole) if item is not None else None
-        if moment is None:
+        index = item.data(Qt.UserRole) if item is not None else None
+        if index is None:
             return
-        self._moved_to(float(moment))
+        for pause in self._activity.pauses:
+            if pause.index == int(index):
+                self._seek(self._anchor_of(pause))
+                return
 
     def _jump(self, direction: int) -> None:
         if self._activity is None:
@@ -377,7 +502,25 @@ class MasterAudioPanel(QWidget):
         if pause is None:
             self.status.setText("没有下一处停顿了" if direction > 0 else "前面没有停顿了")
             return
-        self._moved_to(pause.middle)
+        self._highlight(pause)
+        self._seek(self._anchor_of(pause))
+
+    def _highlight(self, pause) -> None:
+        """当前停顿在左边列表里高亮 —— 用户得知道自己现在站在哪一个上。"""
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            if item is not None and item.data(Qt.UserRole) == pause.index:
+                self.nav.blockSignals(True)
+                self.nav.setCurrentRow(row)
+                self.nav.blockSignals(False)
+                return
+
+    def _seek(self, moment: float) -> None:
+        """跳到某一刻：播放器和界面一起动（播放中就接着播）。"""
+        self._moved_to(moment)
+        if self._duration > 0:
+            self.player.setPosition(int(max(0.0, moment) * 1000))
+        self.timeline.ensure_visible(moment)
 
     def _moved_to(self, moment: float) -> None:
         self._at = max(0.0, min(float(moment), self._duration or float(moment)))
@@ -404,6 +547,99 @@ class MasterAudioPanel(QWidget):
                          if nxt is not None else "后面没有停顿了")
         self.status.setText("　│　".join(parts))
 
+    # ------------------------------------------------------------ 播放 / 视图
+    def play(self) -> None:
+        """从当前位置继续播。整曲播放不设自动停。"""
+        if self._duration <= 0:
+            return
+        self._stop_at = None
+        self.player.setPosition(int(self._at * 1000))
+        self.player.play()
+
+    def toggle_play(self) -> None:
+        if self.player.state() == QMediaPlayer.PlayingState:
+            self.player.pause()
+        else:
+            self.play()
+
+    def stop(self) -> None:
+        self._stop_at = None
+        self.player.stop()
+        self.timeline.set_playhead(None)
+        self._refresh_status()
+
+    def play_current_segment(self) -> None:
+        """▶ 播放当前段：从这一段的起点播到终点自动停。"""
+        if self._template is None:
+            self.status.setText("还没分段，先「等间隔起步」或者「照停顿分」")
+            return
+        span = self._template.span_at(self._at)
+        if span is None:
+            return
+        self._stop_at = span.end
+        self.player.setPosition(int(span.start * 1000))
+        self.player.play()
+        self.status.setText(f"正在播 {span.name}（{span.start:.3f}→{span.end:.3f}）")
+
+    def _position_changed(self, milliseconds: int) -> None:
+        """播放器每 50ms 回调一次：播放头、时钟、当前段、人声状态一起更新。"""
+        moment = max(0.0, float(milliseconds) / 1000.0)
+        if self._stop_at is not None and moment >= self._stop_at:
+            self.player.pause()
+            self._stop_at = None
+        self._at = moment
+        self.timeline.set_playhead(moment)
+        self.timeline.set_cursor_time(moment)
+        if self.follow.isChecked():
+            self.timeline.ensure_visible(moment)
+        self._refresh_clock()
+        self._refresh_status()
+
+    def _refresh_clock(self) -> None:
+        self.clock.setText(f"{_clock(self._at)} / {_clock(self._duration)}")
+
+    def _zoom_preset(self, index: int) -> None:
+        span = float(self.zooms.itemData(index) or 0.0)
+        self.timeline.set_view(max(0.0, self._at - span / 2.0), span)
+
+    def _view_changed(self, start: float, span: float) -> None:
+        """时间轴的可见窗口变了 → 把滚动条调成一样的范围（两边不许各说各话）。"""
+        usable = max(0.0, self._duration - span) if span > 0 else 0.0
+        self.scroll.blockSignals(True)
+        self.scroll.setEnabled(span > 0 and usable > 0)
+        self.scroll.setRange(0, int(usable * 1000))
+        self.scroll.setPageStep(int(max(1.0, span) * 1000))
+        self.scroll.setValue(int(start * 1000))
+        self.scroll.blockSignals(False)
+
+    # ------------------------------------------------------------ ⭐ 可取标记
+    def toggle_mark(self) -> None:
+        """在当前位置加/去掉一个「可取」标记。**只是记号**，不改分段、不改素材。"""
+        if self.db is None or self._song_id <= 0:
+            QMessageBox.information(self, "还没登记这首歌", "先点「分析主音频」。")
+            return
+        from ...dance import material_repository as repo  # noqa: PLC0415
+
+        moment = round(self._at, 3)
+        if repo.remove_cut_mark(self.db, self._song_id, moment):
+            self.status.setText(f"取消了 {moment:.3f}s 的可取标记")
+        else:
+            repo.add_cut_mark(self.db, self._song_id, moment)
+            self.status.setText(f"记下了：{moment:.3f}s 可取（只是记号，不动分段）")
+        self._reload_marks()
+
+    def _reload_marks(self) -> None:
+        if self.db is None or self._song_id <= 0:
+            return
+        from ...dance import material_repository as repo  # noqa: PLC0415
+
+        self._marks = [float(row["moment"]) for row in repo.cut_marks(self.db, self._song_id)]
+        self.timeline.set_marks(self._marks)
+
+    @property
+    def marks(self) -> list[float]:
+        return list(self._marks)
+
     # ------------------------------------------------------------ 段落编辑
     def _editor(self):
         from ...dance import segment_template as editor  # noqa: PLC0415
@@ -414,6 +650,7 @@ class MasterAudioPanel(QWidget):
         """换上一份新模板。`remember` 决定要不要把旧的压进撤销栈。"""
         if remember and self._template is not None:
             self._undo.append(self._template)
+            self._redo.clear()          # 新动作一出，之前撤销掉的那条线就断了
             self.btn_undo.setEnabled(True)
         self._template = template
         self.timeline.set_template(template)
@@ -508,9 +745,26 @@ class MasterAudioPanel(QWidget):
         if not self._undo:
             self.btn_undo.setEnabled(False)
             return
+        if self._template is not None:
+            self._redo.append(self._template)
         self._adopt(self._undo.pop(), remember=False)
         self.btn_undo.setEnabled(bool(self._undo))
         self.status.setText("撤销了上一步")
+
+    def undo(self) -> None:
+        """Ctrl+Z（主窗口转过来的）。"""
+        self._undo_once()
+
+    def redo(self) -> None:
+        """Ctrl+Y：把刚撤销掉的那一步再做回来。"""
+        if not self._redo:
+            self.status.setText("没有可以重做的分段改动")
+            return
+        if self._template is not None:
+            self._undo.append(self._template)
+            self.btn_undo.setEnabled(True)
+        self._adopt(self._redo.pop(), remember=False)
+        self.status.setText("重做了一步")
 
     # ---------------------------------------------------------------- 存/读
     def save_template(self) -> int:
@@ -556,6 +810,10 @@ class MasterAudioPanel(QWidget):
         return {"path": self.path.text().strip(), "step": float(self.step.value()),
                 "min_score": float(self.min_score.value()),
                 "only_strong": bool(self.only_strong.isChecked()),
+                "volume": int(self.volume.value()),
+                "follow": bool(self.follow.isChecked()),
+                "zoom": int(self.zooms.currentIndex()),
+                "anchor": int(self.anchor.currentIndex()),
                 "body": self._body.sizes()}
 
     def restore(self, data: dict[str, Any]) -> None:
@@ -567,11 +825,22 @@ class MasterAudioPanel(QWidget):
         if data.get("min_score") is not None:
             self.min_score.setValue(float(data["min_score"]))
         self.only_strong.setChecked(bool(data.get("only_strong")))
+        if data.get("volume") is not None:
+            self.volume.setValue(int(data["volume"]))
+        if data.get("follow") is not None:
+            self.follow.setChecked(bool(data["follow"]))
+        for key, widget in (("zoom", self.zooms), ("anchor", self.anchor)):
+            index = data.get(key)
+            if isinstance(index, int) and 0 <= index < widget.count():
+                widget.blockSignals(True)
+                widget.setCurrentIndex(index)
+                widget.blockSignals(False)
         sizes = data.get("body")
         if isinstance(sizes, list) and len(sizes) == 2:
             self._body.setSizes([int(v) for v in sizes])
 
     def shutdown(self) -> None:
+        self.player.stop()
         if self.worker is not None and self.worker.isRunning():
             self.worker.wait(3000)
 

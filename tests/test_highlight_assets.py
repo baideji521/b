@@ -843,8 +843,9 @@ def test_migration_matches_a_fresh_v4_database(tmp_path: Path) -> None:
         out: list[str] = []
         for statement in schema.TABLES:
             if statement in schema.DANCE_TABLES or statement in schema.DANCE_V12_TABLES \
-                    or statement in schema.DANCE_V13_TABLES:
-                continue                      # v11~v13 的舞蹈表，老库里当然没有
+                    or statement in schema.DANCE_V13_TABLES \
+                    or statement in schema.DANCE_V14_TABLES:
+                continue                      # v11~v14 的舞蹈表，老库里当然没有
 
             if "CREATE TABLE IF NOT EXISTS videos" in statement:
 

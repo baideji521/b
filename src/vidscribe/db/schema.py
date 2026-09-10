@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
@@ -813,6 +813,65 @@ DANCE_V13_TABLES = (
 )
 
 TABLES = TABLES + DANCE_V13_TABLES
+
+
+#: v14：人工编排的三份"用户决定"。同样**只建新表**。
+#:
+#: 为什么必须落库而不是留在界面里：这三样都是用户拍板的结果，关掉窗口就没了等于白干。
+#:
+#:   dance_final_selections   FINAL TIMELINE 上"这一段用哪条素材"。
+#:                            主键是 (歌, 段落编号)：一段只能有一个最终选择。
+#:                            **写入前要校验素材的 segment_index 必须等于这个段落**
+#:                            （见 `material_repository.set_final_selection`）——
+#:                            跨段落的选择不只在界面上拦，业务层再拦一次。
+#:   dance_cut_marks          用户「⭐ 标记为可取」的时刻。它是**参考**，
+#:                            不改 Segment、不改素材，只是留个记号下次好找。
+#:   dance_candidate_order    每个段落里候选素材的排列顺序（拖出来的那份）。
+#:                            存整份 order_json 而不是给 dance_materials 加
+#:                            sort_order 列：加列会让"升级上来的表"和"新建的表"
+#:                            SQL 文本不一致（v4 的老坑），而且顺序天然是**整段**的属性。
+DANCE_V14_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS dance_final_selections (
+        target_song_id INTEGER NOT NULL
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        segment_index  INTEGER NOT NULL,
+        material_id    INTEGER NOT NULL
+                       REFERENCES dance_materials(id) ON DELETE CASCADE,
+        note           TEXT    NOT NULL DEFAULT '',
+        selected_at    TEXT    NOT NULL,
+        PRIMARY KEY (target_song_id, segment_index)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_final_selections_material "
+    "ON dance_final_selections(material_id)",
+    """
+    CREATE TABLE IF NOT EXISTS dance_cut_marks (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_song_id INTEGER NOT NULL
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        moment         REAL    NOT NULL,
+        kind           TEXT    NOT NULL DEFAULT 'usable',
+        note           TEXT    NOT NULL DEFAULT '',
+        created_at     TEXT    NOT NULL,
+        UNIQUE(target_song_id, moment)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_cut_marks_song "
+    "ON dance_cut_marks(target_song_id, moment)",
+    """
+    CREATE TABLE IF NOT EXISTS dance_candidate_order (
+        target_song_id INTEGER NOT NULL
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        segment_index  INTEGER NOT NULL,
+        order_json     TEXT    NOT NULL,
+        updated_at     TEXT    NOT NULL,
+        PRIMARY KEY (target_song_id, segment_index)
+    )
+    """,
+)
+
+TABLES = TABLES + DANCE_V14_TABLES
 
 
 

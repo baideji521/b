@@ -362,7 +362,69 @@ def test_ingest_picks_up_the_saved_template(work: Path) -> None:
         db.close()
 
 
+# ================================================================== V4 ~ V5
+def test_cut_zones_wrap_each_pause() -> None:
+    """V4：可取区间围着停顿铺开，挨着的合成一带，推荐等级跟着分数走。"""
+    activity = vocal.VocalActivity(
+        duration=30.0, sample_rate=22050, hop_seconds=0.023,
+        pauses=(VocalPause(index=0, start=5.0, end=5.6, score=0.8),
+                VocalPause(index=1, start=6.0, end=6.4, score=0.4),
+                VocalPause(index=2, start=20.0, end=21.0, score=0.3)))
+    zones = vocal.cut_zones(activity, radius=0.5)
+    assert len(zones) == 2, zones                     # 前两个挨着 → 合成一带
+    first, second = zones
+    assert first[0] == 4.5 and first[1] == 6.9, first
+    assert first[3] == vocal.zone_level(0.8), first
+    assert second[0] == 19.5 and second[1] == 21.5, second
+    assert vocal.zone_level(0.8) != vocal.zone_level(0.3)
+    # 门槛能把低分的滤掉；区间**不改分段**，它只是参考
+    assert len(vocal.cut_zones(activity, radius=0.5, min_score=0.5)) == 1
+
+
+def test_final_selection_is_checked_by_the_database_too(work: Path) -> None:
+    """V5：最终选择、⭐标记、候选顺序都真的落库，而且跨段落的选择**库里也拒绝**。"""
+    from dance_fixtures import fake_alignment, fake_material, fake_song, fake_video, make_project
+    from vidscribe.dance import material_repository as repo
+
+    cfg, db = make_project(work)
+    try:
+        song_id = fake_song(db, duration=20.0)
+        video_id = fake_video(db, "a.mp4")
+        fake_alignment(db, song_id, video_id)
+        first = fake_material(db, song_id, video_id, 0)
+        second = fake_material(db, song_id, video_id, 1)
+
+        repo.set_final_selection(db, song_id, 0, first)
+        assert repo.final_selections(db, song_id) == {0: first}
+        # 同一段再设一次就是覆盖，不会多出一行
+        repo.set_final_selection(db, song_id, 0, first)
+        assert len(repo.final_selections(db, song_id)) == 1
+
+        try:
+            repo.set_final_selection(db, song_id, 0, second)   # second 绑在 S2
+        except repo.SelectionError as exc:
+            assert "S2" in str(exc) and "S1" in str(exc), exc
+        else:
+            raise AssertionError("跨段落的最终选择居然写进库了")
+        assert repo.final_selections(db, song_id) == {0: first}, "被拒绝的写入改动了库"
+
+        # ⭐ 标记：加一次、再点一次就是取消
+        repo.add_cut_mark(db, song_id, 7.5)
+        assert [round(float(r["moment"]), 3) for r in repo.cut_marks(db, song_id)] == [7.5]
+        assert repo.remove_cut_mark(db, song_id, 7.5) is True
+        assert repo.cut_marks(db, song_id) == []
+
+        # 候选顺序：存进去、读出来、按它重排
+        repo.save_candidate_order(db, song_id, 0, [second, first])
+        assert repo.candidate_order(db, song_id, 0) == [second, first]
+        materials = repo.materials_at(db, song_id, 0)
+        assert [m.id for m in repo.order_materials(materials, [first])] == [first]
+    finally:
+        db.close()
+
+
 TESTS = (
+
 
 
     test_vocal_and_pause_are_separated,
@@ -381,6 +443,8 @@ TESTS = (
     test_an_illegal_template_never_reaches_the_database,
     test_slicing_follows_the_template_when_there_is_one,
     test_ingest_picks_up_the_saved_template,
+    test_cut_zones_wrap_each_pause,
+    test_final_selection_is_checked_by_the_database_too,
 )
 
 

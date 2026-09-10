@@ -14,6 +14,7 @@ from .schema import (
     DANCE_TABLES,
     DANCE_V12_TABLES,
     DANCE_V13_TABLES,
+    DANCE_V14_TABLES,
     SCHEMA_VERSION,
     TABLES,
 )
@@ -197,6 +198,10 @@ _STEPS: dict[int, list[str]] = {
     # 所有源视频继承同一份，重启也还在。老库升上来是一张空表 = 还没人分过段，
     # 界面照旧按等间隔起步，行为跟以前一模一样。
     13: list(DANCE_V13_TABLES),
+    # v14：人工编排的三份"用户决定"——FINAL TIMELINE 的最终选择、⭐可取标记、
+    # 每段候选素材的排列顺序。还是**只建新表**。
+    # 老库升上来是三张空表 = 还没人编排过，界面照旧从推荐/默认顺序起步。
+    14: list(DANCE_V14_TABLES),
 
 }
 

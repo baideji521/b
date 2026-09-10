@@ -163,18 +163,21 @@ def test_undo_walks_back_step_by_step(work: Path) -> None:
 
 
 def test_clicking_the_navigator_seeks(work: Path) -> None:
-    """M6：点导航一行 → 发 seek，光标落在那个停顿正中间。"""
+    """M6：点导航一行 → 发 seek。默认落在**停顿开始**，也能改成中心/结束。"""
     panel, _cfg, db = _panel(work)
     seen: list[float] = []
     panel.seek_requested.connect(seen.append)
     try:
         panel.nav.setCurrentRow(0)
-        assert seen and abs(seen[-1] - 4.5) < 1e-6, seen
-        assert abs(panel._at - 4.5) < 1e-6                        # noqa: SLF001
+        assert seen and abs(seen[-1] - 4.0) < 1e-6, seen        # 停顿 4.0→5.0 的开始
+        assert abs(panel._at - 4.0) < 1e-6                      # noqa: SLF001
 
-        panel._jump(1)                                            # noqa: SLF001 - 下一处停顿
-        assert abs(seen[-1] - 11.75) < 1e-6, seen
-        panel._jump(1)                                            # noqa: SLF001 - 没有了
+        panel.anchor.setCurrentIndex(1)                         # 跳到停顿中心
+        panel.nav.setCurrentRow(1)
+        assert abs(seen[-1] - 11.75) < 1e-6, seen               # 11.0→12.5 的中心
+
+        panel.anchor.setCurrentIndex(0)
+        panel._jump(1)                                          # noqa: SLF001 - 没有更后面的了
         assert "没有下一处停顿" in panel.status.text(), panel.status.text()
     finally:
         db.close()
@@ -231,7 +234,98 @@ def test_the_page_is_actually_usable(work: Path) -> None:
         db.close()
 
 
+# ================================================================= M9 ~ M11
+def test_zoom_and_scroll_share_one_axis(work: Path) -> None:
+    """M9：缩放/滚动只改可见窗口，所有横带用的还是同一条时间轴。"""
+    panel, _cfg, db = _panel(work, duration=60.0)
+    try:
+        timeline = panel.timeline
+        timeline.resize(1000, 300)
+        assert timeline.visible_span() == (0.0, 60.0)          # 默认看全曲
+
+        timeline.set_view(10.0, 20.0)
+        assert timeline.visible_span() == (10.0, 30.0)
+        # 同一时刻在所有带里都是同一个 x：坐标只有一处换算
+        x = timeline._x_of(20.0)                                # noqa: SLF001
+        assert abs(timeline._time_of(x) - 20.0) < 1e-6          # noqa: SLF001
+
+        timeline.zoom(0.5, 20.0)                                # 放大到 10 秒
+        left, right = timeline.visible_span()
+        assert abs((right - left) - 10.0) < 1e-6, (left, right)
+
+        timeline.scroll_to(55.0)                                # 越界要被夹回来
+        left, right = timeline.visible_span()
+        assert right <= 60.0 + 1e-6 and left >= 0.0, (left, right)
+
+        # 自动跟随：播放头跑到窗口外面就把窗口挪过去
+        timeline.set_view(0.0, 10.0)
+        timeline.ensure_visible(42.0)
+        left, right = timeline.visible_span()
+        assert left <= 42.0 <= right, (left, right)
+
+        # 滚动条跟着窗口走（两边不许各说各话）
+        panel._view_changed(*timeline.view())                   # noqa: SLF001
+        assert panel.scroll.isEnabled()
+        assert abs(panel.scroll.value() / 1000.0 - timeline.view()[0]) < 0.01
+    finally:
+        db.close()
+
+
+def test_marks_are_recorded_but_change_nothing(work: Path) -> None:
+    """M10：⭐ 标记落库、再点一次取消；**它一个字都不改分段**。"""
+    from dance_fixtures import fake_song
+    from vidscribe.dance import material_repository as repo
+
+    panel, _cfg, db = _panel(work)
+    try:
+        panel._song_id = fake_song(db, duration=20.0)           # noqa: SLF001
+        panel.step.setValue(5.0)
+        panel._make_uniform()                                   # noqa: SLF001
+        before = panel.template.boundaries
+
+        panel._moved_to(6.4)                                    # noqa: SLF001
+        panel.toggle_mark()
+        assert [round(float(r["moment"]), 3) for r in
+                repo.cut_marks(db, panel._song_id)] == [6.4]    # noqa: SLF001
+        assert panel.marks == [6.4], panel.marks
+        assert panel.template.boundaries == before, "标记居然改了分段"
+
+        panel.toggle_mark()                                     # 同一处再点 = 取消
+        assert repo.cut_marks(db, panel._song_id) == []         # noqa: SLF001
+        assert panel.marks == []
+    finally:
+        db.close()
+
+
+def test_playing_one_segment_stops_at_its_end(work: Path) -> None:
+    """M11：「播放当前段」到段尾自动停；重做能把撤销掉的那一步做回来。"""
+    panel, _cfg, db = _panel(work)
+    try:
+        panel.step.setValue(5.0)
+        panel._make_uniform()                                   # noqa: SLF001
+        panel._moved_to(7.0)                                    # noqa: SLF001 - 落在 S2
+        panel.play_current_segment()
+        assert panel._stop_at == 10.0, panel._stop_at           # noqa: SLF001
+        assert "S2" in panel.status.text(), panel.status.text()
+
+        panel._position_changed(10_200)                         # noqa: SLF001 - 播过段尾
+        assert panel._stop_at is None, "过了段尾没有停"          # noqa: SLF001
+
+        # 撤销 → 重做
+        first = panel.template.boundaries
+        panel._moved_to(12.5)                                   # noqa: SLF001
+        panel._split_here()                                     # noqa: SLF001
+        cut = panel.template.boundaries
+        panel.undo()
+        assert panel.template.boundaries == first
+        panel.redo()
+        assert panel.template.boundaries == cut, panel.template.boundaries
+    finally:
+        db.close()
+
+
 TESTS = (
+
     test_analysis_never_touches_the_segments,
     test_uniform_and_pause_starters,
     test_split_snaps_to_the_nearest_reference_point,
@@ -240,6 +334,9 @@ TESTS = (
     test_clicking_the_navigator_seeks,
     test_saving_needs_a_registered_song_and_then_really_saves,
     test_the_page_is_actually_usable,
+    test_zoom_and_scroll_share_one_axis,
+    test_marks_are_recorded_but_change_nothing,
+    test_playing_one_segment_stops_at_its_end,
 )
 
 

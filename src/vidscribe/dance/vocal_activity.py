@@ -160,6 +160,46 @@ def pause_score(pause_duration: float, strength: float, beat_gap: float) -> floa
     return round(core + 0.2 * on_beat, 4)
 
 
+#: 可取区间：以停顿为中心往两边各留这么久（秒）。切点落在这一带里都算"附近"
+ZONE_RADIUS = 0.60
+#: 推荐等级的分档（按停顿推荐度）
+ZONE_LEVELS = ((0.75, "⭐⭐⭐⭐⭐"), (0.55, "高"), (0.35, "中"), (0.0, "低"))
+
+
+def zone_level(score: float) -> str:
+    """推荐度 → 人看得懂的等级。只是措辞，不参与任何判定。"""
+    for floor, text in ZONE_LEVELS:
+        if float(score) >= floor:
+            return text
+    return "低"
+
+
+def cut_zones(activity: VocalActivity, *, radius: float = ZONE_RADIUS,
+              min_score: float = 0.0) -> tuple[tuple[float, float, float, str], ...]:
+    """「可取区间」：每个停顿周围一段"这里附近适合换人"的区域。
+
+    返回 `((start, end, score, level), …)`。它比"这里有个停顿"更好用：
+    切点不必正正落在停顿里，落在停顿附近同样合适。
+    **仍然只是参考** —— 不改 Segment，也不自动切。
+    """
+    out: list[tuple[float, float, float, str]] = []
+    span = max(0.0, float(radius))
+    for pause in activity.pauses:
+        if pause.score < float(min_score):
+            continue
+        start = max(0.0, pause.start - span)
+        end = min(float(activity.duration or pause.end + span), pause.end + span)
+        if end <= start:
+            continue
+        if out and start <= out[-1][1]:            # 挨着的两带合成一带，取更高那个分
+            last = out[-1]
+            score = max(last[2], pause.score)
+            out[-1] = (last[0], max(last[1], end), score, zone_level(score))
+            continue
+        out.append((round(start, 3), round(end, 3), pause.score, zone_level(pause.score)))
+    return tuple(out)
+
+
 def analyze_vocal_activity(pcm: np.ndarray, sample_rate: int = dsp.DEFAULT_SR,
                            beats: tuple[float, ...] = ()) -> VocalActivity:
     """一首歌的人声活动 + 停顿导航点。`beats` 给了就顺手算"这个停顿贴不贴拍"。"""
@@ -190,5 +230,6 @@ def analyze_vocal_activity(pcm: np.ndarray, sample_rate: int = dsp.DEFAULT_SR,
                          version=VOCAL_VERSION)
 
 
-__all__ = ["VOCAL_VERSION", "VOCAL_BAND", "ENTER", "EXIT",
-           "vocal_strength", "pause_score", "analyze_vocal_activity"]
+__all__ = ["VOCAL_VERSION", "VOCAL_BAND", "ENTER", "EXIT", "ZONE_RADIUS",
+           "vocal_strength", "pause_score", "zone_level", "cut_zones",
+           "analyze_vocal_activity"]

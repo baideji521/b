@@ -139,12 +139,68 @@ def test_panel_picks_reflect_the_final_timeline() -> None:
     assert words and "S2" in words[-1] and "S1" in words[-1], words
 
 
+def test_the_panel_saves_and_restores_the_final_timeline() -> None:
+    """X6：拖一下就落库；重新建一个面板按库里那份恢复 —— 界面状态不是唯一真相。"""
+    from dance_fixtures import (
+        fake_alignment,
+        fake_material,
+        fake_song,
+        fake_video,
+        make_project,
+    )
+    from vidscribe.dance import material_repository as repo
+
+    work = Path(tempfile.mkdtemp(prefix="dancematrix_"))
+    cfg, db = make_project(work)
+    try:
+        song_id = fake_song(db, duration=20.0)
+        video_id = fake_video(db, "a.mp4")
+        fake_alignment(db, song_id, video_id)
+        other = fake_video(db, "b.mp4")
+        fake_alignment(db, song_id, other, offset=2.0)
+        first = fake_material(db, song_id, video_id, 0)
+        second = fake_material(db, song_id, other, 0)
+
+        rows = [{"material_id": first, "label": "a.mp4"},
+                {"material_id": second, "label": "b.mp4"}]
+        panel = mx.MatrixPanel(db=db, song_id=song_id)
+        panel.load([{"index": 0, "title": "S1", "materials": rows}])
+        assert panel.picks() == {0: first}
+
+        panel.columns[0].drop_payload(_payload(second, 0, "b.mp4"), 0)
+        assert panel.picks() == {0: second}
+        assert repo.final_selections(db, song_id) == {0: second}, "拖完没落库"
+        assert repo.candidate_order(db, song_id, 0) == [second, first]
+
+        # 重新开一个面板：按库里那份摆回来（这就是"重开工程能恢复"）
+        again = mx.MatrixPanel(db=db, song_id=song_id)
+        ordered = repo.order_materials(repo.materials_at(db, song_id, 0),
+                                       repo.candidate_order(db, song_id, 0))
+        again.load([{"index": 0, "title": "S1", "current": second, "materials": [
+            {"material_id": m.id, "label": Path(m.file_path).name} for m in ordered]}])
+        assert again.picks() == {0: second}, again.picks()
+        assert again.columns[0].item(0).text().startswith("⭐ CURRENT")
+
+        # 撤销 → 回到上一份，而且库里也跟着回去
+        assert again.undo() is False, "刚打开就有可撤销的东西？"
+        panel.undo()
+        assert panel.picks() == {0: first}, panel.picks()
+        assert repo.final_selections(db, song_id) == {0: first}
+        panel.redo()
+        assert panel.picks() == {0: second}, panel.picks()
+    finally:
+        db.close()
+        shutil.rmtree(work, ignore_errors=True)
+
+
 TESTS = (
+
     test_dragging_inside_one_column_changes_who_is_used,
     test_crossing_segments_is_refused_and_changes_nothing,
     test_timeline_slot_follows_the_same_rule,
     test_mime_packing_ignores_anything_that_is_not_ours,
     test_panel_picks_reflect_the_final_timeline,
+    test_the_panel_saves_and_restores_the_final_timeline,
 )
 
 

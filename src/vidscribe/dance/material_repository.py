@@ -359,6 +359,122 @@ def delete_segment_template(db: Database, template_id: int) -> bool:
     return cursor.rowcount > 0
 
 
+# ================================================== 人工编排（v14：最终选择等）
+class SelectionError(ValueError):
+    """最终选择非法：素材不存在，或者它绑的段落和要放的段落不是一个。
+
+    界面上已经拦了一层（拖拽时不给落），这里是**第二道**：任何走到库里的路
+    都得过这一关。只靠界面拦不住脚本、CLI、以后新写的页面。
+    """
+
+
+def set_final_selection(db: Database, target_song_id: int, segment_index: int,
+                        material_id: int, *, note: str = "") -> None:
+    """定下"这一段用哪条素材"。素材的 segment_index 必须等于这一段，否则抛。
+
+    一段只有一个最终选择（主键就是 `(歌, 段落)`），重复设置就是覆盖。
+    """
+    row = db.connect().execute(
+        "SELECT segment_index, target_song_id FROM dance_materials WHERE id = ?",
+        (int(material_id),)).fetchone()
+    if row is None:
+        raise SelectionError(f"素材 #{material_id} 不在库里")
+    if int(row["segment_index"]) != int(segment_index):
+        raise SelectionError(
+            f"素材 #{material_id} 绑在 S{int(row['segment_index']) + 1}，"
+            f"不能放到 S{int(segment_index) + 1} —— 素材和音乐位置是绑死的")
+    if int(row["target_song_id"]) != int(target_song_id):
+        raise SelectionError(f"素材 #{material_id} 属于另一首歌，不能用在这里")
+    stamp = now()
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO dance_final_selections (target_song_id, segment_index, "
+            "material_id, note, selected_at) VALUES (?,?,?,?,?) "
+            "ON CONFLICT(target_song_id, segment_index) DO UPDATE SET "
+            "material_id=excluded.material_id, note=excluded.note, "
+            "selected_at=excluded.selected_at",
+            (int(target_song_id), int(segment_index), int(material_id), note, stamp))
+
+
+def final_selections(db: Database, target_song_id: int) -> dict[int, int]:
+    """`{段落: 素材id}`。FINAL TIMELINE 重新打开就是靠它恢复的。"""
+    rows = db.connect().execute(
+        "SELECT segment_index, material_id FROM dance_final_selections "
+        "WHERE target_song_id = ? ORDER BY segment_index", (int(target_song_id),))
+    return {int(r["segment_index"]): int(r["material_id"]) for r in rows}
+
+
+def clear_final_selection(db: Database, target_song_id: int, segment_index: int) -> bool:
+    with db.tx() as conn:
+        cursor = conn.execute(
+            "DELETE FROM dance_final_selections WHERE target_song_id = ? "
+            "AND segment_index = ?", (int(target_song_id), int(segment_index)))
+    return cursor.rowcount > 0
+
+
+def add_cut_mark(db: Database, target_song_id: int, moment: float, *,
+                 kind: str = "usable", note: str = "") -> int:
+    """记一个「⭐ 可取」标记。**只是参考**，不改 Segment、不改素材。"""
+    stamp = now()
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO dance_cut_marks (target_song_id, moment, kind, note, created_at) "
+            "VALUES (?,?,?,?,?) ON CONFLICT(target_song_id, moment) DO UPDATE SET "
+            "kind=excluded.kind, note=excluded.note",
+            (int(target_song_id), round(float(moment), 3), kind, note, stamp))
+        row = conn.execute("SELECT id FROM dance_cut_marks WHERE target_song_id = ? "
+                           "AND moment = ?",
+                           (int(target_song_id), round(float(moment), 3))).fetchone()
+    return int(row["id"]) if row is not None else 0
+
+
+def cut_marks(db: Database, target_song_id: int) -> list[Any]:
+    return list(db.connect().execute(
+        "SELECT * FROM dance_cut_marks WHERE target_song_id = ? ORDER BY moment",
+        (int(target_song_id),)))
+
+
+def remove_cut_mark(db: Database, target_song_id: int, moment: float,
+                    tolerance: float = 0.05) -> bool:
+    """删掉最近的那个标记（点同一个地方第二下就是取消）。"""
+    with db.tx() as conn:
+        cursor = conn.execute(
+            "DELETE FROM dance_cut_marks WHERE target_song_id = ? "
+            "AND ABS(moment - ?) <= ?",
+            (int(target_song_id), round(float(moment), 3), float(tolerance)))
+    return cursor.rowcount > 0
+
+
+def save_candidate_order(db: Database, target_song_id: int, segment_index: int,
+                         material_ids: Sequence[int]) -> None:
+    """存这一段候选素材的排列顺序（用户拖出来的那份）。"""
+    stamp = now()
+    payload = _dumps([int(m) for m in material_ids]) or "[]"
+    with db.tx() as conn:
+        conn.execute(
+            "INSERT INTO dance_candidate_order (target_song_id, segment_index, "
+            "order_json, updated_at) VALUES (?,?,?,?) "
+            "ON CONFLICT(target_song_id, segment_index) DO UPDATE SET "
+            "order_json=excluded.order_json, updated_at=excluded.updated_at",
+            (int(target_song_id), int(segment_index), payload, stamp))
+
+
+def candidate_order(db: Database, target_song_id: int, segment_index: int) -> list[int]:
+    """存过的顺序；没存过返回空列表（上层就按默认排序显示）。"""
+    row = db.connect().execute(
+        "SELECT order_json FROM dance_candidate_order WHERE target_song_id = ? "
+        "AND segment_index = ?", (int(target_song_id), int(segment_index))).fetchone()
+    data = _loads(row["order_json"]) if row is not None else None
+    return [int(x) for x in data] if isinstance(data, list) else []
+
+
+def order_materials(materials: Sequence[Any], order: Sequence[int]) -> list[Any]:
+    """按存过的顺序重排素材；存过之后新入库的素材排在后面，一条都不丢。"""
+    rank = {int(m): i for i, m in enumerate(order)}
+    tail = len(rank)
+    return sorted(materials, key=lambda m: (rank.get(int(m.id), tail), int(m.id)))
+
+
 # ==================================================================== 对齐
 def save_alignment(db: Database, *, source_video_id: int, target_song_id: int,
                    cache_key: str, alignment: DanceAlignment, config_hash: str = "") -> int:
@@ -845,6 +961,9 @@ __all__ = [
     "DEFAULT_TEMPLATE_NAME", "save_segment_template", "get_segment_template",
     "active_segment_template", "list_segment_templates",
     "set_active_segment_template", "delete_segment_template",
+    "SelectionError", "set_final_selection", "final_selections",
+    "clear_final_selection", "add_cut_mark", "cut_marks", "remove_cut_mark",
+    "save_candidate_order", "candidate_order", "order_materials",
     "save_alignment", "alignment_by_key", "get_alignment", "alignments_for_song",
     "set_manual_offset",
     "upsert_material", "get_material", "get_materials", "materials_at",
