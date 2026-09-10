@@ -40,6 +40,8 @@ from .candidate_panel import CandidatePanel
 from .filter_panel import FilterPanel
 from .history_panel import HistoryPanel
 from .material_library import MaterialLibraryPanel
+from .master_audio import MasterAudioPanel
+from .matrix_panel import MatrixPanel
 from .recommendation_panel import RecommendationPanel
 from .remix_panel import RemixPanel
 from .statistics_panel import StatisticsPanel
@@ -76,6 +78,8 @@ class DanceMontageWindow(QMainWindow):
         self.filters = FilterPanel(self)
         self.library = MaterialLibraryPanel(self)
         self.alignment = AlignmentPanel(self)
+        self.master = MasterAudioPanel(cfg, None, self)
+        self.matrix = MatrixPanel(self)
         self.bench = AlignBenchPanel(cfg, self)
         self.candidates = CandidatePanel(self)
         self.recommend = RecommendationPanel(self)
@@ -105,6 +109,7 @@ class DanceMontageWindow(QMainWindow):
             self.split.setSizes(sizes)
             self._left_width = sizes[0] or 560
         self.remix.restore(state.get("remix") or {})
+        self.master.restore(state.get("master") or {})
         self.bench.restore(state.get("bench") or {})
         index = state.get("tab")
         if isinstance(index, int) and 0 <= index < self.tabs.count():
@@ -127,6 +132,7 @@ class DanceMontageWindow(QMainWindow):
                                if sizes and sizes[0] == 0 else list(sizes))
         self.state["tab"] = int(self.tabs.currentIndex())
         self.state["remix"] = self.remix.state()
+        self.state["master"] = self.master.state()
         self.state["bench"] = self.bench.state()
         gui_settings.save(self.cfg, self.settings)
 
@@ -157,9 +163,11 @@ class DanceMontageWindow(QMainWindow):
 
         self.tabs = QTabWidget(self)
         self.tabs.addTab(assets, "素材资产")
+        self.tabs.addTab(self.master, "主音频/分段")
         self.tabs.addTab(self.alignment, "音频对齐")
         self.tabs.addTab(self.bench, "对齐/卡点测试")
         self.tabs.addTab(choose, "选择与推荐")
+        self.tabs.addTab(self.matrix, "素材矩阵/成片")
         self.tabs.addTab(review, "历史与统计")
 
         left = QWidget(self)
@@ -182,12 +190,12 @@ class DanceMontageWindow(QMainWindow):
         return split
 
     def _tab_changed(self, index: int) -> None:
-        """切到「对齐/卡点测试」时把左边那栏收起来，让它占满整个窗口。
+        """切到「对齐/卡点测试」或「主音频/分段」时把左边那栏收起来，让它占满整个窗口。
 
-        这一页是三栏工作台（参数 / 卡点表 / 预览），挤在 900 像素里没法用；
-        而它本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
+        这两页都是横向铺开的工作台（前者三栏，后者导航+时间轴），挤在 900 像素里没法用；
+        而它们本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
         """
-        bench = self.tabs.widget(int(index)) is self.bench
+        bench = self.tabs.widget(int(index)) in (self.bench, self.master, self.matrix)
         sizes = self.split.sizes()
         if bench:
             if sizes[0] > 0:
@@ -215,6 +223,10 @@ class DanceMontageWindow(QMainWindow):
         self.bench.ingest_requested.connect(self.start)
         self.bench.changed.connect(self.reload)
         self.candidates.manual_changed.connect(self.remix.set_manual)
+        # 矩阵里拖出来的选择就是"手动指定这一格用谁"，和候选面板同一个出口
+        self.matrix.picks_changed.connect(self.remix.set_manual)
+        self.matrix.refused.connect(lambda text: self.statusBar().showMessage(text, 6000))
+        self.master.template_changed.connect(lambda _t: self._reload_matrix())
         self.recommend.adopted.connect(self._adopt)
         self.recommend.changed.connect(self.reload)
         self.history.rerender_requested.connect(self._rerender)
@@ -225,6 +237,7 @@ class DanceMontageWindow(QMainWindow):
 
         self.cfg.ensure_dance_dirs()
         self.db = open_db(self.cfg)
+        self.master.db = self.db       # 段落模板要落库，这一页也得拿到同一个连接
         from ...dance import strategy as strategy_mod
 
         strategy_mod.ensure_presets(self.db)
@@ -266,6 +279,7 @@ class DanceMontageWindow(QMainWindow):
         self.history.refresh(self.db, self._song_id)
         self.statistics.refresh(self.db, self._song_id)
         self._reload_materials()
+        self._reload_matrix()
         row = repo.get_song(self.db, self._song_id) if self._song_id else None
         if row is not None:
             self.statusBar().showMessage(
@@ -285,6 +299,38 @@ class DanceMontageWindow(QMainWindow):
         found = selection.find_materials(self.db, spec,
                                         exclude_recent=self.filters.exclude_recent_mode())
         self.library.show_materials(self.db, self._song_id, found)
+
+    def _reload_matrix(self) -> None:
+        """素材矩阵：一列一个段落。段落用用户拍板的模板，没模板就按等间隔位置。"""
+        if self.db is None or not self._song_id:
+            self.matrix.load([])
+            return
+        from ...dance import material_repository as repo
+        from ...dance.music_structure import target_positions
+
+        row = repo.get_song(self.db, self._song_id)
+        duration = float(row["duration"] or 0.0) if row is not None else 0.0
+        template = repo.active_segment_template(self.db, self._song_id)
+        if template is not None:
+            spans = [(s.index, s.name) for s in template.spans]
+        else:
+            spans = [(p.index, f"S{p.index + 1}") for p in
+                     target_positions(duration, self.remix.slice_duration())]
+
+        segments = []
+        for index, title in spans:
+            materials = repo.materials_at(self.db, self._song_id, index)
+            segments.append({"index": index, "title": title, "materials": [
+                {"material_id": m.id,
+                 "label": f"{m.person or Path(m.file_path).stem[:18]}",
+                 "note": f"素材 #{m.id}｜置信 {m.alignment_confidence:.3f}"
+                         f"｜用过 {m.use_count} 次"}
+                for m in materials]})
+        self.matrix.load(segments)
+        if template is not None:
+            self.matrix.hint.setText(
+                f"{self.matrix.hint.text()}　·　段落来自模板「{template.name}」"
+                f"（{template.source}）")
 
     def _adopt(self, picks: dict) -> None:
         self.candidates.adopt(dict(picks))
@@ -464,6 +510,7 @@ class DanceMontageWindow(QMainWindow):
             self.worker.stop()
             self.worker.wait(15000)
         self.bench.shutdown()          # 测试台自己那两个线程也要收干净
+        self.master.shutdown()         # 主音频分析线程同理
         self.save_settings()           # 窗口位置、分栏比例、各输入框都留到下次
         if self.db is not None:
             self.db.close()

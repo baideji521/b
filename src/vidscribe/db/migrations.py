@@ -10,7 +10,13 @@ from __future__ import annotations
 import sqlite3
 
 from ..logging_setup import get_logger
-from .schema import DANCE_TABLES, DANCE_V12_TABLES, SCHEMA_VERSION, TABLES
+from .schema import (
+    DANCE_TABLES,
+    DANCE_V12_TABLES,
+    DANCE_V13_TABLES,
+    SCHEMA_VERSION,
+    TABLES,
+)
 
 
 
@@ -185,6 +191,12 @@ _STEPS: dict[int, list[str]] = {
     # 之所以不给 dance_target_songs 加一列：ADD COLUMN 会让"升级上来的表"和
     # "新建库的表"的 SQL 文本不再逐字相同 —— 那正是 v4 踩过的坑。
     12: list(DANCE_V12_TABLES),
+    # v13：用户拍板的段落模板（`dance_segment_templates`）。还是**只建新表**。
+    # 有了它，"一首歌怎么分段"才第一次成为可以留住的资产：以前那把尺子是
+    # `时长 + 格长` 现算的，用户拖不动也存不下；现在拖完的边界存进去，
+    # 所有源视频继承同一份，重启也还在。老库升上来是一张空表 = 还没人分过段，
+    # 界面照旧按等间隔起步，行为跟以前一模一样。
+    13: list(DANCE_V13_TABLES),
 
 }
 

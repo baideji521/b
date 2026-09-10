@@ -831,8 +831,26 @@ class AlignBenchPanel(QWidget):
                      or (align.source_duration if align is not None else 0.0))
 
     # ================================================================ 固定卡点
+    def _template_positions(self):
+        """这首歌有用户拍板的段落模板就用它，没有才按切片长度等间隔。
+
+        必须和 `material_ingest.slice_and_register` 用同一份位置 —— 否则测试台说
+        "这一格能用"，正式切片却按另一把尺子来，那这个页面就白做了。
+        """
+        song_id = int(self._payload.get("song_id") or 0)
+        if self.db is None or song_id <= 0:
+            return None
+        from ...dance import material_repository as repo  # noqa: PLC0415
+        from ...dance import segment_template as editor  # noqa: PLC0415
+
+        try:
+            template = repo.active_segment_template(self.db, song_id)
+        except editor.SegmentError:
+            return None
+        return editor.positions_of(template) if template is not None else None
+
     def generate_positions(self) -> None:
-        """按当前切片长度铺满整首歌，逐格标可用/越界，并算覆盖率。"""
+        """按当前分段（模板优先，否则等间隔）铺满整首歌，逐格标可用/越界，并算覆盖率。"""
         from ...dance import align_probe  # noqa: PLC0415
 
         align = self._alignment
@@ -846,7 +864,8 @@ class AlignBenchPanel(QWidget):
             return
         self._rows = align_probe.probe_all(
             align, song_duration=song, source_duration=self._source_duration(),
-            slice_duration=float(self.slice_seconds.value()))
+            slice_duration=float(self.slice_seconds.value()),
+            positions=self._template_positions())
         self._fill_positions()
         usable, total, ratio = align_probe.coverage_of(self._rows)
         text = (f"可用 {usable} / {total} 格｜不可用 {total - usable}"
@@ -1082,6 +1101,7 @@ class AlignBenchPanel(QWidget):
 
         song = float(self._payload.get("song_duration") or 0.0)
         slice_seconds = float(self.slice_seconds.value())
+        picks = self._template_positions()
         self.batch.setSortingEnabled(False)
         self.batch.setRowCount(len(self._batch))
         for index, row in enumerate(self._batch):
@@ -1096,7 +1116,7 @@ class AlignBenchPanel(QWidget):
                     probes = align_probe.probe_all(
                         align, song_duration=song,
                         source_duration=float(align.source_duration or 0.0),
-                        slice_duration=slice_seconds)
+                        slice_duration=slice_seconds, positions=picks)
                     usable, total, ratio = align_probe.coverage_of(probes)
                 cells = (str(row.get("name") or ""), f"{align.offset:+.3f}",
                          f"{align.confidence:.3f}",

@@ -442,6 +442,37 @@ def envelope(pcm: np.ndarray, buckets: int = 600) -> np.ndarray:
     return (out / peak).astype(np.float32) if peak > _EPS else out
 
 
+def spectrogram_image(pcm: np.ndarray, sample_rate: int = DEFAULT_SR,
+                      columns: int = 900, rows: int = 96) -> np.ndarray:
+    """画音谱图用的小图：`rows × columns` 的 uint8（0~255），mel 频标 + dB 幅度。
+
+    **只给显示用**，和 `envelope` 一样不参与任何判定。
+    先算 mel 谱（低频看得清，符合听感），转 dB，再把时间轴均匀降到 `columns` 桶
+    （每桶取最大值，免得把鼓点抹平），最后按全图分位数归一 —— 用分位数而不是
+    min/max，是因为一两个爆音会把整张图压黑。
+    行序倒过来，`row 0` 是高频，直接就是屏幕上从上到下的顺序。
+    """
+    pcm = np.asarray(pcm, dtype=np.float32).reshape(-1)
+    width = max(1, int(columns))
+    bands = max(8, int(rows))
+    if pcm.size < N_FFT:
+        return np.zeros((bands, width), dtype=np.uint8)
+    mel = melspectrogram(pcm, sample_rate=sample_rate, n_mels=bands)
+    db = power_to_db(mel)                                   # (frames, bands)
+    frames = db.shape[0]
+    if frames >= width:
+        edges = np.linspace(0, frames, width + 1).astype(np.int64)
+        picked = np.maximum.reduceat(db, edges[:-1], axis=0)
+    else:                                                   # 太短就横向拉开
+        picked = db[np.linspace(0, frames - 1, width).astype(np.int64)]
+    low = float(np.percentile(picked, 5.0))
+    high = float(np.percentile(picked, 99.5))
+    if high - low < 1e-6:
+        return np.zeros((bands, width), dtype=np.uint8)
+    scaled = np.clip((picked - low) / (high - low), 0.0, 1.0)
+    return (scaled.T[::-1] * 255.0).astype(np.uint8)
+
+
 def cross_correlate(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, int]:
     """FFT 全互相关，返回 `(相关序列, 零延迟所在下标)`。
 

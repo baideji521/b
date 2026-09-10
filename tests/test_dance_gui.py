@@ -62,9 +62,10 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.history is not None and window.statistics is not None    # ④ 历史与统计
         assert window.alignment is not None
         assert window.bench is not None             # 音频对齐 / 卡点测试台
+        assert window.master is not None            # 主音频编辑区（段落模板）
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert titles == ["素材资产", "音频对齐", "对齐/卡点测试",
-                          "选择与推荐", "历史与统计"], titles
+        assert titles == ["素材资产", "主音频/分段", "音频对齐", "对齐/卡点测试",
+                          "选择与推荐", "素材矩阵/成片", "历史与统计"], titles
         assert "卡点舞" in window.windowTitle()
         # 小窗口也要能用（一期第十五节）
         assert window.minimumWidth() <= 1000 and window.minimumHeight() <= 640
@@ -352,7 +353,7 @@ def test_settings_survive_a_restart(work: Path) -> None:
         first.bench.chk_sound.setChecked(True)
         first.bench.chk_sound.blockSignals(False)
         first.bench.btn_loop.setChecked(True)
-        first.tabs.setCurrentIndex(3)
+        first.tabs.setCurrentIndex(4)       # 「选择与推荐」——它不会把左栏收起来
         dialogs.remember("dance.source", work / "girl01.mp4")
     finally:
         first.close()                                       # closeEvent 里落盘
@@ -371,7 +372,7 @@ def test_settings_survive_a_restart(work: Path) -> None:
         assert abs(second.bench.slice_seconds.value() - 1.5) < 1e-6
         assert second.bench.chk_sound.isChecked(), "「带声音」的勾选没记住"
         assert second.bench.btn_loop.isChecked()
-        assert second.tabs.currentIndex() == 3, second.tabs.currentIndex()
+        assert second.tabs.currentIndex() == 4, second.tabs.currentIndex()
         # 分栏比例：离屏窗口没有真实宽度，Qt 会把 setSizes 缩放掉，所以这里比的是
         # 「存下来的那份和套回来的那份一致」，而不是当初写进去的字面值
         assert second.split.sizes() == saved["dance_window"]["split"], second.split.sizes()

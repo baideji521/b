@@ -22,6 +22,7 @@ from .types import (
     MontageStrategy,
     RecommendationItem,
     RecommendationRun,
+    SegmentTemplate,
 )
 
 logger = get_logger("dance.repo")
@@ -244,6 +245,119 @@ def song_beats(db: Database, song_id: int) -> dict[str, Any]:
     row = get_song(db, song_id)
     data = _loads(row["beats_json"]) if row is not None else None
     return data if isinstance(data, dict) else {}
+
+# ============================================================ 段落模板（v13）
+#: 没起名字的模板都叫这个 —— 一首歌一份"默认分段"，够用而且好找
+DEFAULT_TEMPLATE_NAME = "默认"
+
+
+def save_segment_template(db: Database, template: SegmentTemplate, *,
+                          name: str = "", make_active: bool = True) -> int:
+    """存一份段落模板，按 `(歌, 名字)` 幂等（同名就更新那一份）。
+
+    存进去之前先 `validate` —— 半份模板（有缝/重叠/越界）绝不许落库，
+    否则读出来的每一处都得再判一遍，而且总会有人忘了判。
+    `make_active` 只影响"这首歌默认用哪一份"，一首歌同一时刻只有一份是活的。
+    """
+    from . import segment_template as editor      # 只为校验/序列化，避免顶层循环导入
+
+    editor.validate(template)
+    label = (name or template.name or DEFAULT_TEMPLATE_NAME).strip() or DEFAULT_TEMPLATE_NAME
+    stamp = now()
+    payload = editor.to_json(template)
+    with db.tx() as conn:
+        row = conn.execute(
+            "SELECT id FROM dance_segment_templates "
+            "WHERE target_song_id = ? AND name = ?",
+            (int(template.target_song_id), label)).fetchone()
+        if row is None:
+            cursor = conn.execute(
+                "INSERT INTO dance_segment_templates (target_song_id, name, duration, "
+                "segment_count, spans_json, source, template_version, is_active, note, "
+                "created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (int(template.target_song_id), label, float(template.duration),
+                 len(template.spans), payload, template.source,
+                 template.version or editor.TEMPLATE_VERSION,
+                 1 if make_active else 0, template.note, stamp, stamp))
+            template_id = int(cursor.lastrowid)
+        else:
+            template_id = int(row["id"])
+            conn.execute(
+                "UPDATE dance_segment_templates SET duration=?, segment_count=?, "
+                "spans_json=?, source=?, template_version=?, note=?, updated_at=? "
+                "WHERE id=?",
+                (float(template.duration), len(template.spans), payload, template.source,
+                 template.version or editor.TEMPLATE_VERSION, template.note, stamp,
+                 template_id))
+        if make_active:
+            conn.execute(
+                "UPDATE dance_segment_templates SET is_active = CASE WHEN id = ? "
+                "THEN 1 ELSE 0 END, updated_at = CASE WHEN id = ? THEN ? "
+                "ELSE updated_at END WHERE target_song_id = ?",
+                (template_id, template_id, stamp, int(template.target_song_id)))
+    logger.info("段落模板「%s」已存：歌 #%d，%d 段，来源 %s",
+                label, int(template.target_song_id), len(template.spans), template.source)
+    return template_id
+
+
+def _template(row: Any) -> SegmentTemplate:
+    from . import segment_template as editor
+
+    built = editor.from_json(row["spans_json"], target_song_id=int(row["target_song_id"]))
+    return SegmentTemplate(target_song_id=built.target_song_id, duration=built.duration,
+                           spans=built.spans, source=built.source,
+                           name=str(row["name"] or ""), note=built.note,
+                           version=str(row["template_version"] or built.version))
+
+
+def get_segment_template(db: Database, template_id: int) -> SegmentTemplate | None:
+    row = db.connect().execute("SELECT * FROM dance_segment_templates WHERE id = ?",
+                               (int(template_id),)).fetchone()
+    return _template(row) if row is not None else None
+
+
+def active_segment_template(db: Database, song_id: int) -> SegmentTemplate | None:
+    """这首歌当前生效的段落模板。**没有就返回 None** —— 上层据此回落成等间隔，
+    不要在这儿现编一份：编出来的东西会被当成"用户定过的分段"。
+    """
+    row = db.connect().execute(
+        "SELECT * FROM dance_segment_templates WHERE target_song_id = ? "
+        "ORDER BY is_active DESC, updated_at DESC LIMIT 1", (int(song_id),)).fetchone()
+    return _template(row) if row is not None else None
+
+
+def list_segment_templates(db: Database, song_id: int) -> list[Any]:
+    return list(db.connect().execute(
+        "SELECT id, name, duration, segment_count, source, is_active, note, updated_at "
+        "FROM dance_segment_templates WHERE target_song_id = ? "
+        "ORDER BY is_active DESC, updated_at DESC", (int(song_id),)))
+
+
+def set_active_segment_template(db: Database, template_id: int) -> bool:
+    """切换"这首歌用哪一份分段"。模板不存在返回 False，不抛。"""
+    row = db.connect().execute(
+        "SELECT target_song_id FROM dance_segment_templates WHERE id = ?",
+        (int(template_id),)).fetchone()
+    if row is None:
+        return False
+    with db.tx() as conn:
+        conn.execute(
+            "UPDATE dance_segment_templates SET is_active = CASE WHEN id = ? "
+            "THEN 1 ELSE 0 END WHERE target_song_id = ?",
+            (int(template_id), int(row["target_song_id"])))
+    return True
+
+
+def delete_segment_template(db: Database, template_id: int) -> bool:
+    """删掉一份模板。已经按它切出来的素材一条都不动 —— 素材自己记着
+    绑在哪一段（`dance_materials.segment_index/target_start/target_end`），
+    删模板不等于删素材，这一点不许含糊。
+    """
+    with db.tx() as conn:
+        cursor = conn.execute("DELETE FROM dance_segment_templates WHERE id = ?",
+                              (int(template_id),))
+    return cursor.rowcount > 0
+
 
 # ==================================================================== 对齐
 def save_alignment(db: Database, *, source_video_id: int, target_song_id: int,
@@ -728,6 +842,9 @@ __all__ = [
     "now",
     "upsert_song", "save_song_analysis", "get_song", "get_song_by_fingerprint",
     "get_song_by_path", "list_songs", "song_sections", "song_beats",
+    "DEFAULT_TEMPLATE_NAME", "save_segment_template", "get_segment_template",
+    "active_segment_template", "list_segment_templates",
+    "set_active_segment_template", "delete_segment_template",
     "save_alignment", "alignment_by_key", "get_alignment", "alignments_for_song",
     "set_manual_offset",
     "upsert_material", "get_material", "get_materials", "materials_at",

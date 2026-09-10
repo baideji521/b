@@ -68,10 +68,11 @@ def fresh_db(work: Path, name: str = "fresh.db") -> sqlite3.Connection:
 def legacy_db(work: Path, name: str = "legacy.db") -> sqlite3.Connection:
     """造一个 v10 老库：建除 dance_* 之外的全部表，再把 user_version 钉成 10。"""
     conn = _open(work / name)
-    later = set(schema.DANCE_TABLES) | set(schema.DANCE_V12_TABLES)
+    later = (set(schema.DANCE_TABLES) | set(schema.DANCE_V12_TABLES)
+             | set(schema.DANCE_V13_TABLES))
     for statement in schema.TABLES:
         if statement in later:
-            continue                      # v11/v12 才有的舞蹈表，老库里当然没有
+            continue                      # v11~v13 才有的舞蹈表，老库里当然没有
         conn.execute(statement)
     conn.execute("PRAGMA user_version=10")
     return conn
@@ -223,6 +224,25 @@ def test_v12_only_creates_never_drops() -> None:
     assert steps == list(schema.DANCE_V12_TABLES), "v12 必须直接复用 schema.DANCE_V12_TABLES"
     # 下架表不能出现在 v11 那一批里，否则老库升级顺序会乱
     assert not (set(schema.DANCE_TABLES) & set(schema.DANCE_V12_TABLES))
+
+
+def test_v13_only_creates_never_drops() -> None:
+    """v13（用户段落模板表）同样只许 CREATE，且必须直接复用 schema.DANCE_V13_TABLES。
+
+    段落模板是用户拖出来的资产，老库升上来是一张空表 = 还没人分过段，
+    界面照旧按等间隔起步 —— 升级不会改变任何既有行为。
+    """
+    steps = migrations._STEPS[13]                                  # noqa: SLF001 - 就是要盯它
+    assert steps, "v13 不能是空的"
+    for statement in steps:
+        head = " ".join(statement.strip().split()[:2]).upper()
+        assert head.startswith("CREATE"), f"v13 只允许 CREATE，出现了：{head}"
+        upper = statement.upper()
+        assert "ALTER TABLE" not in upper, f"v13 不许 ALTER 已有表：{statement[:80]}"
+        assert " DROP " not in f" {upper} ", f"v13 不许出现 DROP：{statement[:80]}"
+    assert steps == list(schema.DANCE_V13_TABLES), "v13 必须直接复用 schema.DANCE_V13_TABLES"
+    assert not (set(schema.DANCE_TABLES) & set(schema.DANCE_V13_TABLES))
+    assert not (set(schema.DANCE_V12_TABLES) & set(schema.DANCE_V13_TABLES))
 
 
 
@@ -433,6 +453,8 @@ TESTS = (
     test_newer_db_is_left_alone,
     test_v11_only_creates_never_drops,
     test_v12_only_creates_never_drops,
+    test_v13_only_creates_never_drops,
+
 
     test_foreign_keys_cascade,
     test_orphan_reference_is_refused,

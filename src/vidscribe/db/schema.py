@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 # 表结构版本。加/改表就 +1，并在 migrations.py 里补一段升级脚本。
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 
 # AI 任务的状态机。别再用「TXT 存不存在」推断任务走到哪了。
@@ -776,6 +776,43 @@ DANCE_V12_TABLES = (
 )
 
 TABLES = TABLES + DANCE_V12_TABLES
+
+
+#: v13：用户拍板的段落模板（S1/S2/S3…）。同样**只建新表**，理由和 v12 一样。
+#:
+#: 为什么这东西必须落库：整个卡点混剪的前提是"所有源视频贴同一把尺子"。
+#: 以前那把尺子是 `时长 + 格长` 两个数现算的，用户改不了；现在用户可以拖边界，
+#: 那这份边界就成了必须留住的资产 —— 重启还在、下次开同一首歌还是它，
+#: 否则所有素材"绑在哪一段"这件事就没有依据了。
+#:
+#: 只存 `spans_json`（边界 + 标签）而不是一行一段：模板是**整体**才有意义，
+#: 半份模板（有缝/重叠）是非法状态，一条 JSON 存进去、读出来整体校验，
+#: 天然没有"写了一半"的中间态。校验在 `dance.segment_template.validate`。
+#: `source` 记它怎么来的（uniform/pause/manual），界面要能说清"这份分段是谁定的"。
+DANCE_V13_TABLES = (
+    """
+    CREATE TABLE IF NOT EXISTS dance_segment_templates (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        target_song_id INTEGER NOT NULL
+                       REFERENCES dance_target_songs(id) ON DELETE CASCADE,
+        name           TEXT    NOT NULL DEFAULT '',
+        duration       REAL    NOT NULL DEFAULT 0,
+        segment_count  INTEGER NOT NULL DEFAULT 0,
+        spans_json     TEXT    NOT NULL,
+        source         TEXT    NOT NULL DEFAULT 'manual',
+        template_version TEXT  NOT NULL DEFAULT '',
+        is_active      INTEGER NOT NULL DEFAULT 0,
+        note           TEXT    NOT NULL DEFAULT '',
+        created_at     TEXT    NOT NULL,
+        updated_at     TEXT    NOT NULL,
+        UNIQUE(target_song_id, name)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dance_segment_templates_song "
+    "ON dance_segment_templates(target_song_id, is_active DESC, updated_at DESC)",
+)
+
+TABLES = TABLES + DANCE_V13_TABLES
 
 
 

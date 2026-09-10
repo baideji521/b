@@ -71,9 +71,16 @@ def map_to_source(target_start: float, target_end: float, offset: float,
 
 
 def plan_slices(alignment: DanceAlignment, *, song_duration: float, source_duration: float,
-                slice_duration: float, source_video_id: int = 0, target_song_id: int = 0,
+                slice_duration: float = 0.0, positions=None, source_video_id: int = 0,
+                target_song_id: int = 0,
                 generation_version: str = MATERIAL_GENERATION_VERSION) -> SlicePlan:
     """一个源视频对一首目标歌的完整切片计划。
+
+    位置从哪来，两条路，**只有这一处分叉**：
+
+        positions 给了     → 按用户拍板的段落模板切（`segment_template.positions_of`），
+                             每段长度可以各不相同
+        positions 没给     → 按 `slice_duration` 等间隔切（老行为，一个字没改）
 
     每个位置逐个映射；映射不出来的**记进 `skipped` 并写明原因**，不静默丢、也不 clamp。
     GUI 会把 skipped 显示出来，用户一看就知道"这条素材只覆盖了歌的中段"。
@@ -81,12 +88,16 @@ def plan_slices(alignment: DanceAlignment, *, song_duration: float, source_durat
     对齐结论是 `rejected` 时整份计划为空并给出原因 —— 一个不可信的 offset
     切出来的素材全是错位的，宁可一条都不出。
     """
-    if float(slice_duration) <= 0:
-        raise ValueError(f"slice_duration 必须为正，收到 {slice_duration}")
+    picks = tuple(positions) if positions else ()
+    if not picks:
+        if float(slice_duration) <= 0:
+            raise ValueError(f"slice_duration 必须为正，收到 {slice_duration}")
+        picks = target_positions(song_duration, slice_duration)
     plan_kwargs = {
         "source_video_id": source_video_id,
         "target_song_id": target_song_id,
         "alignment_offset": round(float(alignment.offset), 6),
+        # 按模板切的时候各段长度不一，这里记 0 表示"格长不适用，看每段自己的区间"
         "slice_duration": round(float(slice_duration), 6),
         "generation_version": generation_version,
     }
@@ -96,7 +107,7 @@ def plan_slices(alignment: DanceAlignment, *, song_duration: float, source_durat
 
     specs: list[SliceSpec] = []
     skipped: list[tuple[int, str]] = []
-    for position in target_positions(song_duration, slice_duration):
+    for position in picks:
         try:
             specs.append(map_to_source(position.start, position.end, alignment.offset,
                                        source_duration, segment_index=position.index))

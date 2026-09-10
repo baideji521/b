@@ -762,12 +762,200 @@ class RenderResult:
         return _dict(self, 3)
 
 
+# ==================================================== 人声活动 / 停顿导航点
+@dataclass(frozen=True)
+class VocalSpan:
+    """一段"有人声"或"没人声"的区间。`kind` 只有 `vocal` / `pause` 两种。
+
+    说明白它是什么：这是**频谱启发式**的判断（人声频带能量 + 谐波性），
+    不是源分离，也没有模型。所以它只是给人看的参考层，
+    最终在哪儿切段永远由用户点下去决定（见 `segment_template`）。
+    """
+
+    index: int
+    start: float
+    end: float
+    kind: str = "vocal"
+    strength: float = 0.0
+
+    @property
+    def duration(self) -> float:
+        return round(self.end - self.start, 6)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = _dict(self, 3)
+        data["duration"] = _round(self.duration, 3)
+        return data
+
+
+@dataclass(frozen=True)
+class VocalPause:
+    """一个人声停顿 —— 界面左边那份"导航点"列表里的一行。
+
+    `score` 是推荐度（0~1）：停得越久、越干净、越贴着拍点，就越可能适合换人。
+    `nearest_beat` 是最近的拍点（秒），`-1` 表示这首歌没有可用的拍网格。
+    """
+
+    index: int
+    start: float
+    end: float
+    score: float = 0.0
+    nearest_beat: float = -1.0
+
+    @property
+    def duration(self) -> float:
+        return round(self.end - self.start, 6)
+
+    @property
+    def middle(self) -> float:
+        """停顿正中间 —— 「跳到这个停顿」时播放头落在这里最稳。"""
+        return round((self.start + self.end) / 2.0, 6)
+
+    def to_dict(self) -> dict[str, Any]:
+        data = _dict(self, 3)
+        data["duration"] = _round(self.duration, 3)
+        data["middle"] = _round(self.middle, 3)
+        return data
+
+
+@dataclass(frozen=True)
+class VocalActivity:
+    """一首歌的人声活动分析结果：逐帧强度 + 区间 + 停顿导航点。
+
+    `strength` 是 0~1 的逐帧曲线，`threshold` 是当时用的判定门槛 ——
+    两个都留着，界面才能把门槛画成一条横线，让用户看出"为什么这里算有人声"。
+    """
+
+    duration: float
+    sample_rate: int
+    hop_seconds: float
+    frame_times: tuple[float, ...] = ()
+    strength: tuple[float, ...] = ()
+    threshold: float = 0.0
+    spans: tuple[VocalSpan, ...] = ()
+    pauses: tuple[VocalPause, ...] = ()
+    version: str = ""
+
+    def at(self, moment: float) -> float:
+        """某一刻的人声强度。越界返回 0。"""
+        if not self.frame_times or not self.strength:
+            return 0.0
+        nearest = min(range(len(self.frame_times)),
+                      key=lambda i: abs(self.frame_times[i] - float(moment)))
+        return round(float(self.strength[nearest]), 4)
+
+    def speaking_at(self, moment: float) -> bool:
+        """某一刻是否落在人声区间里 —— 状态栏那句"人声中 / 停顿中"。"""
+        return any(s.kind == "vocal" and s.start <= moment < s.end for s in self.spans)
+
+    def next_pause(self, moment: float) -> VocalPause | None:
+        """下一处人声停顿。没有了返回 None（界面显示「—」，不要编一个）。"""
+        for pause in self.pauses:
+            if pause.start > moment:
+                return pause
+        return None
+
+    def previous_pause(self, moment: float) -> VocalPause | None:
+        for pause in reversed(self.pauses):
+            if pause.end < moment:
+                return pause
+        return None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "duration": _round(self.duration, 3),
+            "sample_rate": self.sample_rate,
+            "hop_seconds": _round(self.hop_seconds, 6),
+            "frames": len(self.frame_times),
+            "threshold": _round(self.threshold, 4),
+            "spans": [s.to_dict() for s in self.spans],
+            "pauses": [p.to_dict() for p in self.pauses],
+            "version": self.version,
+        }
+
+
+# ======================================================== 用户确定的段落模板
+@dataclass(frozen=True)
+class SegmentSpan:
+    """段落模板里的一格：S1 / S2 / S3 …
+
+    和 `TargetPosition` 的区别很重要，别混：
+    `TargetPosition` 是「等间隔的尺子」，机器算的；
+    `SegmentSpan` 是「用户拍板的段落」，长度可以各不相同。
+    所有源视频都继承同一份模板，不会因为某个视频的人声不同而各自重新分段。
+    """
+
+    index: int
+    start: float
+    end: float
+    label: str = ""
+    note: str = ""
+
+    @property
+    def duration(self) -> float:
+        return round(self.end - self.start, 6)
+
+    @property
+    def name(self) -> str:
+        """显示名：没起名字就叫 S1 / S2 …（下标从 0 开始，名字从 1 开始）。"""
+        return self.label or f"S{self.index + 1}"
+
+    def contains(self, moment: float) -> bool:
+        return self.start <= float(moment) < self.end
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"index": self.index, "start": _round(self.start, 3),
+                "end": _round(self.end, 3), "duration": _round(self.duration, 3),
+                "label": self.label, "note": self.note}
+
+
+@dataclass(frozen=True)
+class SegmentTemplate:
+    """一首歌的段落模板：一串首尾相接、不重叠、不留缝的 `SegmentSpan`。
+
+    `source` 记它是怎么来的：`uniform`（等间隔生成）/ `pause`（照人声停顿生成）/
+    `manual`（用户拖过边界）—— 界面要能告诉用户"这份分段是谁定的"。
+    """
+
+    target_song_id: int = 0
+    duration: float = 0.0
+    spans: tuple[SegmentSpan, ...] = ()
+    source: str = "uniform"
+    name: str = ""
+    note: str = ""
+    version: str = ""
+
+    @property
+    def boundaries(self) -> tuple[float, ...]:
+        """内部分割点（不含 0 和结尾）—— 拖动的就是这些点。"""
+        return tuple(span.start for span in self.spans[1:])
+
+    def span_at(self, moment: float) -> SegmentSpan | None:
+        for span in self.spans:
+            if span.contains(moment):
+                return span
+        return self.spans[-1] if self.spans and moment >= self.spans[-1].end else None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "target_song_id": self.target_song_id,
+            "duration": _round(self.duration, 3),
+            "spans": [s.to_dict() for s in self.spans],
+            "source": self.source,
+            "name": self.name,
+            "note": self.note,
+            "version": self.version,
+        }
+
+
 __all__ = [
     "ALIGNMENT_STATUS", "MATERIAL_STATUS", "USAGE_EVENTS", "STRATEGY_KINDS",
     "SECTION_TYPES", "SORT_KEYS",
     "WindowResult", "DanceAlignment",
     "BeatGrid", "RhythmBands", "MusicSection", "TargetMusicFeatures",
     "TargetPosition", "SliceSpec", "SlicePlan",
+    "VocalSpan", "VocalPause", "VocalActivity",
+    "SegmentSpan", "SegmentTemplate",
     "DanceMaterial", "MaterialScore", "FilterSpec", "CandidatePool",
     "RecommendationItem", "RecommendationRun", "MontageStrategy",
     "DanceMontageClip", "RepeatStats", "DanceMontageContext", "RenderResult",

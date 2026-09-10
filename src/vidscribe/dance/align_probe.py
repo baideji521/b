@@ -79,29 +79,33 @@ def probe_one(alignment: DanceAlignment, target_start: float, slice_duration: fl
 
 
 def probe_all(alignment: DanceAlignment, *, song_duration: float, source_duration: float,
-              slice_duration: float) -> list[PositionRow]:
-    """把整首目标歌按固定位置铺开，逐格标可用/越界。
+              slice_duration: float = 0.0, positions=None) -> list[PositionRow]:
+    """把整首目标歌按位置铺开，逐格标可用/越界。
+
+    `positions` 给了就按用户拍板的段落模板铺（长度可以各不相同），没给就等间隔 ——
+    和 `plan_slices` 同一处分叉，两边永远用同一份位置。
 
     走的是 `plan_slices`，所以这里显示"可用"的位置，正式切片时一定也切得出来。
     对齐被判 `rejected` 时 `plan_slices` 整份计划为空（一个不可信的 offset 切出来
     全是错位素材），那就把**每一格**都标成不可用并写上同一个理由 —— 不是"没有位置"，
     是"这条源现在一格都不该用"。
     """
-    positions = target_positions(song_duration, slice_duration)
+    picks = (tuple(positions) if positions
+             else target_positions(song_duration, slice_duration))
     plan = material_slice.plan_slices(
         alignment, song_duration=song_duration, source_duration=source_duration,
-        slice_duration=slice_duration)
+        slice_duration=slice_duration, positions=picks)
     whole = [why for index, why in plan.skipped if index < 0]
     if whole:
         return [PositionRow(index=p.index, target_start=p.start, target_end=p.end,
                             source_start=alignment.source_time(p.start),
                             source_end=alignment.source_time(p.end),
-                            ok=False, reason=whole[0]) for p in positions]
+                            ok=False, reason=whole[0]) for p in picks]
 
     reasons = {int(index): why for index, why in plan.skipped}
     good = {int(spec.segment_index): spec for spec in plan.specs}
     rows: list[PositionRow] = []
-    for position in positions:
+    for position in picks:
         spec = good.get(position.index)
         if spec is not None:
             rows.append(PositionRow(index=position.index, target_start=spec.target_start,

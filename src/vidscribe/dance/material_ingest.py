@@ -432,9 +432,13 @@ def slice_and_register(db: Database, song: TargetSong, outcome: AlignOutcome, *,
     source_duration = media_audio_duration(outcome.source_path)
     if source_duration <= 0:
         source_duration = float(alignment.source_duration or 0.0)
+    # 这首歌如果有用户拍板的段落模板，就按它切；没有才回落成等间隔。
+    # 判定在这一处、只有这一处 —— 所有源视频因此继承同一份分段。
+    positions = _template_positions(db, song.song_id, on_log=log)
     plan = material_slice.plan_slices(
         alignment, song_duration=song.duration, source_duration=source_duration,
-        slice_duration=slice_duration, source_video_id=outcome.video_id,
+        slice_duration=slice_duration, positions=positions,
+        source_video_id=outcome.video_id,
         target_song_id=song.song_id, generation_version=generation_version)
     result.plan = plan
     result.skipped = len(plan.skipped)
@@ -470,6 +474,26 @@ def slice_and_register(db: Database, song: TargetSong, outcome: AlignOutcome, *,
         f"，跳过 {result.skipped} 个位置"
         + (f"，旧版 {result.retired} 条标为 regenerated" if result.retired else ""))
     return result
+
+
+def _template_positions(db: Database, song_id: int, *, on_log: LogFn | None = None):
+    """这首歌当前生效的段落模板摊成位置；没有模板就返回 None（调用方回落成等间隔）。
+
+    模板存坏了也不许把整条流水线拖停：记一条日志、回落成等间隔，
+    用户在「主音频/分段」页重存一份就好 —— 但**绝不**悄悄按错的分段切素材。
+    """
+    from . import segment_template as editor  # noqa: PLC0415
+
+    log = on_log or (lambda line: logger.info("%s", line))
+    try:
+        template = repo.active_segment_template(db, int(song_id))
+    except editor.SegmentError as exc:
+        log(f"[切片] 库里那份段落模板读不出来（{exc}），这次按等间隔切")
+        return None
+    if template is None:
+        return None
+    log(f"[切片] 按段落模板「{template.name}」切：{len(template.spans)} 段（来源 {template.source}）")
+    return editor.positions_of(template)
 
 
 def _safe_fingerprint(path: Path) -> str:

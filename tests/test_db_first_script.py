@@ -243,8 +243,9 @@ def test_v4_upgrades_to_v7_without_losing_data(tmp_path: Path) -> None:
         blocked_language 列和 v10 的 no_audio 列（不然升级脚本的 ADD COLUMN 会撞重名）。"""
         out: list[str] = []
         for statement in schema.TABLES:
-            if statement in schema.DANCE_TABLES or statement in schema.DANCE_V12_TABLES:
-                continue                      # v11/v12 的舞蹈表，老库里当然没有
+            if statement in schema.DANCE_TABLES or statement in schema.DANCE_V12_TABLES \
+                    or statement in schema.DANCE_V13_TABLES:
+                continue                      # v11~v13 的舞蹈表，老库里当然没有
 
             if "expression_spans" in statement:
 
