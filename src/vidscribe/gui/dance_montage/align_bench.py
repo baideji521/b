@@ -352,39 +352,36 @@ class AlignBenchPanel(QWidget):
 
 
     def _build_action(self) -> QGroupBox:
-        box = QGroupBox("② 开始对齐（后台跑，界面不冻）", self)
+        box = QGroupBox("② 开始对齐（后台跑，只算不写：不登记素材、不切片、不动计数）", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(6)
 
-        self.btn_start = _big(QPushButton("开始音频对齐", box), 48, bold=True)
-        layout.addWidget(self.btn_start)
-
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.btn_stop = _big(QPushButton("停止", box))
+        self.btn_start = _big(QPushButton("开始音频对齐", box), 44, bold=True)
+        self.btn_stop = _big(QPushButton("停止", box), 44)
         self.btn_stop.setEnabled(False)
-        self.btn_reset = _big(QPushButton("重置这一页", box))
+        self.btn_stop.setMaximumWidth(110)
+        self.btn_reset = _big(QPushButton("重置这一页", box), 44)
+        self.btn_reset.setMaximumWidth(130)
         self.btn_reset.setToolTip("只清这个页面上的东西（路径、结果、卡点、预览）。\n"
                                  "素材库里的正式素材一条都不会动。")
+        row.addWidget(self.btn_start, 1)
         row.addWidget(self.btn_stop)
         row.addWidget(self.btn_reset)
         layout.addLayout(row)
 
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
         self.force = QCheckBox("忽略对齐缓存，重新算一遍", box)
-        self.force.setMinimumHeight(26)
-        layout.addWidget(self.force)
-
+        self.force.setMinimumHeight(28)
         self.bar = QProgressBar(box)
         self.bar.setRange(0, 100)
-        self.bar.setMinimumHeight(24)
+        self.bar.setMinimumHeight(26)
         self.bar.setFormat("%v / %m")
-        layout.addWidget(self.bar)
-
-        note = QLabel("只算不写：不登记素材、不切片、不动任何计数。日志见下面「运行日志」。",
-                      box)
-        note.setWordWrap(True)
-        note.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        layout.addWidget(note)
+        bottom.addWidget(self.force)
+        bottom.addWidget(self.bar, 1)
+        layout.addLayout(bottom)
         layout.addStretch(1)
 
         self.btn_start.clicked.connect(self.start)
@@ -393,10 +390,17 @@ class AlignBenchPanel(QWidget):
         return box
 
 
+
     def _build_result(self) -> QGroupBox:
         box = QGroupBox("③ 对齐结果（全部是后端算的，这里不做二次加工）", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
+
+        # 批量时结果区显示的是**其中一条**，不写清是哪条会让人以为数字对不上
+        self.current = QLabel("当前源视频：还没对齐", box)
+        self.current.setWordWrap(True)
+        self.current.setStyleSheet("font-weight:600;")
+        layout.addWidget(self.current)
 
         grid = QGridLayout()
         grid.setHorizontalSpacing(10)
@@ -710,13 +714,28 @@ class AlignBenchPanel(QWidget):
         self.say(f"[结束] {message}")
         self._fill_batch()
 
-        first = next((r for r in self._batch if r.get("alignment") is not None), None)
-        if first is None:
+        best = self._best(self._batch)
+        if best is None:
             self._show_failure(self._batch)
             return
-        self._adopt(first)
+        self._adopt(best)
         if not ok:
             QMessageBox.warning(self, "对齐没有全部成功", message)
+
+    @staticmethod
+    def _best(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """批量之后先给用户看**最靠得住的那一条**，不是列表里碰巧排第一的那条。
+
+        排序口径和批量表默认排序一致（结论好的在前、置信度高的在前），
+        否则会出现"结果区显示一条 rejected、下面表里却全是 OK"这种自相矛盾的画面。
+        """
+        rank = {"ok": 0, "manual": 1, "low_confidence": 2, "disagree": 3, "rejected": 4}
+        good = [r for r in rows if r.get("alignment") is not None]
+        if not good:
+            return None
+        return min(good, key=lambda r: (rank.get(r["alignment"].status, 9),
+                                        -float(r["alignment"].confidence)))
+
 
     def _show_failure(self, rows: list[dict[str, Any]]) -> None:
         """一条都没算出来。**必须说清为什么**，不能只在日志里留一行。"""
@@ -724,6 +743,7 @@ class AlignBenchPanel(QWidget):
         for label in self.out.values():
             label.setText("—")
         why = "；".join(str(r.get("error") or "未知原因") for r in rows[:3]) or "未知原因"
+        self.current.setText("当前源视频：一条都没算出来")
         self.out["status"].setText("失败")
         self.mapping.setText("时间映射：算不出来")
         self.diagnosis.setPlainText(f"✗ 对齐失败\n\n原因：{why}\n\n"
@@ -741,12 +761,22 @@ class AlignBenchPanel(QWidget):
             self._show_failure([row])
             return
         self.source.setText(str(row.get("path") or self.source.text()))
+        name = str(row.get("name") or Path(str(row.get("path") or "")).name or "（未知）")
+        if len(self._batch) > 1:
+            place = next((i + 1 for i, r in enumerate(self._batch)
+                          if r is row or r.get("path") == row.get("path")), 0)
+            self.current.setText(f"当前源视频：{name}"
+                                 f"（{len(self._batch)} 条里的第 {place} 条"
+                                 "，双击下面「批量结果」里任意一行可以换）")
+        else:
+            self.current.setText(f"当前源视频：{name}")
         self._auto = alignment
         self._alignment = alignment
         self.manual.setValue(float(alignment.offset))
         self._render_result()
         self._load_player(Path(str(row.get("path") or "")))
         self.generate_positions()
+
 
     # ================================================================ 显示结果
     def _render_result(self) -> None:
@@ -819,8 +849,15 @@ class AlignBenchPanel(QWidget):
             slice_duration=float(self.slice_seconds.value()))
         self._fill_positions()
         usable, total, ratio = align_probe.coverage_of(self._rows)
-        self.coverage.setText(f"可用 {usable} / {total} 格｜不可用 {total - usable}"
-                              f"｜覆盖率 {ratio * 100:.2f}%")
+        text = (f"可用 {usable} / {total} 格｜不可用 {total - usable}"
+                f"｜覆盖率 {ratio * 100:.2f}%")
+        if total <= 1:
+            # 切片长度和目标歌时长不搭时会出现这种"只有一格"的怪结果，
+            # 用户看到 0/1 完全不知道发生了什么，得直说
+            text += (f"　←　{float(self.slice_seconds.value()):g} 秒一格、"
+                     f"歌只有 {song:.2f} 秒，整首歌只切出 {total} 格。"
+                     "把切片长度调小（常用 2 秒）再生成一次。")
+        self.coverage.setText(text)
         self.diagnosis.setPlainText("\n".join(align_probe.diagnose(align, self._rows)))
 
     def _fill_positions(self) -> None:
@@ -1213,6 +1250,7 @@ class AlignBenchPanel(QWidget):
         self._play_from = self._play_to = 0.0
         for label in self.out.values():
             label.setText("—")
+        self.current.setText("当前源视频：还没对齐")
         self.mapping.setText("时间映射：还没有结果")
         self.origin.setText("来源：—")
         self.diagnosis.clear()

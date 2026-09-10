@@ -611,6 +611,54 @@ def test_preview_audio_is_extracted_in_the_background(work: Path) -> None:
     print(f"  预览音轨：{wav.name}｜{wav.stat().st_size // 1024} KB")
 
 
+def test_batch_shows_the_best_one_not_the_first_one(work: Path) -> None:
+    """批量之后，结果区显示的必须是**最靠得住的那条**。
+
+    这条是补窟窿的：原来取"列表里第一个能算出来的"，于是出现过
+    「结果区一条 rejected、下面表里全是 OK」这种自相矛盾的画面 ——
+    用户根本不知道该信哪个。
+    """
+    panel, _cfg, db = _panel(work)
+    try:
+        rows = [
+            {"path": "D:/d/bad.mp4", "name": "bad.mp4", "error": "", "cached": False,
+             "alignment": _alignment(-14.659, confidence=0.31, status="rejected")},
+            {"path": "D:/d/iffy.mp4", "name": "iffy.mp4", "error": "", "cached": False,
+             "alignment": _alignment(2.0, confidence=0.5, status="low_confidence")},
+            {"path": "D:/d/good.mp4", "name": "good.mp4", "error": "", "cached": True,
+             "alignment": _alignment(3.274, confidence=0.9, status="ok")},
+        ]
+        panel._finished(True, "对齐完成 3／3", {                            # noqa: SLF001
+            "song_duration": 48.0, "source_duration": 30.0, "results": rows})
+
+        assert panel._alignment is rows[2]["alignment"], panel._alignment  # noqa: SLF001
+        assert "good.mp4" in panel.current.text(), panel.current.text()
+        assert "3 条里的第 3 条" in panel.current.text(), panel.current.text()
+        assert panel.batch.rowCount() == 3
+        # 只有一条时不啰嗦"第几条"
+        panel._finished(True, "对齐完成 1／1", {                            # noqa: SLF001
+            "song_duration": 48.0, "source_duration": 30.0, "results": [rows[2]]})
+        assert panel.current.text() == "当前源视频：good.mp4", panel.current.text()
+    finally:
+        db.close()
+
+
+def test_a_silly_slice_length_says_so(work: Path) -> None:
+    """切片长度和歌长不搭时（整首歌只切出 1 格），覆盖率那行必须说明白怎么办。"""
+    panel, _cfg, db = _panel(work)
+    try:
+        panel._payload = {"song_duration": 14.47, "source_duration": 60.0}  # noqa: SLF001
+        panel.slice_seconds.setValue(12.0)
+        panel._adopt({"path": "", "name": "x.mp4",                          # noqa: SLF001
+                      "alignment": _alignment(-14.659, source=60.0, target=14.47,
+                                              confidence=0.73)})
+        text = panel.coverage.text()
+        assert "只切出 1 格" in text, text
+        assert "调小" in text, text
+    finally:
+        db.close()
+
+
 def test_the_layout_is_actually_usable(work: Path) -> None:
     """布局回归：控件不许是默认小尺寸，页面在小窗口下要能滚而不是被压扁。
 
@@ -712,6 +760,8 @@ TESTS = (
     test_failure_is_reported_not_swallowed,
     test_low_confidence_is_shown_as_low,
     test_preview_audio_is_extracted_in_the_background,
+    test_batch_shows_the_best_one_not_the_first_one,
+    test_a_silly_slice_length_says_so,
     test_the_layout_is_actually_usable,
     test_cli_and_gui_share_one_backend,
     test_the_bench_tab_is_wired_into_the_window,
