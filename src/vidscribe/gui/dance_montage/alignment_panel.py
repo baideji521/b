@@ -100,7 +100,10 @@ class AlignmentPanel(QWidget):
             manual = row["manual_offset"]
             cells = (
                 str(row["source_name"] or row["source_path"] or f"#{row['source_video_id']}"),
-                f"{float(row['offset'] or 0.0):+.3f}",
+                # 列名是 offset_seconds 不是 offset —— OFFSET 是 SQL 关键字，
+                # 建表时刻意避开了它。这里写错过一次，直接让界面抛 IndexError
+                f"{float(row['offset_seconds'] or 0.0):+.3f}",
+
                 f"{float(row['confidence'] or 0.0):.3f}",
                 STATUS_TEXT.get(status, status),
                 str(int(row["window_count"] or 0)),

@@ -312,9 +312,61 @@ def test_launch_installs_an_excepthook() -> None:
         sys.excepthook = original
 
 
+def test_every_panel_fills_its_table_with_real_rows(work: Path) -> None:
+    """**每一张表都必须真的有行**，且填表代码真的跑到。
+
+    这条测试是补窟窿的：原来的夹具只造素材，不造对齐记录和混剪版本，
+    于是"对齐面板"和"历史面板"那两段填表循环一次都没执行过 ——
+    界面里把 `offset_seconds` 写成 `offset`（`OFFSET` 是 SQL 关键字，建表时避开了它），
+    测试全绿，一开界面就 IndexError。所以这里坚持：造行 → 刷面板 → 断言行数 > 0。
+    """
+    from dance_fixtures import fake_alignment, fake_library, fake_version, make_project
+
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    song_id, videos, materials = fake_library(db, positions=4, people=("小A", "小B"))
+    for video_id in videos.values():
+        fake_alignment(db, song_id, video_id, offset=1.5)
+    picked = [materials[("小A", 0)], materials[("小B", 1)], materials[("小A", 2)]]
+    fake_version(db, song_id, picked, rendered=True)
+    db.close()
+
+    window = main_page.DanceMontageWindow(cfg)
+    try:
+        window._song_id = song_id                  # noqa: SLF001
+        window.reload()                            # 出错的话这里就抛了
+
+        assert window.alignment.table.rowCount() == 2, window.alignment.table.rowCount()
+        offset_cell = window.alignment.table.item(0, 1)
+        assert offset_cell is not None and offset_cell.text() == "+1.500", \
+            offset_cell.text() if offset_cell else "偏移那一格是空的"
+        assert "共 2 条对齐" in window.alignment.summary.text(), \
+            window.alignment.summary.text()
+
+        assert window.history.versions.rowCount() == 1, window.history.versions.rowCount()
+        assert window.history.events.rowCount() >= len(picked), \
+            window.history.events.rowCount()
+        rendered = window.history.versions.item(0, 4)
+        assert rendered is not None and rendered.text() == "rendered", rendered.text()
+
+        assert window.library.table.rowCount() == 8, window.library.table.rowCount()
+        assert window.candidates.positions.count() == 4
+        assert window.statistics.positions.rowCount() == 4
+        assert window.recommend.strategy.count() >= 1, "策略下拉是空的"
+
+        # 每个面板的详情按钮也得能点（它们同样会碰列名）
+        window.history.versions.selectRow(0)
+        assert window.history._selected_version() > 0                    # noqa: SLF001
+        window.alignment.table.selectRow(0)
+        assert window.alignment._selected() is not None                  # noqa: SLF001
+    finally:
+        window.close()
+
+
 TESTS = (
     test_window_has_all_four_regions,
     test_panels_show_real_library,
+    test_every_panel_fills_its_table_with_real_rows,
     test_filter_presets_reach_the_query,
     test_slice_presets,
     test_manual_selection_flows_to_remix,
@@ -325,6 +377,7 @@ TESTS = (
     test_worker_runs_the_whole_job,
     test_worker_stops_cooperatively,
 )
+
 
 
 

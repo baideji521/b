@@ -212,7 +212,9 @@ __all__ = [
     "ROOT", "SR", "song", "write_wav", "write_video",
     "make_project", "make_song_file", "make_source_video", "delayed", "padded",
     "fake_song", "fake_video", "fake_material", "fake_library",
+    "fake_alignment", "fake_version",
 ]
+
 
 
 # ------------------------------------------------- 纯逻辑测试用的假素材库
@@ -267,7 +269,67 @@ def fake_material(db, song_id: int, video_id: int, segment_index: int, *,
         source_group=source_group, quality=float(quality))
 
 
+def fake_alignment(db, song_id: int, video_id: int, *, offset: float = 1.5,
+                   confidence: float = 0.82, status: str = "ok") -> int:
+    """插一条**真的**对齐记录，走生产用的 `repo.save_alignment`。
+
+    为什么一定要走生产入口而不是手写 INSERT：列名只能有一处真相。
+    界面上曾经把 `offset_seconds` 写成 `offset`（`OFFSET` 是 SQL 关键字，
+    建表时刻意避开了），而当时的夹具根本没有对齐行，界面那段填表循环一次都没跑过，
+    测试全绿、一开界面就抛 IndexError。造行必须走真实路径，测试才盯得住。
+    """
+    from vidscribe.dance import ALIGNMENT_ALGORITHM_VERSION
+    from vidscribe.dance import material_repository as repo
+    from vidscribe.dance.types import DanceAlignment
+
+    alignment = DanceAlignment(
+        offset=float(offset), confidence=float(confidence), method="hybrid",
+        waveform_offset=float(offset), waveform_confidence=float(confidence),
+        chroma_offset=float(offset), chroma_confidence=float(confidence) - 0.1,
+        window_count=5, max_deviation=0.02, agreement=0.9, status=status,
+        algorithm_version=ALIGNMENT_ALGORITHM_VERSION,
+        source_duration=60.0, target_duration=20.0, sample_rate=SR)
+    return repo.save_alignment(db, source_video_id=video_id, target_song_id=song_id,
+                               cache_key=f"ck-{song_id}-{video_id}", alignment=alignment,
+                               config_hash="cfg-test")
+
+
+def fake_version(db, song_id: int, material_ids, *, rendered: bool = True) -> int:
+    """插一版**真的**混剪版本 + 对应的使用事件，返回 version_id。
+
+    和 `fake_alignment` 同一个道理：历史面板那张表也得有行才跑得到填表代码。
+    """
+    from vidscribe.dance import history
+    from vidscribe.dance import material_repository as repo
+    from vidscribe.dance.types import DanceMontageClip
+
+    clips = []
+    for order, material_id in enumerate(material_ids):
+        material = repo.get_material(db, int(material_id))
+        clips.append(DanceMontageClip(
+            order_index=order, segment_index=int(material.segment_index),
+            material_id=int(material_id),
+            target_start=order * 2.0, target_end=order * 2.0 + 2.0,
+            source_start=float(material.source_start), source_end=float(material.source_end),
+            file_path=str(material.file_path), person=str(material.person or ""),
+            source_video_id=int(material.source_video_id)))
+    montage_id = repo.ensure_montage(db, target_song_id=song_id, name="夹具混剪",
+                                     slice_duration=2.0)
+    version_id = repo.save_version(
+        db, montage_id=montage_id, version_index=repo.next_version_index(db, montage_id),
+        signature="-".join(str(int(m)) for m in sorted(material_ids)),
+        strategy_id=None, recommendation_run_id=None, clips=clips,
+        duration=2.0 * len(clips), repeat=None, timeline_json={})
+    history.note_montage(db, version_id, montage_id, clips)
+    if rendered:
+        repo.set_render_status(db, version_id, "rendered",
+                              output_path="C:/fake/out/夹具混剪_v01.mp4")
+        history.note_render(db, version_id, montage_id, clips, ok=True)
+    return version_id
+
+
 def fake_library(db, *, positions: int = 5, people=("小A", "小B", "小C"),
+
                  slice_duration: float = 2.0, title: str = "假歌"):
     """造一个"每个人在每个位置都有一条素材"的方阵库。
 
