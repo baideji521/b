@@ -729,8 +729,11 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
     window = main_page.DanceMontageWindow(cfg)
     try:
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert "对齐/卡点测试" in titles, titles
+        assert "对齐/卡点测试" not in titles, "它不该再单独占一个顶级标签"
         assert window.bench is not None
+        # 它现在是编排台下半场的一个内层标签：选源视频 → 后台对齐 → 切片入库，
+        # 本来就是同一条流程里的一步
+        assert window.studio_lower.indexOf(window.bench) >= 0
         window._song_id = song_id                      # noqa: SLF001
         window.reload()                                # 刷一遍不许抛
         assert window.bench.target.text() == str(song_id), window.bench.target.text()
@@ -738,14 +741,13 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
         assert window.bench.receivers(window.bench.ingest_requested) >= 1
         assert window.bench.receivers(window.bench.changed) >= 1
 
-        # 切到测试台时左边那栏要收起来：三栏工作台挤在 900 像素里没法用
-        window.tabs.setCurrentWidget(window.bench)
+        # 编排台占满整个窗口（左栏收起）；切到普通页时恢复
+        window.tabs.setCurrentWidget(window.studio)
+        window.studio_lower.setCurrentWidget(window.bench)
+        assert window.studio_lower.currentWidget() is window.bench
         assert window.split.sizes()[0] == 0, window.split.sizes()
-        # 切到「音频对齐」这种普通页时要恢复（编排台和测试台一样是宽页，也收着）
         window.tabs.setCurrentWidget(window.alignment)
         assert window.split.sizes()[0] > 0, "切回普通页之后左栏没有恢复"
-        window.tabs.setCurrentWidget(window.studio)
-        assert window.split.sizes()[0] == 0, "编排台也该占满整个窗口"
     finally:
         window.close()
 

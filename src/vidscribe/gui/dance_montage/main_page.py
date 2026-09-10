@@ -169,7 +169,6 @@ class DanceMontageWindow(QMainWindow):
         self.tabs.addTab(self._build_studio(), "🎵 编排台（主音频→分段→素材→成片）")
         self.tabs.addTab(assets, "素材资产")
         self.tabs.addTab(self.alignment, "音频对齐")
-        self.tabs.addTab(self.bench, "对齐/卡点测试")
         self.tabs.addTab(choose, "选择与推荐")
         self.tabs.addTab(review, "历史与统计")
 
@@ -213,7 +212,15 @@ class DanceMontageWindow(QMainWindow):
 
         stack = QSplitter(Qt.Vertical, holder)
         stack.addWidget(self.master)
-        stack.addWidget(self.matrix)
+        # 下半场两块并成一个内层标签页：平时看素材池，要对齐/切片时切过去。
+        # 「对齐/卡点测试」不再单独占一个顶级标签 —— 它本来就是这条流程里的一步
+        # （选源视频 → 后台多线程对齐 → 按当前分段算每格能不能用 → 切片入库），
+        # 摆在同一页里才顺手，而且功能一条没删。
+        lower = QTabWidget(holder)
+        lower.addTab(self.matrix, "📦 素材池 / 🎬 FINAL TIMELINE")
+        lower.addTab(self.bench, "🎬 源视频对齐 / 切片入库")
+        self.studio_lower = lower
+        stack.addWidget(lower)
         stack.setStretchFactor(0, 3)
         stack.setStretchFactor(1, 2)
         stack.setSizes([620, 420])
@@ -274,12 +281,12 @@ class DanceMontageWindow(QMainWindow):
         self.start(job)
 
     def _tab_changed(self, index: int) -> None:
-        """切到「编排台」或「对齐/卡点测试」时把左边那栏收起来，让它占满整个窗口。
+        """切到「编排台」时把左边那栏收起来，让它占满整个窗口。
 
-        这两页都是横向铺开的工作台，挤在 900 像素里没法用；
-        而它们本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
+        编排台是横向铺开的工作台（导航 + 时间轴 + 素材池），挤在 900 像素里没法用；
+        而它本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
         """
-        wide = self.tabs.widget(int(index)) in (self.bench, self.studio)
+        wide = self.tabs.widget(int(index)) is self.studio
         sizes = self.split.sizes()
         if wide:
             if sizes[0] > 0:

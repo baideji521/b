@@ -61,16 +61,18 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.candidates is not None and window.recommend is not None  # ③ 选择与推荐
         assert window.history is not None and window.statistics is not None    # ④ 历史与统计
         assert window.alignment is not None
-        assert window.bench is not None             # 音频对齐 / 卡点测试台
+        assert window.bench is not None             # 源视频对齐 / 切片入库（在编排台里）
         assert window.master is not None            # 主音频编辑区（段落模板）
         assert window.matrix is not None            # 素材矩阵 + FINAL TIMELINE
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert titles == ["🎵 编排台（主音频→分段→素材→成片）", "素材资产", "音频对齐",
-                          "对齐/卡点测试", "选择与推荐", "历史与统计"], titles
-        # 编排台是**一页**：主音频在上、素材矩阵在下，底下三个按钮
+                          "选择与推荐", "历史与统计"], titles
+        # 编排台是**一页**：主音频在上、下半场是素材池/对齐两块，底下三个按钮
         assert window.tabs.widget(0) is window.studio
         assert window.studio_split.widget(0) is window.master
-        assert window.studio_split.widget(1) is window.matrix
+        assert window.studio_split.widget(1) is window.studio_lower
+        assert window.studio_lower.widget(0) is window.matrix
+        assert window.studio_lower.widget(1) is window.bench
         for button in (window.btn_preview_final, window.btn_save_all,
                        window.btn_export_final):
             assert button.minimumHeight() >= 38, button.text()
@@ -361,7 +363,7 @@ def test_settings_survive_a_restart(work: Path) -> None:
         first.bench.chk_sound.setChecked(True)
         first.bench.chk_sound.blockSignals(False)
         first.bench.btn_loop.setChecked(True)
-        first.tabs.setCurrentIndex(4)       # 「选择与推荐」——它不会把左栏收起来
+        first.tabs.setCurrentIndex(3)       # 「选择与推荐」——它不会把左栏收起来
         dialogs.remember("dance.source", work / "girl01.mp4")
     finally:
         first.close()                                       # closeEvent 里落盘
@@ -380,7 +382,7 @@ def test_settings_survive_a_restart(work: Path) -> None:
         assert abs(second.bench.slice_seconds.value() - 1.5) < 1e-6
         assert second.bench.chk_sound.isChecked(), "「带声音」的勾选没记住"
         assert second.bench.btn_loop.isChecked()
-        assert second.tabs.currentIndex() == 4, second.tabs.currentIndex()
+        assert second.tabs.currentIndex() == 3, second.tabs.currentIndex()
         # 分栏比例：离屏窗口没有真实宽度，Qt 会按控件宽度重新缩放 setSizes，
         # 两次开窗口的可用宽度还可能不一样。所以这里只钉住"两栏都还在、比例大致一致"，
         # 不比字面值 —— 比字面值测的是 Qt 的缩放实现，不是我们存没存对
