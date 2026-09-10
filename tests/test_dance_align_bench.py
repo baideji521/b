@@ -105,6 +105,15 @@ class FakePlayer:
     def position(self) -> float:
         return self._position
 
+    def set_audio_file(self, path) -> bool:
+        self.calls.append(("audio", None if path is None else str(path)))
+        self.audio = None if path is None else str(path)
+        return path is not None
+
+    def set_audio_enabled(self, enabled: bool) -> None:
+        self.calls.append(("audio_on", bool(enabled)))
+        self.audio_on = bool(enabled)
+
     def seeks(self) -> list[float]:
         return [value for name, value in
                 ((c[0], c[1] if len(c) > 1 else None) for c in self.calls)
@@ -543,6 +552,65 @@ def test_the_old_alignment_panel_can_still_fix_an_offset(work: Path) -> None:
     db.close()
 
 
+def test_preview_audio_is_extracted_in_the_background(work: Path) -> None:
+    """「带声音」那一勾：音轨真解得出来（wav），第二次走缓存，面板拿到之后真挂上去。
+
+    听源视频的原声就是**听对齐**：offset 求对了的话，源视频这一段的音乐
+    和目标歌这一格的音乐是同一段。
+    """
+    from dance_fixtures import make_project, make_song_file, make_source_video
+
+    from vidscribe.gui.dance_montage.align_worker import ClipJobWorker
+
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    _song_path, pcm = make_song_file(cfg, "target.wav", duration=6.0)
+    source = make_source_video(cfg, "girl01.mp4", pcm, fps=24.0)
+    db.close()
+
+    job = {"kind": "audio", "source": str(source),
+           "cache_dir": str(cfg.path("cache_dir"))}
+    finished: list[tuple] = []
+    worker = ClipJobWorker(cfg, job)
+    worker.done.connect(lambda ok, msg: finished.append((ok, msg)))
+    worker.run()
+
+    assert finished, "done 一次都没发"
+    ok, message = finished[0]
+    assert ok, message
+    wav = Path(message)
+    assert wav.is_file() and wav.suffix == ".wav", message
+    assert wav.stat().st_size > 2048, wav.stat().st_size
+
+    logs: list[str] = []
+    again = ClipJobWorker(cfg, job)
+    again.log.connect(logs.append)
+    again.done.connect(lambda ok2, msg2: finished.append((ok2, msg2)))
+    again.run()
+    assert finished[1][0] and finished[1][1] == message
+    assert any("复用缓存" in line for line in logs), logs
+
+    # 面板那一侧：拿到 wav 就挂给播放器，并按勾选开声音
+    player = FakePlayer()
+    panel, _cfg2, db2 = _panel(work, player=player)
+    try:
+        panel.chk_sound.blockSignals(True)
+        panel.chk_sound.setChecked(True)
+        panel.chk_sound.blockSignals(False)
+        panel._audio_done(True, str(wav))                                # noqa: SLF001
+        assert ("audio", str(wav)) in player.calls, player.calls
+        assert ("audio_on", True) in player.calls, player.calls
+        assert panel.chk_sound.isChecked()
+
+        # 解不出来时：取消勾选并说清楚，别让人以为静音是对齐问题
+        panel._audio_done(False, "这个视频里没有能用的音轨")             # noqa: SLF001
+        assert not panel.chk_sound.isChecked()
+        assert "音轨解不出来" in panel.play_hint.text(), panel.play_hint.text()
+    finally:
+        db2.close()
+    print(f"  预览音轨：{wav.name}｜{wav.stat().st_size // 1024} KB")
+
+
 def test_the_layout_is_actually_usable(work: Path) -> None:
     """布局回归：控件不许是默认小尺寸，页面在小窗口下要能滚而不是被压扁。
 
@@ -643,6 +711,7 @@ TESTS = (
     test_missing_files_do_not_crash_the_panel,
     test_failure_is_reported_not_swallowed,
     test_low_confidence_is_shown_as_low,
+    test_preview_audio_is_extracted_in_the_background,
     test_the_layout_is_actually_usable,
     test_cli_and_gui_share_one_backend,
     test_the_bench_tab_is_wired_into_the_window,

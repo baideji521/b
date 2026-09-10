@@ -32,6 +32,8 @@ from PyQt5.QtWidgets import (
 
 
 from ...logging_setup import get_logger
+from .. import settings as gui_settings
+from . import dialogs
 from .align_bench import AlignBenchPanel
 from .alignment_panel import AlignmentPanel
 from .candidate_panel import CandidatePanel
@@ -57,6 +59,14 @@ class DanceMontageWindow(QMainWindow):
         self.db: Any = None
         self.worker: DanceMontageWorker | None = None
         self._song_id = 0
+        # 上次那份界面状态（窗口位置、分栏比例、各输入框、上次选的目录）。
+        # 和主界面共用 gui_settings.json，但各占一个键，互不干扰
+        self.settings = gui_settings.load(cfg)
+        self.state: dict[str, Any] = self.settings.setdefault("dance_window", {})
+        self._loading = True
+        dialogs.configure(bool(cfg.dance.get("native_dialogs", True)))
+        dialogs.install_memory(self.state.setdefault("dirs", {}), self.save_settings)
+
 
         self.setWindowTitle(TITLE)
         self.resize(1500, 950)
@@ -77,6 +87,49 @@ class DanceMontageWindow(QMainWindow):
         self._wire()
         self._open_db()
         self.reload()
+        self._apply_settings()
+        self._loading = False
+
+    # ------------------------------------------------------------ 记住上次的样子
+    def _apply_settings(self) -> None:
+        """把上次的窗口位置、分栏比例、各输入框套回来。坏值一律忽略，绝不因此打不开。"""
+        state = self.state
+        geo = state.get("window")
+        if isinstance(geo, list) and len(geo) == 4 and all(isinstance(v, int) for v in geo):
+            self.setGeometry(*geo)
+        if state.get("maximized"):
+            self.showMaximized()
+        sizes = state.get("split")
+        if (isinstance(sizes, list) and len(sizes) == 2
+                and all(isinstance(v, int) and v >= 0 for v in sizes) and sum(sizes) > 0):
+            self.split.setSizes(sizes)
+            self._left_width = sizes[0] or 560
+        self.remix.restore(state.get("remix") or {})
+        self.bench.restore(state.get("bench") or {})
+        index = state.get("tab")
+        if isinstance(index, int) and 0 <= index < self.tabs.count():
+            self.tabs.setCurrentIndex(index)
+        if str(self.remix.song.text()).strip().isdigit():
+            self._song_typed(self.remix.song.text())
+
+    def save_settings(self) -> None:
+        """存设置。启动套用阶段不写回去，否则会把默认值盖掉上次那份。"""
+        if getattr(self, "_loading", True):
+            return
+        # 最大化时 geometry() 是全屏尺寸，存 normalGeometry 才还原得回来
+        rect = self.normalGeometry() if self.isMaximized() else self.geometry()
+        if rect.width() > 0 and rect.height() > 0:
+            self.state["window"] = [rect.x(), rect.y(), rect.width(), rect.height()]
+        self.state["maximized"] = bool(self.isMaximized())
+        # 测试台那一页会把左栏收成 0，别把 0 存成"用户想要的宽度"
+        sizes = self.split.sizes()
+        self.state["split"] = ([getattr(self, "_left_width", 560), sizes[1]]
+                               if sizes and sizes[0] == 0 else list(sizes))
+        self.state["tab"] = int(self.tabs.currentIndex())
+        self.state["remix"] = self.remix.state()
+        self.state["bench"] = self.bench.state()
+        gui_settings.save(self.cfg, self.settings)
+
 
     # ------------------------------------------------------------------ 界面
     def _build_body(self) -> QWidget:
@@ -411,6 +464,7 @@ class DanceMontageWindow(QMainWindow):
             self.worker.stop()
             self.worker.wait(15000)
         self.bench.shutdown()          # 测试台自己那两个线程也要收干净
+        self.save_settings()           # 窗口位置、分栏比例、各输入框都留到下次
         if self.db is not None:
             self.db.close()
             self.db = None

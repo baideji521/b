@@ -182,7 +182,15 @@ class DanceAlignWorker(QThread):
 
 
 class ClipJobWorker(QThread):
-    """导出一个测试片段。单独一个线程，因为渲染要 import `av` 并且真的在编码。
+    """后台的两件杂活：解一条预览音轨、导出一个测试片段。
+
+    都放在线程里是同一个理由：两件事都要 `import av` 并且真的在解码/编码，
+    主线程干这个会把界面冻住好几秒。
+
+    `job["kind"]`：
+        `"audio"`  把源视频的音轨解成 wav（`winsound` 只认 PCM wav），
+                   落在 cache 目录，同一个视频只解一次
+        其它       导出 `start → end` 这一段成一个独立文件（默认）
 
     刻意**不**做"顺手把整格素材都导出来"这种事：这里只是给人工细看用的一次性副本，
     正式素材一律由 `material_slice.render_plan` 在切片流程里产出。
@@ -198,31 +206,55 @@ class ClipJobWorker(QThread):
 
     def run(self) -> None:
         try:
-            from ...dance import material_slice, media_backend  # noqa: PLC0415
-            from ...dance.types import SliceSpec  # noqa: PLC0415
-
-            start = float(self.job["start"])
-            end = float(self.job["end"])
-            target = Path(str(self.job["target"]))
-            target.parent.mkdir(parents=True, exist_ok=True)
-            spec = SliceSpec(segment_index=0, target_start=0.0, target_end=end - start,
-                             source_start=start, source_end=end)
-            canvas = media_backend.Canvas(
-                width=int(self.cfg.dance["canvas_width"]),
-                height=int(self.cfg.dance["canvas_height"]),
-                fps=float(self.cfg.dance["canvas_fps"]))
-            self.log.emit(f"[导出] {start:.3f}s → {end:.3f}s → {target.name}")
-            material_slice.render_material(
-                str(self.job["source"]), spec, target, canvas=canvas,
-                backend=media_backend.resolve(str(self.cfg.dance["media_backend"])),
-                on_log=self.log.emit)
-            self.done.emit(True, str(target))
+            if str(self.job.get("kind") or "") == "audio":
+                self.done.emit(True, self._extract_audio())
+                return
+            self.done.emit(True, self._export_clip())
         except Exception as exc:  # noqa: BLE001 - 后台线程抛出去就没人接了
             import traceback  # noqa: PLC0415
 
-            logger.error("导出测试片段失败：%s", exc)
+            logger.error("后台杂活失败：%s", exc)
             logger.error(traceback.format_exc())
             self.done.emit(False, f"{type(exc).__name__}: {exc}")
+
+    def _extract_audio(self) -> str:
+        """源视频音轨 → wav。复用主项目那套（`audio.wav_path` + `extract_wav`）。"""
+        from ...audio import extract_wav, wav_path  # noqa: PLC0415
+
+        source = Path(str(self.job["source"]))
+        cache = Path(str(self.job.get("cache_dir") or "."))
+        cache.mkdir(parents=True, exist_ok=True)
+        target = wav_path(cache, source)
+        if target.is_file():
+            self.log.emit(f"[声音] 复用缓存音轨 {target.name}")
+            return str(target)
+        self.log.emit(f"[声音] 解音轨 {source.name} → {target.name}")
+        made = extract_wav(source, target)
+        if made is None or not Path(made).is_file():
+            raise RuntimeError("这个视频里没有能用的音轨")
+        return str(made)
+
+    def _export_clip(self) -> str:
+        from ...dance import material_slice, media_backend  # noqa: PLC0415
+        from ...dance.types import SliceSpec  # noqa: PLC0415
+
+        start = float(self.job["start"])
+        end = float(self.job["end"])
+        target = Path(str(self.job["target"]))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        spec = SliceSpec(segment_index=0, target_start=0.0, target_end=end - start,
+                         source_start=start, source_end=end)
+        canvas = media_backend.Canvas(
+            width=int(self.cfg.dance["canvas_width"]),
+            height=int(self.cfg.dance["canvas_height"]),
+            fps=float(self.cfg.dance["canvas_fps"]))
+        self.log.emit(f"[导出] {start:.3f}s → {end:.3f}s → {target.name}")
+        material_slice.render_material(
+            str(self.job["source"]), spec, target, canvas=canvas,
+            backend=media_backend.resolve(str(self.cfg.dance["media_backend"])),
+            on_log=self.log.emit)
+        return str(target)
+
 
 
 __all__ = ["ENVELOPE_BUCKETS", "DanceAlignWorker", "ClipJobWorker"]

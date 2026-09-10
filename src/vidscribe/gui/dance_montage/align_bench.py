@@ -142,9 +142,12 @@ class AlignBenchPanel(QWidget):
         self._loop = False
         self._play_from = 0.0
         self._play_to = 0.0
+        self._audio_wav: str | None = None
 
         # 整页放进一个滚动区：窗口小到 1000×640 时，三栏工作台不可能全塞进去 ——
-        # 那种情况下**宁可让用户滚**，也不许把卡点表和播放器一起压成两行高
+        # 那种情况下**宁可让用户滚**，也不许把卡点表和播放器一起压成两行高。
+        # 但 ⑧ 入库那三个按钮**钉在滚动区外面**：它们是这一页的出口，
+        # 永远得看得见、点得到，不能因为内容长就被滚到屏幕外。
         page = QWidget(self)
         inner = QVBoxLayout(page)
         inner.setContentsMargins(8, 8, 8, 8)
@@ -156,9 +159,9 @@ class AlignBenchPanel(QWidget):
         stack.setStretchFactor(0, 4)
         stack.setStretchFactor(1, 1)
         stack.setSizes([520, 210])
+        self._stack = stack
         inner.addWidget(stack, 1)
-        inner.addWidget(self._build_save())
-        page.setMinimumHeight(760)                # 低于这个高度就出滚动条
+        page.setMinimumHeight(640)                # 低于这个高度就出滚动条
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -166,7 +169,9 @@ class AlignBenchPanel(QWidget):
         scroll.setWidget(page)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
+        outer.setSpacing(6)
+        outer.addWidget(scroll, 1)
+        outer.addWidget(self._build_save())
 
     # ================================================================ 建界面
     #
@@ -220,6 +225,7 @@ class AlignBenchPanel(QWidget):
         body.addWidget(middle)
         body.addWidget(right)
         body.setSizes([420, 560, 520])
+        self._body, self._middle, self._right = body, middle, right
         return body
 
 
@@ -229,7 +235,7 @@ class AlignBenchPanel(QWidget):
         inner = QVBoxLayout(box)
         inner.setSpacing(8)
         self.player = FramePlayer(box)
-        self.player.setMinimumHeight(220)
+        self.player.setMinimumHeight(180)
         # 主界面那句"把视频拖进来"在这一页是错的：这里的视频由上面的输入框决定
         self.player.view.setText("对齐之后在卡点表里点一格，这里就播源视频的那一段")
         inner.addWidget(self.player, 1)
@@ -241,10 +247,19 @@ class AlignBenchPanel(QWidget):
         self.btn_halt.setMaximumWidth(90)
         self.btn_loop = QCheckBox("⟳ 循环", box)
         self.btn_loop.setMinimumHeight(44)
+        self.chk_sound = QCheckBox("带声音", box)
+        self.chk_sound.setMinimumHeight(44)
+        self.chk_sound.setToolTip(
+            "放出来的是**源视频自己的原声**。\n"
+            "这正是听对齐的办法：offset 求对了的话，源视频这一段的音乐\n"
+            "就应该和目标歌这一格的音乐是同一段 —— 听着对上了就是对上了。\n"
+            "（第一次勾选要先把音轨解成 wav，几秒钟，后台做。）")
         row.addWidget(self.btn_play, 1)
         row.addWidget(self.btn_halt)
         row.addWidget(self.btn_loop)
+        row.addWidget(self.chk_sound)
         inner.addLayout(row)
+
 
         self.play_hint = QLabel("还没有可播的区间", box)
         self.play_hint.setWordWrap(True)
@@ -252,10 +267,12 @@ class AlignBenchPanel(QWidget):
         inner.addWidget(self.play_hint)
 
         self.player.positionChanged.connect(self._on_position)
+        self.player.audioFailed.connect(self._audio_failed)
         self.btn_play.clicked.connect(self._play_span)
         self.btn_halt.clicked.connect(self._halt)
         self.btn_loop.stateChanged.connect(
             lambda state: setattr(self, "_loop", bool(state)))
+        self.chk_sound.stateChanged.connect(self._toggle_sound)
         return box
 
     def _build_timeline(self) -> QGroupBox:
@@ -270,8 +287,9 @@ class AlignBenchPanel(QWidget):
         """批量结果和运行日志共用一块地方：都是"看一眼就好"的东西，不该长期占屏。"""
         tabs = QTabWidget(self)
         tabs.setMaximumHeight(220)
-
+        # 底下这块要能被挤到很小：整页高度不够时，先牺牲它，别牺牲卡点表和入库按钮
         self.batch = QTableWidget(0, len(BATCH_COLUMNS), tabs)
+        self.batch.setMinimumHeight(70)
         self.batch.setHorizontalHeaderLabels(BATCH_COLUMNS)
         self.batch.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.batch.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -412,7 +430,7 @@ class AlignBenchPanel(QWidget):
 
         self.diagnosis = QTextEdit(box)
         self.diagnosis.setReadOnly(True)
-        self.diagnosis.setMinimumHeight(110)
+        self.diagnosis.setMinimumHeight(90)
         self.diagnosis.setPlaceholderText("诊断会写在这里")
         layout.addWidget(self.diagnosis)
 
@@ -550,24 +568,72 @@ class AlignBenchPanel(QWidget):
     def say(self, line: str) -> None:
         self.log.append(str(line))
 
+    # ------------------------------------------------------------ 记住上次的设置
+    def state(self) -> dict[str, Any]:
+        """值得记住的：两个路径、测试参数、三个勾选框、三条分割条的比例。
+
+        **不记**对齐结果和卡点表 —— 那是算出来的东西，重开界面重算一遍才可信。
+        """
+        return {
+            "source": self.source.text().strip(),
+            "target": self.target.text().strip(),
+            "at": float(self.at.value()),
+            "slice": float(self.slice_seconds.value()),
+            "loop": bool(self.btn_loop.isChecked()),
+            "sound": bool(self.chk_sound.isChecked()),
+            "force": bool(self.force.isChecked()),
+            "body": list(self._body.sizes()),
+            "middle": list(self._middle.sizes()),
+            "right": list(self._right.sizes()),
+            "stack": list(self._stack.sizes()),
+        }
+
+    def restore(self, data: dict[str, Any]) -> None:
+        if not isinstance(data, dict):
+            return
+        for widget, key in ((self.source, "source"), (self.target, "target")):
+            if isinstance(data.get(key), str) and data[key]:
+                widget.setText(data[key])
+        for widget, key in ((self.at, "at"), (self.slice_seconds, "slice")):
+            if isinstance(data.get(key), (int, float)):
+                widget.setValue(float(data[key]))
+        for widget, key in ((self.btn_loop, "loop"), (self.force, "force")):
+            if isinstance(data.get(key), bool):
+                widget.setChecked(data[key])
+        if isinstance(data.get("sound"), bool):
+            # 勾选状态直接写进去、**不触发**槽：这会儿还没有源视频，
+            # 触发只会立刻自己取消掉。真正解音轨是在 `_load_player` 里按这个勾选做的
+            self.chk_sound.blockSignals(True)
+            self.chk_sound.setChecked(data["sound"])
+            self.chk_sound.blockSignals(False)
+        for splitter, key in ((self._body, "body"), (self._middle, "middle"),
+                              (self._right, "right"), (self._stack, "stack")):
+            sizes = data.get(key)
+            if (isinstance(sizes, list) and len(sizes) == splitter.count()
+                    and all(isinstance(v, int) and v >= 0 for v in sizes)
+                    and sum(sizes) > 0):
+                splitter.setSizes(sizes)
+
+
     # ---------------------------------------------------------------- 选文件
     def _pick_source(self) -> None:
         path = dialogs.open_file(self, "选源舞蹈视频", self.cfg.dance_path("source_dir"),
-                                 dialogs.VIDEO_FILTER)
+                                 dialogs.VIDEO_FILTER, "dance.source")
         if path:
             self.source.setText(path)
 
     def _pick_target(self) -> None:
         path = dialogs.open_file(self, "选目标歌", self.cfg.dance_path("song_dir"),
-                                 dialogs.AUDIO_FILTER)
+                                 dialogs.AUDIO_FILTER, "dance.song")
         if path:
             self.target.setText(path)
 
     def _pick_more(self) -> None:
         for path in dialogs.open_files(self, "批量选源舞蹈视频",
                                        self.cfg.dance_path("source_dir"),
-                                       dialogs.VIDEO_FILTER):
+                                       dialogs.VIDEO_FILTER, "dance.source"):
             self.more.addItem(path)
+
 
     # ================================================================ 跑对齐
     def sources(self) -> list[str]:
@@ -873,11 +939,73 @@ class AlignBenchPanel(QWidget):
     def _load_player(self, source: Path) -> None:
         if not source.is_file():
             return
+        self._audio_wav = None              # 换了源视频，上一条音轨作废
+        self.player.set_audio_file(None)
         if not self.player.open(str(source)):
             self.play_hint.setText(f"这个视频解不开：{source.name}")
             return
         self.play_hint.setText(f"已载入 {source.name}｜"
                                f"{self.player.duration():.2f}s，选一格就能播")
+        if self.chk_sound.isChecked():
+            self._prepare_audio()
+
+    # ------------------------------------------------------------ 带声音预览
+    def _toggle_sound(self, state: int) -> None:
+        """勾上「带声音」= 放源视频自己的原声。
+
+        这是**听对齐**的办法：offset 求对了的话，源视频这一段的音乐就该和目标歌
+        这一格的音乐是同一段。所以不需要同时放两路声音（`winsound` 也只能放一路），
+        听源视频的原声就等于在听"这个动作当时踩的是哪一句"。
+        """
+        if not bool(state):
+            self.player.set_audio_enabled(False)
+            return
+        if self._audio_wav is not None and Path(self._audio_wav).is_file():
+            self.player.set_audio_file(self._audio_wav)
+            self.player.set_audio_enabled(True)
+            return
+        self._prepare_audio()
+
+    def _prepare_audio(self) -> None:
+        """后台把源视频的音轨解成 wav（`winsound` 只认 PCM wav）。
+
+        放在后台是硬要求：解码走 PyAV，主线程干这个会把界面冻住几秒。
+        """
+        source = Path(self.source.text().strip())
+        if not source.is_file():
+            self.play_hint.setText("先选一个源视频，再勾「带声音」")
+            self.chk_sound.setChecked(False)
+            return
+        if self.side is not None and self.side.isRunning():
+            self.say("[声音] 上一个后台活儿还没完，等一下再勾")
+            return
+        self.say(f"[声音] 正在解 {source.name} 的音轨…（只做一次，之后走缓存）")
+        self.side = ClipJobWorker(self.cfg, {
+            "kind": "audio", "source": str(source),
+            "cache_dir": str(self.cfg.path("cache_dir"))}, self)
+        self.side.log.connect(self.say)
+        self.side.done.connect(self._audio_done)
+        self.side.start()
+
+    def _audio_done(self, ok: bool, message: str) -> None:
+        if not ok:
+            self.chk_sound.setChecked(False)
+            self.play_hint.setText(f"音轨解不出来，先看画面吧：{message}")
+            return
+        self._audio_wav = message
+        if not self.player.set_audio_file(message):
+            self.chk_sound.setChecked(False)
+            self.play_hint.setText("这台机器放不出声音（没有 winsound），只能看画面")
+            return
+        self.player.set_audio_enabled(self.chk_sound.isChecked())
+        self.say("[声音] 音轨就绪，现在播卡点会带源视频原声")
+
+    def _audio_failed(self, reason: str) -> None:
+        """播放器那边报声音不可用：取消勾选并说清楚，别让用户以为静音是对齐问题。"""
+        self.chk_sound.setChecked(False)
+        self.play_hint.setText(f"声音关了：{reason}")
+        self.say(f"[声音] {reason}")
+
 
     def _play_span(self) -> None:
         """只播算出来的那一段：seek 到 source_start，播到 source_end 自动停。
@@ -1052,7 +1180,7 @@ class AlignBenchPanel(QWidget):
         default = (Path(self.cfg.dance_path("output_dir"))
                    / f"{source.stem}_test_{self._play_from:.3f}-{self._play_to:.3f}.mp4")
         target = dialogs.save_file(self, "导出测试片段", str(default.parent),
-                                   "视频 (*.mp4)")
+                                   "视频 (*.mp4)", "dance.export")
         if not target:
             return
         self.side = ClipJobWorker(self.cfg, {
@@ -1075,6 +1203,7 @@ class AlignBenchPanel(QWidget):
         """只清页面，**不动库里任何正式数据**。"""
         self.player.pause()
         self.player.close_video()
+        self._audio_wav = None
         self.source.clear()
         self.more.clear()
         self._payload = {}

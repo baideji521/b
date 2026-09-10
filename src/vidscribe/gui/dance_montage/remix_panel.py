@@ -262,15 +262,60 @@ class RemixPanel(QWidget):
             self.songs.setCurrentIndex(index)
         self.songs.blockSignals(False)
 
+    # ------------------------------------------------------------ 记住上次的设置
+    def state(self) -> dict[str, Any]:
+        """这一栏里值得记住的东西。**不记源视频列表**：那是一次性的活儿清单，
+        下次开界面还挂着上回那几十个文件反而添乱。"""
+        return {
+            "song": self.song.text().strip(),
+            "slice_preset": int(self.slice_preset.currentIndex()),
+            "slice_custom": float(self.slice_custom.value()),
+            "versions": int(self.versions.value()),
+            "workers": int(self.workers.value()),
+            "person": self.person.text().strip(),
+            "out_dir": self.out_dir.text().strip(),
+            "recommend": bool(self.recommend.isChecked()),
+            "force": bool(self.force.isChecked()),
+            "plan_only": bool(self.plan_only.isChecked()),
+            "do_slice": bool(self.do_slice.isChecked()),
+            "do_remix": bool(self.do_remix.isChecked()),
+            "show_retired": bool(self.show_retired.isChecked()),
+        }
+
+    def restore(self, data: dict[str, Any]) -> None:
+        """把上次的设置套回控件。缺哪个键就保持默认，坏值一律忽略。"""
+        if not isinstance(data, dict):
+            return
+        if isinstance(data.get("song"), str):
+            self.song.setText(data["song"])
+        index = data.get("slice_preset")
+        if isinstance(index, int) and 0 <= index < self.slice_preset.count():
+            self.slice_preset.setCurrentIndex(index)
+        for widget, key in ((self.slice_custom, "slice_custom"),
+                            (self.versions, "versions"), (self.workers, "workers")):
+            value = data.get(key)
+            if isinstance(value, (int, float)):
+                widget.setValue(type(widget.value())(value))
+        for widget, key in ((self.person, "person"), (self.out_dir, "out_dir")):
+            if isinstance(data.get(key), str) and data[key]:
+                widget.setText(data[key])
+        for widget, key in ((self.recommend, "recommend"), (self.force, "force"),
+                            (self.plan_only, "plan_only"), (self.do_slice, "do_slice"),
+                            (self.do_remix, "do_remix"),
+                            (self.show_retired, "show_retired")):
+            if isinstance(data.get(key), bool):
+                widget.setChecked(data[key])
 
     # ------------------------------------------------------------------ 交互
+
     def _slice_mode(self) -> None:
         custom = float(self.slice_preset.currentData() or 2.0) < 0
         self.slice_custom.setEnabled(custom)
         self.slice_changed.emit(self.slice_duration())
 
     def _pick_song(self) -> None:
-        path = self._open_file("选目标歌", self.cfg.dance_path("song_dir"), AUDIO_FILTER)
+        path = self._open_file("选目标歌", self.cfg.dance_path("song_dir"), AUDIO_FILTER,
+                               "dance.song")
         if path:
             self.song.setText(path)
 
@@ -294,37 +339,39 @@ class RemixPanel(QWidget):
 
     def _add_files(self) -> None:
         for path in self._open_files("选源舞蹈视频", self.cfg.dance_path("source_dir"),
-                                     VIDEO_FILTER):
+                                     VIDEO_FILTER, "dance.source"):
             self.sources.addItem(path)
 
     def _add_dir(self) -> None:
-        path = self._open_dir("选一个装满源视频的目录", self.cfg.dance_path("source_dir"))
+        path = self._open_dir("选一个装满源视频的目录", self.cfg.dance_path("source_dir"),
+                              "dance.source_dir")
         if path:
             self.sources.addItem(path)
 
     def _pick_out(self) -> None:
-        path = self._open_dir("成品放哪儿", self.out_dir.text())
+        path = self._open_dir("成品放哪儿", self.out_dir.text(), "dance.output")
         if path:
             self.out_dir.setText(path)
 
     # ---------------------------------------------------- 选文件（统一走这三个）
     #
-    # 规矩本身和为什么这么定，见 `dialogs.py`：一律用 Qt 自己画的对话框。
+    # 规矩本身和为什么这么定，见 `dialogs.py`：默认系统对话框 + 每个用途各记一个目录。
     # 这几个方法只是转发 —— 保留它们是因为面板内部和测试都按名字在调。
     def _dialog_options(self):
         return dialogs.options()
 
-    def _start_dir(self, folder) -> str:
-        return dialogs.start_dir(folder)
+    def _start_dir(self, folder, key: str = "") -> str:
+        return dialogs.start_dir(folder, key)
 
-    def _open_file(self, title: str, folder, filters: str) -> str:
-        return dialogs.open_file(self, title, folder, filters)
+    def _open_file(self, title: str, folder, filters: str, key: str = "") -> str:
+        return dialogs.open_file(self, title, folder, filters, key)
 
-    def _open_files(self, title: str, folder, filters: str) -> list[str]:
-        return dialogs.open_files(self, title, folder, filters)
+    def _open_files(self, title: str, folder, filters: str, key: str = "") -> list[str]:
+        return dialogs.open_files(self, title, folder, filters, key)
 
-    def _open_dir(self, title: str, folder) -> str:
-        return dialogs.open_dir(self, title, folder)
+    def _open_dir(self, title: str, folder, key: str = "") -> str:
+        return dialogs.open_dir(self, title, folder, key)
+
 
 
 

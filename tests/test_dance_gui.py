@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -261,13 +262,17 @@ def test_worker_stops_cooperatively(work: Path) -> None:
     assert not data.get("outputs"), "已经喊停了却还是出了片"
 
 
-def test_file_pickers_never_touch_the_native_dialog(work: Path) -> None:
-    """选文件一律走 Qt 自己画的对话框，且起始目录不存在时要退回主目录。
+def test_file_pickers_use_the_system_dialog_and_remember_the_folder(work: Path) -> None:
+    """选文件走**系统对话框**，而且每个用途各记一个"上次去过的目录"。
 
-    为什么盯这个：Windows 原生对话框会加载 shell 扩展（缩略图/网盘/杀软插件），
-    任何一个卡住整个界面就一起没响应，而且卡在系统代码里，日志上一个字都看不到。
+    这里曾经反过来钉着"必须用 Qt 自绘"，理由是怀疑原生对话框把界面拖死了 ——
+    后来查清楚那次卡死是对齐面板读了不存在的列名抛 IndexError，跟对话框无关。
+    系统对话框认得快速访问/最近使用/网盘，找素材顺手得多，所以改回默认用它，
+    但 `dance.native_dialogs = false` 的退路仍然要真的管用。
     """
     from PyQt5.QtWidgets import QFileDialog
+
+    from vidscribe.gui.dance_montage import dialogs
 
     window, _song_id, _m = _window(work)
     try:
@@ -287,16 +292,96 @@ def test_file_pickers_never_touch_the_native_dialog(work: Path) -> None:
 
         assert len(seen) == 1, seen
         _title, folder, options = seen[0]
-        assert options & int(QFileDialog.DontUseNativeDialog), \
-            "选文件用了 Windows 原生对话框 —— 它会被 shell 扩展拖死"
+        assert not options & int(QFileDialog.DontUseNativeDialog), \
+            "默认该用系统自带的对话框"
         assert Path(folder).is_dir(), f"起始目录不存在：{folder}"
 
-        # 起始目录是死路径时退回主目录，而不是把对话框指过去
-        assert Path(panel._start_dir("Z:/根本没有这个盘/x")) == Path.home()   # noqa: SLF001
-        assert Path(panel._start_dir("")) == Path.home()                     # noqa: SLF001
-        assert Path(panel._start_dir(work)) == work                          # noqa: SLF001
+        # 退路：配置关掉之后真的换成 Qt 自绘
+        dialogs.configure(False)
+        try:
+            assert int(dialogs.options()) & int(QFileDialog.DontUseNativeDialog)
+        finally:
+            dialogs.configure(True)
+
+        # 记忆：选过一次之后，同一个用途下次就从那个目录开始
+        store: dict = {}
+        dialogs.install_memory(store, None)
+        try:
+            picked = work / "girl01.mp4"
+            picked.write_bytes(b"x")
+            dialogs.remember("dance.source", picked)
+            assert store["dance.source"] == str(work)
+            assert Path(dialogs.start_dir("", "dance.source")) == work
+            # 没记过的用途照旧退回默认目录 / 主目录
+            assert Path(dialogs.start_dir("Z:/根本没有这个盘/x", "dance.song")) == Path.home()
+            assert Path(dialogs.start_dir("")) == Path.home()
+            assert Path(dialogs.start_dir(work)) == work
+        finally:
+            dialogs.install_memory(window.state.setdefault("dirs", {}),
+                                   window.save_settings)
     finally:
         window.close()
+
+
+
+def test_settings_survive_a_restart(work: Path) -> None:
+    """关掉再开，界面该长回上次的样子：窗口大小、分栏比例、当前标签、各输入框。
+
+    存在 `gui_settings.json` 里（和主界面同一个文件，各占一个键）。
+    """
+    from vidscribe.gui.dance_montage import dialogs
+
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    song_id, _videos, _materials = fake_library(db, positions=4, people=("小A",))
+    db.close()
+
+    first = main_page.DanceMontageWindow(cfg)
+    try:
+        first.resize(1320, 880)
+        first.split.setSizes([480, 840])
+        first.remix.song.setText(str(song_id))
+        first.remix.slice_preset.setCurrentIndex(1)          # 1.5 秒
+        first.remix.person.setText("小A")
+        first.remix.recommend.setChecked(False)
+        first.bench.source.setText(str(work / "girl01.mp4"))
+        first.bench.at.setValue(12.5)
+        first.bench.slice_seconds.setValue(1.5)
+        # 只测"记不记得住"，所以别触发槽：真勾选会去解音轨，那是另一码事
+        first.bench.chk_sound.blockSignals(True)
+        first.bench.chk_sound.setChecked(True)
+        first.bench.chk_sound.blockSignals(False)
+        first.bench.btn_loop.setChecked(True)
+        first.tabs.setCurrentIndex(3)
+        dialogs.remember("dance.source", work / "girl01.mp4")
+    finally:
+        first.close()                                       # closeEvent 里落盘
+
+    saved = json.loads((Path(cfg.root) / "gui_settings.json").read_text(encoding="utf-8"))
+    assert "dance_window" in saved, saved.keys()
+
+    second = main_page.DanceMontageWindow(cfg)
+    try:
+        assert second.remix.song.text() == str(song_id)
+        assert second.remix.slice_duration() == 1.5, second.remix.slice_duration()
+        assert second.remix.person.text() == "小A"
+        assert second.remix.recommend.isChecked() is False
+        assert second.bench.source.text().endswith("girl01.mp4")
+        assert abs(second.bench.at.value() - 12.5) < 1e-6
+        assert abs(second.bench.slice_seconds.value() - 1.5) < 1e-6
+        assert second.bench.chk_sound.isChecked(), "「带声音」的勾选没记住"
+        assert second.bench.btn_loop.isChecked()
+        assert second.tabs.currentIndex() == 3, second.tabs.currentIndex()
+        # 分栏比例：离屏窗口没有真实宽度，Qt 会把 setSizes 缩放掉，所以这里比的是
+        # 「存下来的那份和套回来的那份一致」，而不是当初写进去的字面值
+        assert second.split.sizes() == saved["dance_window"]["split"], second.split.sizes()
+        assert second.width() == 1320 and second.height() == 880, second.size()
+        # 上次选文件去过的目录也记住了
+        assert Path(dialogs.start_dir("", "dance.source")) == work
+        # 当前目标歌也跟着切回来了（输入框里是库里的 id）
+        assert second._song_id == song_id                   # noqa: SLF001
+    finally:
+        second.close()
 
 
 def test_launch_installs_an_excepthook() -> None:
@@ -373,7 +458,8 @@ TESTS = (
     test_slice_presets,
     test_manual_selection_flows_to_remix,
     test_start_refuses_empty_manual_when_recommend_off,
-    test_file_pickers_never_touch_the_native_dialog,
+    test_file_pickers_use_the_system_dialog_and_remember_the_folder,
+    test_settings_survive_a_restart,
     test_launch_installs_an_excepthook,
     test_worker_is_isolated_from_analyze_worker,
     test_worker_runs_the_whole_job,
