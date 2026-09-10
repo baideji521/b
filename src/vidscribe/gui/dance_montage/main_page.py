@@ -124,7 +124,26 @@ class DanceMontageWindow(QMainWindow):
         split.setStretchFactor(0, 2)
         split.setStretchFactor(1, 3)
         split.setSizes([560, 900])
+        self.split = split
+        self.tabs.currentChanged.connect(self._tab_changed)
         return split
+
+    def _tab_changed(self, index: int) -> None:
+        """切到「对齐/卡点测试」时把左边那栏收起来，让它占满整个窗口。
+
+        这一页是三栏工作台（参数 / 卡点表 / 预览），挤在 900 像素里没法用；
+        而它本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
+        """
+        bench = self.tabs.widget(int(index)) is self.bench
+        sizes = self.split.sizes()
+        if bench:
+            if sizes[0] > 0:
+                self._left_width = sizes[0]
+            self.split.setSizes([0, sum(sizes) or 1])
+        elif sizes[0] == 0:
+            width = getattr(self, "_left_width", 560)
+            self.split.setSizes([width, max(1, sum(sizes) - width)])
+
 
     def _wire(self) -> None:
         self.remix.start_requested.connect(self.start)

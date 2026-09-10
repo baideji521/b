@@ -543,6 +543,38 @@ def test_the_old_alignment_panel_can_still_fix_an_offset(work: Path) -> None:
     db.close()
 
 
+def test_the_layout_is_actually_usable(work: Path) -> None:
+    """布局回归：控件不许是默认小尺寸，页面在小窗口下要能滚而不是被压扁。
+
+    第一版就是"按钮小、什么都挤在一列"，卡点表只剩两行 —— 那样等于没做。
+    所以把这几条钉住：主按钮 ≥44、次按钮 ≥34、输入框 ≥30、表格行高 ≥26、
+    整页外面有滚动区。
+    """
+    from PyQt5.QtWidgets import QScrollArea
+
+    panel, _cfg, db = _panel(work)
+    try:
+        assert panel.btn_start.minimumHeight() >= 44, panel.btn_start.minimumHeight()
+        assert panel.btn_play.minimumHeight() >= 44, panel.btn_play.minimumHeight()
+        for button in (panel.btn_stop, panel.btn_reset, panel.btn_manual, panel.btn_auto,
+                       panel.btn_save, panel.btn_ingest, panel.btn_export):
+            assert button.minimumHeight() >= 34, (button.text(), button.minimumHeight())
+        for field in (panel.source, panel.target, panel.at, panel.slice_seconds,
+                      panel.manual):
+            assert field.minimumHeight() >= 30, field.minimumHeight()
+        assert panel.positions.verticalHeader().defaultSectionSize() >= 26
+        assert panel.findChild(QScrollArea) is not None, "整页没有滚动区，小窗口会被压扁"
+        # 越界原因在表格里只放短句，完整那句进 tooltip
+        from vidscribe.gui.dance_montage.align_bench import _short_reason
+
+        long_reason = ("位置 #0（目标 0.000→2.000）映射到源 -3.274s，"
+                       "早于源视频开头 —— 不做 clamp，这一段没有对应素材")
+        assert _short_reason(long_reason) == "源里还没开始"
+        assert len(_short_reason("其它什么原因 —— 后面一长串解释")) <= 24
+    finally:
+        db.close()
+
+
 def test_cli_and_gui_share_one_backend() -> None:
     """CLI 的 `align-test` 和界面走的是同一套函数，不许各写一份算法。"""
     from vidscribe import cli
@@ -586,6 +618,12 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
         # 测试台确认后的入库请求要接到正式流水线上
         assert window.bench.receivers(window.bench.ingest_requested) >= 1
         assert window.bench.receivers(window.bench.changed) >= 1
+
+        # 切到测试台时左边那栏要收起来：三栏工作台挤在 900 像素里没法用
+        window.tabs.setCurrentWidget(window.bench)
+        assert window.split.sizes()[0] == 0, window.split.sizes()
+        window.tabs.setCurrentIndex(0)
+        assert window.split.sizes()[0] > 0, "切回混剪之后左栏没有恢复"
     finally:
         window.close()
 
@@ -605,6 +643,7 @@ TESTS = (
     test_missing_files_do_not_crash_the_panel,
     test_failure_is_reported_not_swallowed,
     test_low_confidence_is_shown_as_low,
+    test_the_layout_is_actually_usable,
     test_cli_and_gui_share_one_backend,
     test_the_bench_tab_is_wired_into_the_window,
     test_the_old_alignment_panel_can_still_fix_an_offset,

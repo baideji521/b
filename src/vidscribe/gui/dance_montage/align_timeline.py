@@ -21,8 +21,11 @@ from PyQt5.QtWidgets import QSizePolicy, QWidget
 
 from .. import theme
 
-#: 两条轨各自的高度占比（中间留给刻度和 offset 标注）
-LANE_RATIO = 0.34
+#: 每条横带的高度（像素）。轨名、刻度、offset 说明各占一条，谁也不压谁 ——
+#: 之前把它们画在同一片区域里，文字互相叠成一团，等于白画
+LABEL_HEIGHT = 15
+TICK_BAND = 20
+CAPTION_HEIGHT = 18
 
 
 class DualTimeline(QWidget):
@@ -32,7 +35,7 @@ class DualTimeline(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setMinimumHeight(170)
+        self.setMinimumHeight(2 * LABEL_HEIGHT + TICK_BAND + CAPTION_HEIGHT + 2 * 40)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.setCursor(Qt.CrossCursor)
 
@@ -126,42 +129,63 @@ class DualTimeline(QWidget):
             painter.drawText(self.rect(), Qt.AlignCenter, "对齐之后这里会画出两条音轨")
             return
 
-        lane = self.height() * LANE_RATIO
-        top = QRectF(0, 6, self.width(), lane)
-        bottom = QRectF(0, self.height() - lane - 20, self.width(), lane)
-        self._lane(painter, top, self._target_env, 0.0, self._target_duration,
-                   QColor(theme.ACCENT), "TARGET 目标歌")
-        self._lane(painter, bottom, self._source_env, self._offset, self._source_duration,
-                   QColor(theme.PLAYING), "SOURCE 源视频（已按 offset 平移）")
-        self._ticks(painter, top.bottom() + 2, bottom.top() - 2)
-        self._overlay(painter, top, bottom)
-
-    def _lane(self, painter: QPainter, box: QRectF, env: list[float], shift: float,
-              duration: float, color: QColor, label: str) -> None:
-        painter.setPen(QPen(QColor(theme.LINE), 1))
-        painter.drawRect(box.adjusted(0, 0, -1, -1))
-        if duration > 0:
-            begin, end = self._x_of(shift), self._x_of(shift + duration)
-            painter.fillRect(QRectF(begin, box.top(), max(1.0, end - begin), box.height()),
-                             QColor(theme.PANEL))
-            if env:
-                painter.setPen(QPen(color, 1))
-                middle = box.center().y()
-                half = box.height() / 2.0 - 2.0
-                step = (end - begin) / float(len(env))
-                for index, value in enumerate(env):
-                    x = begin + index * step
-                    tall = max(1.0, value * half)
-                    painter.drawLine(int(x), int(middle - tall), int(x), int(middle + tall))
         font = QFont(painter.font())
         font.setPointSize(8)
         painter.setFont(font)
-        painter.setPen(QColor(theme.TEXT_DIM))
-        painter.drawText(QRectF(box.left() + 6, box.top() + 1, box.width() - 12, 14),
-                         Qt.AlignLeft | Qt.AlignVCenter, label)
 
-    def _ticks(self, painter: QPainter, top: float, bottom: float) -> None:
-        """中间那条刻度带：目标歌秒数 + offset 标注。"""
+        # 每样东西一条独立的横带，谁也不许压在谁上面：
+        # 轨名 / 波形 / 刻度 / 轨名 / 波形 / offset 说明
+        width = float(self.width())
+        lane = max(26.0, (self.height() - 2 * LABEL_HEIGHT
+                          - TICK_BAND - CAPTION_HEIGHT - 8) / 2.0)
+        top_label = QRectF(0, 2, width, LABEL_HEIGHT)
+        top = QRectF(0, top_label.bottom(), width, lane)
+        tick_top, tick_bottom = top.bottom(), top.bottom() + TICK_BAND
+        bottom_label = QRectF(0, tick_bottom, width, LABEL_HEIGHT)
+        bottom = QRectF(0, bottom_label.bottom(), width, lane)
+        caption = QRectF(0, bottom.bottom() + 2, width, CAPTION_HEIGHT)
+
+        self._label(painter, top_label, "TARGET 目标歌", QColor(theme.ACCENT))
+        self._lane(painter, top, self._target_env, 0.0, self._target_duration,
+                   QColor(theme.ACCENT))
+        self._label(painter, bottom_label,
+                    "SOURCE 源视频（已按 offset 平移）", QColor(theme.PLAYING))
+        self._lane(painter, bottom, self._source_env, self._offset,
+                   self._source_duration, QColor(theme.PLAYING))
+        self._ticks(painter, top, bottom, tick_top, tick_bottom)
+        self._overlay(painter, top, bottom)
+
+        painter.setPen(QColor(theme.TEXT))
+        painter.drawText(caption, Qt.AlignCenter,
+                         f"OFFSET {self._offset:+.3f}s　　source = target − offset")
+
+    def _label(self, painter: QPainter, box: QRectF, text: str, color: QColor) -> None:
+        painter.setPen(color)
+        painter.drawText(box.adjusted(6, 0, -6, 0), Qt.AlignLeft | Qt.AlignVCenter, text)
+
+    def _lane(self, painter: QPainter, box: QRectF, env: list[float], shift: float,
+              duration: float, color: QColor) -> None:
+        painter.setPen(QPen(QColor(theme.LINE), 1))
+        painter.drawRect(box.adjusted(0, 0, -1, -1))
+        if duration <= 0:
+            return
+        begin, end = self._x_of(shift), self._x_of(shift + duration)
+        painter.fillRect(QRectF(begin, box.top() + 1, max(1.0, end - begin),
+                                box.height() - 2), QColor(theme.PANEL))
+        if not env:
+            return
+        painter.setPen(QPen(color, 1))
+        middle = box.center().y()
+        half = box.height() / 2.0 - 3.0
+        step = (end - begin) / float(len(env))
+        for index, value in enumerate(env):
+            x = begin + index * step
+            tall = max(1.0, value * half)
+            painter.drawLine(int(x), int(middle - tall), int(x), int(middle + tall))
+
+    def _ticks(self, painter: QPainter, top: QRectF, bottom: QRectF,
+               band_top: float, band_bottom: float) -> None:
+        """刻度：竖线穿过两条轨，秒数写在中间那条带里（带自己的底色，不和竖线糊在一起）。"""
         left, right = self._axis_span()
         span = right - left
         step = 1.0
@@ -169,23 +193,17 @@ class DualTimeline(QWidget):
             step = candidate
             if span / candidate <= 12:
                 break
-        font = QFont(painter.font())
-        font.setPointSize(8)
-        painter.setFont(font)
         moment = float(int(left / step) * step)
         while moment <= right:
             x = self._x_of(moment)
             painter.setPen(QPen(QColor(theme.LINE), 1))
-            painter.drawLine(int(x), int(top), int(x), int(bottom))
+            painter.drawLine(int(x), int(top.top()), int(x), int(bottom.bottom()))
+            box = QRectF(x - 26, band_top + 1, 52, band_bottom - band_top - 2)
+            painter.fillRect(box, QColor(theme.VIDEO_BG))
             painter.setPen(QColor(theme.TEXT_DIM))
-            painter.drawText(QRectF(x - 24, (top + bottom) / 2.0 - 8, 48, 16),
-                             Qt.AlignCenter, f"{moment:g}s")
+            painter.drawText(box, Qt.AlignCenter, f"{moment:g}s")
             moment = round(moment + step, 6)
-        painter.setPen(QColor(theme.TEXT))
-        painter.drawText(QRectF(6, bottom - 16, self.width() - 12, 16),
-                         Qt.AlignRight | Qt.AlignVCenter,
-                         f"OFFSET {self._offset:+.3f}s"
-                         "　（source = target − offset）")
+
 
     def _overlay(self, painter: QPainter, top: QRectF, bottom: QRectF) -> None:
         """当前点、正在测试的那一格、播放头。"""
@@ -209,4 +227,4 @@ class DualTimeline(QWidget):
             painter.drawLine(int(x), int(bottom.top()), int(x), int(bottom.bottom()))
 
 
-__all__ = ["LANE_RATIO", "DualTimeline"]
+__all__ = ["LABEL_HEIGHT", "TICK_BAND", "CAPTION_HEIGHT", "DualTimeline"]
