@@ -147,6 +147,45 @@ def test_huge_deviation_is_rejected() -> None:
     assert any("偏差" in r for r in reasons), reasons
 
 
+def test_windows_on_another_repeat_are_not_a_disagreement() -> None:
+    """源里那首歌循环播了几遍 → 窗口落在不同一遍上，这**不是**对不上。
+
+    用的是实测数字：一条 60.74 秒的源配 14.47 秒的歌，
+    3 个窗口给 -14.659s（置信 0.441/0.836/0.753），2 个给 -42.919s（0.208/0.620），
+    相差 28.260s ≈ 歌长 ×2。v1 拿"最大偏差 > 0.5s"把它判了 rejected，
+    而它其实是 2 秒一格满覆盖（7/7）的好素材。
+    """
+    offsets = [-14.659, -14.659, -14.659, -42.919, -42.919]
+    confidences = [0.441, 0.836, 0.753, 0.208, 0.620]
+    main = validate.main_cluster(offsets, confidences)
+    assert main == [0, 1, 2], main
+    assert validate.robust_offset([offsets[i] for i in main]) == -14.659
+    _inside, deviation = validate.agreement_of([offsets[i] for i in main])
+    assert deviation == 0.0, deviation
+    status, _reasons = validate.decide_status(0.756, deviation, -14.659,
+                                             source_duration=60.736, methods_agree=1.0,
+                                             target_duration=14.472)
+    assert status == "ok", status
+    notes = validate.repeat_notes(offsets, main, 14.472)
+    assert len(notes) == 1, notes
+    assert "另有 2 个验证窗口" in notes[0], notes[0]
+    assert "歌长 ×2" in notes[0] and "重复" in notes[0], notes[0]
+
+
+def test_windows_that_all_disagree_are_still_rejected() -> None:
+    """五个窗口各说各话时没有「多数意见」，不许被聚类放过。"""
+    assert validate.main_cluster([1.0, 9.0, 21.0, 33.0, 47.0], [0.5] * 5) is None
+    assert validate.main_cluster([3.0], [0.9]) is None          # 单窗口不走这条路
+    assert validate.main_cluster([3.0, 3.01, 2.99], [0.9, 0.8, 0.7]) == [0, 1, 2]
+
+
+def test_clusters_split_on_the_tolerance() -> None:
+    """聚类的分界就是 OFFSET_TOLERANCE，不许含糊。"""
+    assert validate.offset_clusters([0.0, validate.OFFSET_TOLERANCE * 0.9]) == [[0, 1]]
+    assert validate.offset_clusters([0.0, validate.OFFSET_TOLERANCE * 2.0]) == [[0], [1]]
+
+
+
 # ------------------------------------------------------------------ T7
 def test_missing_audio_raises_instead_of_faking_zero(work: Path) -> None:
     missing = work / "nope.wav"
@@ -308,6 +347,9 @@ TESTS = (
     test_edge_limit_is_direction_aware,
 
     test_huge_deviation_is_rejected,
+    test_windows_on_another_repeat_are_not_a_disagreement,
+    test_windows_that_all_disagree_are_still_rejected,
+    test_clusters_split_on_the_tolerance,
     test_missing_audio_raises_instead_of_faking_zero,
     test_wav_roundtrip_keeps_offset,
     test_manual_override_keeps_a_trail,

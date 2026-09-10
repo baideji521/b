@@ -97,7 +97,8 @@ def align_config(*, sample_rate: int, window_seconds: float, window_count: int) 
             "window_count": int(window_count),
             "offset_tolerance": validate.OFFSET_TOLERANCE,
             "method_tolerance": validate.METHOD_TOLERANCE,
-            "min_peak_quality": validate.MIN_PEAK_QUALITY}
+            "min_peak_quality": validate.MIN_PEAK_QUALITY,
+            "min_cluster_share": validate.MIN_CLUSTER_SHARE}
 
 
 def register_song(db: Database, path: str | Path, *, sample_rate: int = DEFAULT_SR,

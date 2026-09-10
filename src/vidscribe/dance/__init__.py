@@ -26,8 +26,11 @@ MFCC / chroma / onset / beat_track 全都是几十行 numpy（见 `dsp.py`），
 
 from __future__ import annotations
 
-#: 对齐算法版本。改了算法就 +1，缓存与历史记录靠它区分「哪一版算出来的」
-ALIGNMENT_ALGORITHM_VERSION = "align-v1"
+#: 对齐算法版本。改了算法就 +1，缓存与历史记录靠它区分「哪一版算出来的」。
+#: v2：多窗口结果先聚类、再取多数意见那一簇 —— 源视频里那首歌循环播了几遍时，
+#: 窗口会合法地落在不同一遍上（offset 相差约歌长的整数倍），v1 把这类素材
+#: 当成"多窗口不一致"全判 rejected 了，而它们其实是满覆盖的好素材
+ALIGNMENT_ALGORITHM_VERSION = "align-v2"
 #: 素材切片版本，进 dance_materials.generation_version
 MATERIAL_GENERATION_VERSION = "slice-v1"
 #: 推荐算法版本，进 dance_recommendation_runs.algorithm_version

@@ -192,9 +192,27 @@ def align_arrays(target: np.ndarray, source: np.ndarray,
     if not offsets:
         return _with_notes(blank, "所有验证窗口都算不出峰值，无法对齐")
 
-    agreement, deviation = validate.agreement_of(offsets)
-    offset = validate.robust_offset(offsets, confidences)
-    waveform_confidence = round(float(sum(confidences) / len(confidences)), 4)
+    # 多窗口结果先聚类，再取"多数意见"那一簇：源视频里那首歌循环播了好几遍时，
+    # 窗口会各自合法地落在不同一遍上（offset 相差约歌长的整数倍）。那不是对不上，
+    # 是对上了另一遍 —— 按固定音乐位置分段取素材，落在哪一遍都一样能切。
+    # 挑不出多数簇（窗口各说各话）时退回老规矩：全体偏差照旧判死。
+    main = validate.main_cluster(offsets, confidences)
+    repeat: list[str] = []
+    if main is None:
+        agreement, deviation = validate.agreement_of(offsets)
+        offset = validate.robust_offset(offsets, confidences)
+        picked_confidences = confidences
+    else:
+        picked = [offsets[i] for i in main]
+        picked_confidences = [confidences[i] for i in main]
+        offset = validate.robust_offset(picked, picked_confidences)
+        agreement = round(len(main) / len(offsets), 4)
+        _inside, deviation = validate.agreement_of(picked)
+        repeat = validate.repeat_notes(offsets, main, target_duration)
+    # 峰值质量只算主簇：另一遍循环上的窗口不是"反对票"，它们支持的是另一个同样合法的
+    # offset，把它们的低置信度混进来会无端拉低这条素材的评价
+    waveform_confidence = round(
+        float(sum(picked_confidences) / len(picked_confidences)), 4)
 
     # chroma 只在"最能代表整条"的那一段上算一次：逐窗都算 chroma 会把耗时翻好几倍，
     # 而 chroma 的作用是给波形结论找个独立证人，一个证人就够
@@ -212,6 +230,7 @@ def align_arrays(target: np.ndarray, source: np.ndarray,
     if chroma_offset is not None and abs(chroma_offset - offset) > validate.METHOD_TOLERANCE:
         reasons.append(f"chroma 全局峰在 {chroma_offset:.3f}s（和声重复所致），"
                        f"但波形 offset {offset:.3f}s 处 chroma 支持度 {support:.3f}")
+    reasons.extend(repeat)
 
     return DanceAlignment(
         offset=offset,

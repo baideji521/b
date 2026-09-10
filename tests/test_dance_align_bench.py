@@ -635,10 +635,13 @@ def test_batch_shows_the_best_one_not_the_first_one(work: Path) -> None:
         assert "good.mp4" in panel.current.text(), panel.current.text()
         assert "3 条里的第 3 条" in panel.current.text(), panel.current.text()
         assert panel.batch.rowCount() == 3
-        # 只有一条时不啰嗦"第几条"
+        # 只有一条时不啰嗦"第几条"，但结论/置信/offset 照旧写在抬头那一行
         panel._finished(True, "对齐完成 1／1", {                            # noqa: SLF001
             "song_duration": 48.0, "source_duration": 30.0, "results": [rows[2]]})
-        assert panel.current.text() == "当前源视频：good.mp4", panel.current.text()
+        headline = panel.current.text()
+        assert headline.startswith("good.mp4"), headline
+        assert "条里的第" not in headline, headline
+        assert "OK" in headline and "0.900" in headline and "+3.274" in headline, headline
     finally:
         db.close()
 

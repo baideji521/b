@@ -143,6 +143,7 @@ class AlignBenchPanel(QWidget):
         self._play_from = 0.0
         self._play_to = 0.0
         self._audio_wav: str | None = None
+        self._headline = "还没对齐"
 
         # 整页放进一个滚动区：窗口小到 1000×640 时，三栏工作台不可能全塞进去 ——
         # 那种情况下**宁可让用户滚**，也不许把卡点表和播放器一起压成两行高。
@@ -175,63 +176,115 @@ class AlignBenchPanel(QWidget):
 
     # ================================================================ 建界面
     #
-    # 布局的取舍：这一页的主角是**卡点表**和**预览**，其余都是它们的参数。
-    # 所以横着分三栏（参数 / 卡点表 / 预览），而不是竖着堆一列 groupbox ——
-    # 堆一列的下场是每个东西都只分到一百来像素高，卡点表只剩两行，谁也用不了。
-    # 三栏都放在 QSplitter 里，嫌哪栏窄自己拖。
+    # 布局的取舍，按"看不过来"这条抱怨定的：
+    #
+    #   顶部只留**一条工具带**（选素材 + 开跑 + 进度），不给它 groupbox 标题、
+    #   不放任何"看一眼就好"的东西 —— 上边地方最贵，只配给每次都要动的控件。
+    #   中间三栏并列：左「结果」中「卡点」右「确认」，视线从左到右就是干活顺序。
+    #   偶尔才看的东西（批量结果、时间映射、手动 Offset、日志）全进底部标签页。
+    #   入库那三个按钮钉在最底，永远看得见。
+    #
+    # 刻意**不给标题编号**：三栏是并列的，编号只会让人问"我该先看第几个"。
+    # 标题用动词，位置本身说明顺序。
     # 按钮一律给足高度（`_big`），38/44 像素在 1080p 上才点得准。
     def _build_header(self) -> QWidget:
-        holder = QWidget(self)
-        row = QHBoxLayout(holder)
-        row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
-        row.addWidget(self._build_inputs(), 3)
-        row.addWidget(self._build_action(), 2)
+        holder = QFrame(self)
+        holder.setFrameShape(QFrame.StyledPanel)
+        grid = QGridLayout(holder)
+        grid.setContentsMargins(8, 6, 8, 6)
+        grid.setHorizontalSpacing(6)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(1, 3)
+        grid.setColumnStretch(4, 3)
+
+        self.source = _tall(QLineEdit(holder))
+        self.source.setPlaceholderText("源舞蹈视频（完整视频 + 它自己的原始音乐）")
+        btn_source = _big(QPushButton("选视频…", holder), 30)
+        grid.addWidget(QLabel("源视频", holder), 0, 0)
+        grid.addWidget(self.source, 0, 1)
+        grid.addWidget(btn_source, 0, 2)
+
+        self.target = _tall(QLineEdit(holder))
+        self.target.setPlaceholderText("目标歌文件，或库里的歌 id")
+        btn_target = _big(QPushButton("选音频…", holder), 30)
+        grid.addWidget(QLabel("目标歌", holder), 0, 3)
+        grid.addWidget(self.target, 0, 4)
+        grid.addWidget(btn_target, 0, 5)
+
+        # 批量清单不占版面：列表本体藏起来，只留一个计数和两个按钮。
+        # 结果反正会横铺在下面「批量结果」那张表里，没必要在上边再摆一遍
+        self.more = QListWidget(holder)
+        self.more.setVisible(False)
+        self.more_hint = QLabel("批量：0 个", holder)
+        self.more_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
+        btn_more = _big(QPushButton("批量选视频…", holder), 30)
+        btn_clear = _big(QPushButton("清空批量", holder), 30)
+
+        # 这一页只有两个"主"按钮（开始对齐、播放卡点），它们比别的高一档，
+        # 眼睛一扫就知道该点哪个
+        self.btn_start = _big(QPushButton("开始音频对齐", holder), 44, bold=True)
+        self.btn_stop = _big(QPushButton("停止", holder), 40)
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.setMaximumWidth(90)
+        self.btn_reset = _big(QPushButton("重置这一页", holder), 40)
+        self.btn_reset.setMaximumWidth(120)
+        self.btn_reset.setToolTip("只清这个页面上的东西（路径、结果、卡点、预览）。\n"
+                                 "素材库里的正式素材一条都不会动。")
+        self.force = QCheckBox("忽略缓存重算", holder)
+        self.bar = QProgressBar(holder)
+        self.bar.setRange(0, 100)
+        self.bar.setMinimumHeight(24)
+        self.bar.setFormat("%v / %m")
+        self.bar.setToolTip("只算不写：对齐这一步不登记素材、不切片、不动任何计数")
+
+        actions = QHBoxLayout()
+        actions.setSpacing(6)
+        for widget in (btn_more, btn_clear, self.more_hint):
+            actions.addWidget(widget)
+        actions.addSpacing(12)
+        actions.addWidget(self.btn_start, 2)
+        actions.addWidget(self.btn_stop)
+        actions.addWidget(self.btn_reset)
+        actions.addWidget(self.force)
+        actions.addWidget(self.bar, 2)
+        grid.addLayout(actions, 1, 0, 1, 6)
+
+        btn_source.clicked.connect(self._pick_source)
+        btn_target.clicked.connect(self._pick_target)
+        btn_more.clicked.connect(self._pick_more)
+        btn_clear.clicked.connect(self._clear_more)
+        self.btn_start.clicked.connect(self.start)
+        self.btn_stop.clicked.connect(self.stop)
+        self.btn_reset.clicked.connect(self.reset)
         return holder
 
     def _build_body(self) -> QWidget:
         body = QSplitter(Qt.Horizontal, self)
         body.setChildrenCollapsible(False)
-        left = QScrollArea(body)                 # 结论栏：窗口小了就滚，不许挤扁
-        left.setWidgetResizable(True)
-        left.setFrameShape(QFrame.NoFrame)
-        holder = QWidget(left)
-        column = QVBoxLayout(holder)
-        column.setContentsMargins(0, 0, 6, 0)
-        column.setSpacing(8)
-        column.addWidget(self._build_result())
-        column.addStretch(1)
-        left.setWidget(holder)
+        body.addWidget(self._build_result())          # 左：这条到底行不行
+        slots = QSplitter(Qt.Vertical, body)          # 中：卡点工具 + 全曲卡点表
+        slots.setChildrenCollapsible(False)
+        slots.addWidget(self._build_tools())
+        slots.addWidget(self._build_positions())
+        slots.setStretchFactor(0, 1)
+        slots.setStretchFactor(1, 4)
+        slots.setSizes([175, 430])
+        preview = QSplitter(Qt.Vertical, body)        # 右：看画面 + 看两条音轨
+        preview.setChildrenCollapsible(False)
+        preview.addWidget(self._build_player())
+        preview.addWidget(self._build_timeline())
+        preview.setStretchFactor(0, 3)
+        preview.setStretchFactor(1, 2)
 
-        # 中栏：卡点工具 + 卡点表。两者是同一件事的输入和输出，必须挨着 ——
-        # 把工具塞进左边那栏的话，一屏放不下，用户得滚动才能点「测试这个卡点」
-        middle = QSplitter(Qt.Vertical, body)
-        middle.setChildrenCollapsible(False)
-        middle.addWidget(self._build_tools())
-        middle.addWidget(self._build_positions())
-        middle.setStretchFactor(0, 1)
-        middle.setStretchFactor(1, 4)
-        middle.setSizes([190, 420])
-
-
-        right = QSplitter(Qt.Vertical, body)
-        right.setChildrenCollapsible(False)
-        right.addWidget(self._build_player())
-        right.addWidget(self._build_timeline())
-        right.setStretchFactor(0, 3)
-        right.setStretchFactor(1, 2)
-
-        body.addWidget(left)
-        body.addWidget(middle)
-        body.addWidget(right)
-        body.setSizes([420, 560, 520])
-        self._body, self._middle, self._right = body, middle, right
+        body.addWidget(slots)
+        body.addWidget(preview)
+        body.setSizes([400, 540, 560])
+        self._body, self._slots, self._preview = body, slots, preview
         return body
 
 
-
     def _build_player(self) -> QGroupBox:
-        box = QGroupBox("⑥ 预览：只播算出来的那一段", self)
+        box = QGroupBox("确认：播这一格（只播算出来的那一段）", self)
         inner = QVBoxLayout(box)
         inner.setSpacing(8)
         self.player = FramePlayer(box)
@@ -276,7 +329,7 @@ class AlignBenchPanel(QWidget):
         return box
 
     def _build_timeline(self) -> QGroupBox:
-        box = QGroupBox("⑦ Source ↔ Target 双时间轴（点一下就跳到那个音乐位置）", self)
+        box = QGroupBox("两条音轨（点一下跳到那个音乐位置）", self)
         layout = QVBoxLayout(box)
         self.timeline = DualTimeline(box)
         layout.addWidget(self.timeline, 1)
@@ -284,10 +337,13 @@ class AlignBenchPanel(QWidget):
         return box
 
     def _build_bottom(self) -> QWidget:
-        """批量结果和运行日志共用一块地方：都是"看一眼就好"的东西，不该长期占屏。"""
+        """偶尔才看的东西全塞这儿：批量结果、时间映射与手动 Offset、运行日志。
+
+        上边地方最贵，只配给"每次都要动"的控件；这三样都是"要看的时候点一下"。
+        """
         tabs = QTabWidget(self)
-        tabs.setMaximumHeight(220)
-        # 底下这块要能被挤到很小：整页高度不够时，先牺牲它，别牺牲卡点表和入库按钮
+        tabs.setMaximumHeight(240)
+
         self.batch = QTableWidget(0, len(BATCH_COLUMNS), tabs)
         self.batch.setMinimumHeight(70)
         self.batch.setHorizontalHeaderLabels(BATCH_COLUMNS)
@@ -299,7 +355,9 @@ class AlignBenchPanel(QWidget):
         self.batch.verticalHeader().setDefaultSectionSize(26)
         self.batch.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
         self.batch.doubleClicked.connect(self._pick_batch_row)
-        tabs.addTab(self.batch, "批量结果（点表头排序，双击某行切过去看它的卡点）")
+        tabs.addTab(self.batch, "批量结果（点表头排序，双击某行切过去）")
+
+        tabs.addTab(self._build_mapping(), "时间映射 / 手动 Offset")
 
         self.log = QTextEdit(tabs)
         self.log.setReadOnly(True)
@@ -307,99 +365,53 @@ class AlignBenchPanel(QWidget):
         tabs.addTab(self.log, "运行日志")
         return tabs
 
-
-    def _build_inputs(self) -> QGroupBox:
-        box = QGroupBox("① 拿什么试（源视频 = 完整舞蹈视频 + 它自己的原始音乐）", self)
-        grid = QGridLayout(box)
-        grid.setHorizontalSpacing(8)
-        grid.setVerticalSpacing(6)
-        grid.setColumnStretch(1, 1)
-
-        self.source = _tall(QLineEdit(box))
-        self.source.setPlaceholderText("源舞蹈视频，例如 D:\\dance\\girl01.mp4")
-        btn_source = _big(QPushButton("选视频…", box))
-        grid.addWidget(QLabel("源舞蹈视频", box), 0, 0)
-        grid.addWidget(self.source, 0, 1)
-        grid.addWidget(btn_source, 0, 2)
-
-        self.target = _tall(QLineEdit(box))
-        self.target.setPlaceholderText("目标歌文件，或库里的歌 id（所有混剪共用的那首）")
-        btn_target = _big(QPushButton("选音频…", box))
-        grid.addWidget(QLabel("目标歌曲", box), 1, 0)
-        grid.addWidget(self.target, 1, 1)
-        grid.addWidget(btn_target, 1, 2)
-
-        self.more = QListWidget(box)
-        self.more.setFixedHeight(46)
-        self.more.setToolTip("批量模式：目标歌固定，一次试多个舞蹈视频。\n"
-                             "留空就是单视频模式 —— 单视频能独立走完全部流程。")
-        more_buttons = QHBoxLayout()
-        more_buttons.setSpacing(4)
-        btn_more = _big(QPushButton("批量选…", box), 29)
-        btn_clear = _big(QPushButton("清空", box), 29)
-        more_buttons.addWidget(btn_more)
-        more_buttons.addWidget(btn_clear)
-        grid.addWidget(QLabel("批量（可选）", box), 2, 0)
-        grid.addWidget(self.more, 2, 1)
-        grid.addLayout(more_buttons, 2, 2)
-
-        btn_source.clicked.connect(self._pick_source)
-        btn_target.clicked.connect(self._pick_target)
-        btn_more.clicked.connect(self._pick_more)
-        btn_clear.clicked.connect(self.more.clear)
-        return box
-
-
-
-    def _build_action(self) -> QGroupBox:
-        box = QGroupBox("② 开始对齐（后台跑，只算不写：不登记素材、不切片、不动计数）", self)
-        layout = QVBoxLayout(box)
+    def _build_mapping(self) -> QWidget:
+        """时间映射的说明 + 人工覆盖 offset。都是"偶尔用一次"，所以收在标签页里。"""
+        holder = QWidget(self)
+        layout = QVBoxLayout(holder)
         layout.setSpacing(6)
+
+        self.mapping = QLabel("时间映射：还没有结果", holder)
+        self.mapping.setWordWrap(True)
+        self.mapping.setStyleSheet(
+            f"color:{theme.ACCENT}; border:1px solid {theme.LINE};"
+            f"border-radius:4px; padding:6px;")
+        layout.addWidget(self.mapping)
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.btn_start = _big(QPushButton("开始音频对齐", box), 44, bold=True)
-        self.btn_stop = _big(QPushButton("停止", box), 44)
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.setMaximumWidth(110)
-        self.btn_reset = _big(QPushButton("重置这一页", box), 44)
-        self.btn_reset.setMaximumWidth(130)
-        self.btn_reset.setToolTip("只清这个页面上的东西（路径、结果、卡点、预览）。\n"
-                                 "素材库里的正式素材一条都不会动。")
-        row.addWidget(self.btn_start, 1)
-        row.addWidget(self.btn_stop)
-        row.addWidget(self.btn_reset)
+        self.manual = _tall(QDoubleSpinBox(holder))
+        self.manual.setRange(-3600.0, 3600.0)
+        self.manual.setDecimals(3)
+        self.manual.setSingleStep(0.01)
+        self.btn_manual = _big(QPushButton("应用手动 Offset", holder))
+        self.btn_auto = _big(QPushButton("回到算法值", holder))
+        row.addWidget(QLabel("手动 Offset", holder))
+        row.addWidget(self.manual, 1)
+        row.addWidget(self.btn_manual)
+        row.addWidget(self.btn_auto)
         layout.addLayout(row)
 
-        bottom = QHBoxLayout()
-        bottom.setSpacing(8)
-        self.force = QCheckBox("忽略对齐缓存，重新算一遍", box)
-        self.force.setMinimumHeight(28)
-        self.bar = QProgressBar(box)
-        self.bar.setRange(0, 100)
-        self.bar.setMinimumHeight(26)
-        self.bar.setFormat("%v / %m")
-        bottom.addWidget(self.force)
-        bottom.addWidget(self.bar, 1)
-        layout.addLayout(bottom)
+        self.origin = QLabel("来源：—", holder)
+        self.origin.setWordWrap(True)
+        layout.addWidget(self.origin)
         layout.addStretch(1)
 
-        self.btn_start.clicked.connect(self.start)
-        self.btn_stop.clicked.connect(self.stop)
-        self.btn_reset.clicked.connect(self.reset)
-        return box
+        self.btn_manual.clicked.connect(self._apply_manual)
+        self.btn_auto.clicked.connect(self._restore_auto)
+        return holder
 
 
 
     def _build_result(self) -> QGroupBox:
-        box = QGroupBox("③ 对齐结果（全部是后端算的，这里不做二次加工）", self)
+        box = QGroupBox("结果：这条到底行不行", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
 
         # 批量时结果区显示的是**其中一条**，不写清是哪条会让人以为数字对不上
-        self.current = QLabel("当前源视频：还没对齐", box)
+        self.current = QLabel("还没对齐", box)
         self.current.setWordWrap(True)
-        self.current.setStyleSheet("font-weight:600;")
+        self.current.setStyleSheet("font-size:14px; font-weight:600;")
         layout.addWidget(self.current)
 
         grid = QGridLayout()
@@ -424,47 +436,16 @@ class AlignBenchPanel(QWidget):
             self.out[key] = value
         layout.addLayout(grid)
 
-        self.mapping = QLabel("时间映射：还没有结果", box)
-        self.mapping.setWordWrap(True)
-        self.mapping.setMinimumHeight(38)
-        self.mapping.setStyleSheet(
-            f"color:{theme.ACCENT}; border:1px solid {theme.LINE};"
-            f"border-radius:4px; padding:6px;")
-        layout.addWidget(self.mapping)
-
         self.diagnosis = QTextEdit(box)
         self.diagnosis.setReadOnly(True)
         self.diagnosis.setMinimumHeight(90)
         self.diagnosis.setPlaceholderText("诊断会写在这里")
-        layout.addWidget(self.diagnosis)
-
-        # ---- 手动 offset 覆盖（后端的 manual_override，理由必填）
-        manual = QGridLayout()
-        manual.setHorizontalSpacing(8)
-        manual.setColumnStretch(1, 1)
-        self.manual = _tall(QDoubleSpinBox(box))
-        self.manual.setRange(-3600.0, 3600.0)
-        self.manual.setDecimals(3)
-        self.manual.setSingleStep(0.01)
-        self.btn_manual = _big(QPushButton("应用手动 Offset", box))
-        self.btn_auto = _big(QPushButton("回到算法值", box))
-        manual.addWidget(QLabel("手动 Offset", box), 0, 0)
-        manual.addWidget(self.manual, 0, 1)
-        manual.addWidget(self.btn_manual, 1, 0, 1, 1)
-        manual.addWidget(self.btn_auto, 1, 1)
-        layout.addLayout(manual)
-
-        self.origin = QLabel("来源：—", box)
-        self.origin.setWordWrap(True)
-        layout.addWidget(self.origin)
-
-        self.btn_manual.clicked.connect(self._apply_manual)
-        self.btn_auto.clicked.connect(self._restore_auto)
+        layout.addWidget(self.diagnosis, 1)
         return box
 
 
     def _build_tools(self) -> QGroupBox:
-        box = QGroupBox("④ 卡点测试：目标时间 → 源时间", self)
+        box = QGroupBox("卡点：目标时间 → 源时间", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(8)
 
@@ -509,7 +490,7 @@ class AlignBenchPanel(QWidget):
         return box
 
     def _build_positions(self) -> QGroupBox:
-        box = QGroupBox("⑤ 全曲固定卡点（点一行 → 播放器跳过去；双击 → 直接播）", self)
+        box = QGroupBox("全曲固定卡点（点一行 → 播放器跳过去；双击 → 直接播）", self)
         layout = QVBoxLayout(box)
         layout.setSpacing(6)
         row = QHBoxLayout()
@@ -542,7 +523,7 @@ class AlignBenchPanel(QWidget):
 
 
     def _build_save(self) -> QGroupBox:
-        box = QGroupBox("⑧ 确认之后才入库（在这之前一条素材都不会产生）", self)
+        box = QGroupBox("确认之后才入库（在这之前一条素材都不会产生）", self)
         row = QHBoxLayout(box)
         row.setSpacing(8)
         self.btn_save = _big(QPushButton("保存对齐结果", box), 40)
@@ -587,8 +568,8 @@ class AlignBenchPanel(QWidget):
             "sound": bool(self.chk_sound.isChecked()),
             "force": bool(self.force.isChecked()),
             "body": list(self._body.sizes()),
-            "middle": list(self._middle.sizes()),
-            "right": list(self._right.sizes()),
+            "slots": list(self._slots.sizes()),
+            "preview": list(self._preview.sizes()),
             "stack": list(self._stack.sizes()),
         }
 
@@ -610,8 +591,8 @@ class AlignBenchPanel(QWidget):
             self.chk_sound.blockSignals(True)
             self.chk_sound.setChecked(data["sound"])
             self.chk_sound.blockSignals(False)
-        for splitter, key in ((self._body, "body"), (self._middle, "middle"),
-                              (self._right, "right"), (self._stack, "stack")):
+        for splitter, key in ((self._body, "body"), (self._slots, "slots"),
+                              (self._preview, "preview"), (self._stack, "stack")):
             sizes = data.get(key)
             if (isinstance(sizes, list) and len(sizes) == splitter.count()
                     and all(isinstance(v, int) and v >= 0 for v in sizes)
@@ -637,6 +618,20 @@ class AlignBenchPanel(QWidget):
                                        self.cfg.dance_path("source_dir"),
                                        dialogs.VIDEO_FILTER, "dance.source"):
             self.more.addItem(path)
+        self._show_more_count()
+
+    def _clear_more(self) -> None:
+        self.more.clear()
+        self._show_more_count()
+
+    def _show_more_count(self) -> None:
+        count = int(self.more.count())
+        self.more_hint.setText(f"批量：{count} 个")
+        self.more_hint.setToolTip("\n".join(self.more.item(i).text()
+                                            for i in range(count))
+                                  or "批量模式：目标歌固定，一次试多个舞蹈视频。\n"
+                                     "留空就是单视频模式。")
+
 
 
     # ================================================================ 跑对齐
@@ -743,7 +738,8 @@ class AlignBenchPanel(QWidget):
         for label in self.out.values():
             label.setText("—")
         why = "；".join(str(r.get("error") or "未知原因") for r in rows[:3]) or "未知原因"
-        self.current.setText("当前源视频：一条都没算出来")
+        self._headline = "一条都没算出来"
+        self.current.setText(self._headline)
         self.out["status"].setText("失败")
         self.mapping.setText("时间映射：算不出来")
         self.diagnosis.setPlainText(f"✗ 对齐失败\n\n原因：{why}\n\n"
@@ -765,11 +761,10 @@ class AlignBenchPanel(QWidget):
         if len(self._batch) > 1:
             place = next((i + 1 for i, r in enumerate(self._batch)
                           if r is row or r.get("path") == row.get("path")), 0)
-            self.current.setText(f"当前源视频：{name}"
-                                 f"（{len(self._batch)} 条里的第 {place} 条"
-                                 "，双击下面「批量结果」里任意一行可以换）")
+            self._headline = (f"{name}（{len(self._batch)} 条里的第 {place} 条，"
+                              "双击下面「批量结果」里任意一行可以换）")
         else:
-            self.current.setText(f"当前源视频：{name}")
+            self._headline = name
         self._auto = alignment
         self._alignment = alignment
         self.manual.setValue(float(alignment.offset))
@@ -784,7 +779,12 @@ class AlignBenchPanel(QWidget):
         if align is None:
             return
         source_duration = self._source_duration()
-        self.out["status"].setText(STATUS_TEXT.get(align.status, align.status))
+        status_text = STATUS_TEXT.get(align.status, align.status)
+        # 抬头一行把最要紧的四件事说完：哪条源、能不能用、多可信、错开多少
+        self.current.setText(f"{self._headline}　·　{status_text}"
+                             f"　·　置信 {align.confidence:.3f}"
+                             f"　·　offset {align.offset:+.3f}s")
+        self.out["status"].setText(status_text)
         self.out["offset"].setText(f"{align.offset:+.3f} s")
         self.out["waveform"].setText(
             "—" if align.waveform_confidence is None
@@ -1106,7 +1106,11 @@ class AlignBenchPanel(QWidget):
                 item = QTableWidgetItem(text)
                 if column in (1, 2, 4, 5):
                     item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                else:
+                    # 文件名那列会被拉得很宽，居中的话字飘在中间反而难扫
+                    item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 self.batch.setItem(index, column, item)
+
         self.batch.setSortingEnabled(True)
         self.batch.resizeColumnsToContents()
         self.batch.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
@@ -1241,8 +1245,10 @@ class AlignBenchPanel(QWidget):
         self.player.pause()
         self.player.close_video()
         self._audio_wav = None
+        self._headline = "还没对齐"
         self.source.clear()
         self.more.clear()
+        self._show_more_count()
         self._payload = {}
         self._auto = self._alignment = None
         self._rows = []
@@ -1250,7 +1256,7 @@ class AlignBenchPanel(QWidget):
         self._play_from = self._play_to = 0.0
         for label in self.out.values():
             label.setText("—")
-        self.current.setText("当前源视频：还没对齐")
+        self.current.setText("还没对齐")
         self.mapping.setText("时间映射：还没有结果")
         self.origin.setText("来源：—")
         self.diagnosis.clear()

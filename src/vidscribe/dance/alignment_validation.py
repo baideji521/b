@@ -36,6 +36,11 @@ MIN_WINDOW_SECONDS = 4.0
 #: 峰值闸门：峰值质量低于此就认为"互相关根本没挑出赢家"，见 `combine_confidence`。
 #: 0.15 对应主峰比最强次峰高约 18%（映射是 1 - 1/ratio）
 MIN_PEAK_QUALITY = 0.15
+#: 主簇至少要占多少个窗口才算"多数意见"。低于这个比例说明窗口各说各话，
+#: 那才是真的对不上，不许放过
+MIN_CLUSTER_SHARE = 0.4
+#: 两个簇的间距和歌长的整数倍差多少以内，算"源里这首歌重复了一遍"（歌长的比例）
+REPEAT_TOLERANCE = 0.15
 
 
 
@@ -105,6 +110,81 @@ def robust_offset(offsets: list[float], confidences: list[float] | None = None) 
     if confidences and len(confidences) == len(values):
         return round(values[a if confidences[a] >= confidences[b] else b], 6)
     return round((values[a] + values[b]) / 2.0, 6)
+
+
+def offset_clusters(offsets: list[float],
+                    tolerance: float = OFFSET_TOLERANCE) -> list[list[int]]:
+    """把窗口按 offset 聚成簇，返回下标分组（组内相邻两个相差 ≤ tolerance）。"""
+    values = [float(v) for v in offsets]
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    groups: list[list[int]] = []
+    for index in order:
+        if groups and abs(values[index] - values[groups[-1][-1]]) <= float(tolerance):
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    return groups
+
+
+def main_cluster(offsets: list[float],
+                 confidences: list[float] | None = None) -> list[int] | None:
+    """挑出"多数意见"那一簇的窗口下标；挑不出来返回 None（那就该按老规矩判死）。
+
+    为什么要聚类，而不是直接拿"最大偏差"一刀切：
+    目标歌比源视频短的时候（14 秒的歌配 60 秒的舞蹈视频），那首歌在源里往往
+    **循环播了好几遍**。于是不同窗口各自合法地对到不同一遍上，两个 offset
+    相差约等于歌长的整数倍 —— 这不是"对错了"，是"对上了另一遍"。
+    而这个系统是按固定音乐位置分段取素材的，落在哪一遍都一样能切、一样卡点。
+    原先那条"多窗口最大偏差 > 0.5s 直接 rejected"把这类素材全杀了（实测
+    一条 60 秒源 / 14.5 秒歌：3 个窗口给 -14.659s、2 个给 -42.919s，
+    偏差 28.26s ≈ 歌长 ×2，被判 rejected，而它其实是满覆盖的好素材）。
+
+    挑法：置信度加权最大的那一簇。但要求它**至少 2 个窗口且占比 ≥ MIN_CLUSTER_SHARE** ——
+    五个窗口各说各话的时候没有"多数"可言，那才是真的对不上，不许放过。
+    """
+    values = [float(v) for v in offsets]
+    if len(values) < 2:
+        return None
+    groups = offset_clusters(values)
+    if len(groups) == 1:
+        return list(range(len(values)))
+    weights = ([float(c) for c in confidences]
+               if confidences and len(confidences) == len(values)
+               else [1.0] * len(values))
+    best = max(groups, key=lambda group: (sum(weights[i] for i in group), len(group)))
+    if len(best) < 2 or len(best) / len(values) < MIN_CLUSTER_SHARE:
+        return None
+    return sorted(best)
+
+
+def repeat_notes(offsets: list[float], main: list[int], target_duration: float = 0.0,
+                 tolerance: float = OFFSET_TOLERANCE) -> list[str]:
+    """把"另外那些窗口落在哪儿"写成中文说明。
+
+    落点相差接近歌长整数倍时直接说明白是"源里这首歌重复了"——
+    这句话是给人看的：用户看到 offset 只有一个数字，得知道另外几个窗口去哪了。
+    """
+    values = [float(v) for v in offsets]
+    chosen = set(int(i) for i in main)
+    if len(chosen) >= len(values):
+        return []
+    inside = [values[i] for i in sorted(chosen)]
+    centre = robust_offset(inside)
+    notes: list[str] = []
+    song = max(0.0, float(target_duration))
+    for group in offset_clusters(values, tolerance):
+        if set(group) & chosen:
+            continue
+        gap = robust_offset([values[i] for i in group]) - centre
+        text = (f"另有 {len(group)} 个验证窗口落在 {values[group[0]]:+.3f}s"
+                f"（相差 {abs(gap):.3f}s")
+        if song > 0:
+            times = abs(gap) / song
+            nearest = round(times)
+            if nearest >= 1 and abs(times - nearest) <= REPEAT_TOLERANCE:
+                text += f" ≈ 歌长 ×{nearest}，源视频里这首歌重复了"
+        notes.append(text + "）")
+    return notes
 
 
 def method_agreement(waveform_offset: float | None, chroma_offset: float | None) -> float:
@@ -264,7 +344,9 @@ def summarize(alignment: DanceAlignment) -> list[str]:
 __all__ = [
     "OFFSET_TOLERANCE", "METHOD_TOLERANCE", "LOW_CONFIDENCE", "REJECT_CONFIDENCE",
     "REJECT_DEVIATION", "EDGE_RATIO", "WINDOW_COUNT", "WINDOW_SECONDS", "MIN_WINDOW_SECONDS",
+    "MIN_CLUSTER_SHARE", "REPEAT_TOLERANCE",
     "window_plan", "agreement_of", "robust_offset", "method_agreement",
+    "offset_clusters", "main_cluster", "repeat_notes",
     "combine_confidence", "decide_status", "manual_override", "summarize",
     "WindowResult",
 ]
