@@ -397,7 +397,9 @@ class MasterAudioPanel(QWidget):
 
     # ---------------------------------------------------------------- 分析
     def _pick(self) -> None:
-        picked = dialogs.open_file(self, "选主音频", dialogs.AUDIO_FILTER,
+        # 签名是 (parent, title, folder, filters, key)：folder 给空串，
+        # 起始目录交给 key 那份"上次去过哪儿"的记忆
+        picked = dialogs.open_file(self, "选主音频", "", dialogs.AUDIO_FILTER,
                                    key="dance.song")
         if picked:
             self.path.setText(picked)

@@ -324,7 +324,41 @@ def test_playing_one_segment_stops_at_its_end(work: Path) -> None:
         db.close()
 
 
+def test_the_song_picker_really_opens(work: Path) -> None:
+    """M12：点「选主音频…」必须真的弹出对话框并把路径填回去。
+
+    这条是补窟窿的：`dialogs.open_file` 的签名是 (parent, title, folder, filters, key)，
+    我漏了 folder，于是一点按钮就 TypeError。签名对不对，只有真调一次才知道。
+    """
+    from PyQt5.QtWidgets import QFileDialog
+
+    panel, _cfg, db = _panel(work)
+    seen: list[tuple] = []
+    original = QFileDialog.getOpenFileName
+
+    def fake(_parent, title, folder, filters, options=0):
+        seen.append((title, folder, filters))
+        return (str(work / "song.mp3"), "")
+
+    QFileDialog.getOpenFileName = staticmethod(fake)
+    try:
+        panel._pick()                                           # noqa: SLF001
+    finally:
+        QFileDialog.getOpenFileName = original
+
+    try:
+        assert len(seen) == 1, seen
+        title, folder, filters = seen[0]
+        assert "主音频" in title, title
+        assert Path(folder).is_dir(), f"起始目录不存在：{folder}"
+        assert "mp3" in filters, filters
+        assert panel.path.text().endswith("song.mp3"), panel.path.text()
+    finally:
+        db.close()
+
+
 TESTS = (
+
 
     test_analysis_never_touches_the_segments,
     test_uniform_and_pause_starters,
@@ -337,6 +371,7 @@ TESTS = (
     test_zoom_and_scroll_share_one_axis,
     test_marks_are_recorded_but_change_nothing,
     test_playing_one_segment_stops_at_its_end,
+    test_the_song_picker_really_opens,
 )
 
 
