@@ -162,6 +162,8 @@ class MasterAudioPanel(QWidget):
         self._redo: list[Any] = []     # 撤销掉的那些，用来重做
         self._marks: list[float] = []  # 用户「⭐ 可取」标记（库里那份）
         self._stop_at: float | None = None   # 「播放当前段」到这里自动停
+        self._analyzed_path = ""       # 上一次分析的是哪首，免得同一首分析两遍
+
 
         # 主音频播放器：QtMultimedia 自带位置回调，播放头能真的跟着走。
         # 素材预览那边用的是 FramePlayer（要出画面），这里只放音，两者不冲突。
@@ -173,6 +175,7 @@ class MasterAudioPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
+        self._column = layout
         layout.addWidget(self._build_header())
         layout.addWidget(self._build_transport())
         body = QSplitter(Qt.Horizontal, self)
@@ -189,16 +192,19 @@ class MasterAudioPanel(QWidget):
     # ---------------------------------------------------------------- 顶部
     def _build_header(self) -> QWidget:
         holder = QFrame(self)
-        holder.setFrameShape(QFrame.StyledPanel)
+        holder.setFrameShape(QFrame.NoFrame)
         row = QHBoxLayout(holder)
-        row.setContentsMargins(8, 6, 8, 6)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
 
         self.path = QLineEdit(holder)
         self.path.setMinimumHeight(FIELD_HEIGHT)
-        self.path.setPlaceholderText("主音频（这首歌决定所有段落）")
+        self.path.setPlaceholderText("主音频＝目标歌（这首歌决定所有段落）")
         btn_pick = _big(QPushButton("选主音频…", holder), FIELD_HEIGHT)
+        # 「分析主音频」不再是一个要点的按钮：选好歌就自动开始分析，少一步。
+        # 按钮本身留着（禁用状态还要用它挡住重复分析），只是不摆在界面上
         self.btn_analyze = _big(QPushButton("分析主音频", holder), 40, bold=True)
+        self.btn_analyze.setVisible(False)
         self.bar = QProgressBar(holder)
         self.bar.setRange(0, 0)
         self.bar.setVisible(False)
@@ -209,13 +215,24 @@ class MasterAudioPanel(QWidget):
         row.addWidget(QLabel("主音频", holder))
         row.addWidget(self.path, 1)
         row.addWidget(btn_pick)
-        row.addWidget(self.btn_analyze)
         row.addWidget(self.bar)
         row.addWidget(self.info)
 
         btn_pick.clicked.connect(self._pick)
         self.btn_analyze.clicked.connect(self.analyze)
+        self.path.editingFinished.connect(self._path_typed)
+        self.header = holder
         return holder
+
+    def take_song_row(self) -> QWidget:
+        """把「主音频 + 选主音频…」那一条交出去，让编排台把它并进最上面那一行。
+
+        主音频就是目标歌，界面上只该有一处填它。
+        """
+        self._column.removeWidget(self.header)
+        self.header.setParent(None)
+        return self.header
+
 
     # ------------------------------------------------------------ 播放控制条
     def _build_transport(self) -> QWidget:
@@ -238,7 +255,17 @@ class MasterAudioPanel(QWidget):
 
         self.follow = QCheckBox("播放时自动跟随", holder)
         self.follow.setChecked(True)
+        # 加减速：慢放是找准停顿最管用的一招 —— 0.5× 下人声起收听得清楚多了。
+        # 只改播放速度，音频文件、offset、段落时间一个都不动，倍速下时钟也照常走真实秒
+        self.speeds = QComboBox(holder)
+        self.speeds.setMinimumHeight(FIELD_HEIGHT)
+        self.speeds.setToolTip("只影响试听快慢；分段用的时间还是真实秒数")
+        for text, rate in (("0.5×", 0.5), ("0.75×", 0.75), ("1.0×", 1.0),
+                           ("1.25×", 1.25), ("1.5×", 1.5), ("2.0×", 2.0)):
+            self.speeds.addItem(text, rate)
+        self.speeds.setCurrentIndex(2)
         self.zooms = QComboBox(holder)
+
         self.zooms.setMinimumHeight(FIELD_HEIGHT)
         for text, span in (("全曲", 0.0), ("1 分钟", 60.0), ("30 秒", 30.0),
                            ("10 秒", 10.0)):
@@ -247,7 +274,8 @@ class MasterAudioPanel(QWidget):
         btn_out = _big(QPushButton("缩小 −", holder), FIELD_HEIGHT)
 
         for widget in (self.btn_play, self.btn_pause, self.btn_stop, self.clock,
-                       QLabel("音量", holder), self.volume):
+                       QLabel("音量", holder), self.volume,
+                       QLabel("速度", holder), self.speeds):
             row.addWidget(widget)
         row.addStretch(1)
         for widget in (self.follow, QLabel("视图", holder), self.zooms, btn_in, btn_out):
@@ -257,10 +285,19 @@ class MasterAudioPanel(QWidget):
         self.btn_pause.clicked.connect(self.player.pause)
         self.btn_stop.clicked.connect(self.stop)
         self.volume.valueChanged.connect(self.player.setVolume)
+        self.speeds.currentIndexChanged.connect(self._speed_changed)
         self.zooms.currentIndexChanged.connect(self._zoom_preset)
         btn_in.clicked.connect(lambda: self.timeline.zoom(0.5))
         btn_out.clicked.connect(lambda: self.timeline.zoom(2.0))
+        self._speed_changed()      # 空播放器的速率是 0，先按下拉框那一档钉成 1.0×
         return holder
+
+    def _speed_changed(self, _index: int = 0) -> None:
+        """播放速率换挡。停着的时候也先记上，下次一播就是这个速度。"""
+        rate = float(self.speeds.currentData() or 1.0)
+        self.player.setPlaybackRate(rate)
+
+
 
     # ------------------------------------------------------------ 左：导航
     def _build_navigator(self) -> QWidget:
@@ -294,7 +331,10 @@ class MasterAudioPanel(QWidget):
         column.setSpacing(6)
 
         self.timeline = MasterTimeline(holder)
+        self.timeline.setToolTip("左键点＝定位／拖分段线；中键拖（或 Alt+左键拖）＝抓着音轨左右挪；\n"
+                                 "滚轮＝缩放，Shift+滚轮＝横向滚动。")
         column.addWidget(self.timeline, 1)
+
 
         # 横向滚动条：窗口小于全曲时才有意义，所以跨度变了就跟着调
         self.scroll = QScrollBar(Qt.Horizontal, holder)
@@ -403,6 +443,13 @@ class MasterAudioPanel(QWidget):
                                    key="dance.song")
         if picked:
             self.path.setText(picked)
+            self.analyze()          # 选完就直接分析，不用再点一下
+
+    def _path_typed(self) -> None:
+        """手打/粘贴完路径按回车也算"选好了"，同一首歌不重复分析。"""
+        target = self.path.text().strip()
+        if target and target != self._analyzed_path and Path(target).is_file():
+            self.analyze()
 
     def analyze(self) -> None:
         """后台分析主音频。**不改分段** —— 分析只是把参考信息摆出来。"""
@@ -412,7 +459,9 @@ class MasterAudioPanel(QWidget):
             return
         if self.worker is not None and self.worker.isRunning():
             return
+        self._analyzed_path = target
         self.btn_analyze.setEnabled(False)
+
         self.bar.setVisible(True)
         self.info.setText("正在解码和分析…")
         self.worker = MasterAudioWorker(self.cfg, target, self)
@@ -815,6 +864,7 @@ class MasterAudioPanel(QWidget):
                 "volume": int(self.volume.value()),
                 "follow": bool(self.follow.isChecked()),
                 "zoom": int(self.zooms.currentIndex()),
+                "speed": int(self.speeds.currentIndex()),
                 "anchor": int(self.anchor.currentIndex()),
                 "body": self._body.sizes()}
 
@@ -837,6 +887,10 @@ class MasterAudioPanel(QWidget):
                 widget.blockSignals(True)
                 widget.setCurrentIndex(index)
                 widget.blockSignals(False)
+        speed = data.get("speed")
+        if isinstance(speed, int) and 0 <= speed < self.speeds.count():
+            self.speeds.setCurrentIndex(speed)      # 这个要触发：播放器得真的换挡
+
         sizes = data.get("body")
         if isinstance(sizes, list) and len(sizes) == 2:
             self._body.setSizes([int(v) for v in sizes])

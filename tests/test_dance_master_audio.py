@@ -271,6 +271,77 @@ def test_zoom_and_scroll_share_one_axis(work: Path) -> None:
         db.close()
 
 
+def test_dragging_the_track_moves_the_window_not_the_zoom(work: Path) -> None:
+    """M13：鼠标抓着音轨挪 —— 只搬可见窗口，缩放倍率和分段一个都不动。"""
+    from PyQt5.QtCore import QEvent, QPoint, Qt
+    from PyQt5.QtGui import QMouseEvent
+
+    panel, _cfg, db = _panel(work, duration=60.0)
+    try:
+        timeline = panel.timeline
+        timeline.resize(1000, 300)
+        timeline.set_view(20.0, 20.0)
+        span_before = timeline.view()[1]
+
+        timeline.pan_by(100)          # 往右拽 100 像素 = 看更早的地方
+        start, span = timeline.view()
+        assert span == span_before, "挪一下把缩放也改了"
+        assert abs(start - 18.0) < 1e-6, start
+
+        timeline.pan_by(-100)
+        assert abs(timeline.view()[0] - 20.0) < 1e-6, timeline.view()
+
+        # 中键真的拖一遍：左键还得留给"点一下定位"，所以挪动只认中键/Alt+左键
+        moved: list[float] = []
+        timeline.seeked.connect(moved.append)
+        press = QMouseEvent(QEvent.MouseButtonPress, QPoint(500, 150),
+                            Qt.MiddleButton, Qt.MiddleButton, Qt.NoModifier)
+        timeline.mousePressEvent(press)
+        drag = QMouseEvent(QEvent.MouseMove, QPoint(600, 150),
+                           Qt.NoButton, Qt.MiddleButton, Qt.NoModifier)
+        timeline.mouseMoveEvent(drag)
+        release = QMouseEvent(QEvent.MouseButtonRelease, QPoint(600, 150),
+                              Qt.MiddleButton, Qt.NoButton, Qt.NoModifier)
+        timeline.mouseReleaseEvent(release)
+        assert timeline.view()[0] < 20.0, timeline.view()
+        assert not moved, "中键拖动不该顺手改播放位置"
+
+        # 全曲视图没得可挪
+        timeline.set_view(0.0, 0.0)
+        timeline.pan_by(300)
+        assert timeline.view() == (0.0, 0.0)
+    finally:
+        db.close()
+
+
+def test_playback_speed_only_changes_playback(work: Path) -> None:
+    """M14：加减速换的是播放器速率，时间轴和分段的秒数一点没动。"""
+    panel, _cfg, db = _panel(work, duration=20.0)
+    try:
+        panel.step.setValue(5.0)
+        panel._make_uniform()                                   # noqa: SLF001
+        before = panel.template.boundaries
+        assert abs(panel.player.playbackRate() - 1.0) < 1e-6
+
+        index = panel.speeds.findData(0.5)
+        assert index >= 0, "没有 0.5× 这一档"
+        panel.speeds.setCurrentIndex(index)
+        assert abs(panel.player.playbackRate() - 0.5) < 1e-6
+        assert panel.template.boundaries == before, "慢放把分段改了"
+
+        panel.speeds.setCurrentIndex(panel.speeds.findData(2.0))
+        assert abs(panel.player.playbackRate() - 2.0) < 1e-6
+
+        # 记得住：state/restore 走一圈还是这一档
+        saved = panel.state()
+        panel.speeds.setCurrentIndex(panel.speeds.findData(1.0))
+        panel.restore(saved)
+        assert abs(panel.player.playbackRate() - 2.0) < 1e-6
+    finally:
+        db.close()
+
+
+
 def test_marks_are_recorded_but_change_nothing(work: Path) -> None:
     """M10：⭐ 标记落库、再点一次取消；**它一个字都不改分段**。"""
     from dance_fixtures import fake_song
@@ -372,6 +443,8 @@ TESTS = (
     test_marks_are_recorded_but_change_nothing,
     test_playing_one_segment_stops_at_its_end,
     test_the_song_picker_really_opens,
+    test_dragging_the_track_moves_the_window_not_the_zoom,
+    test_playback_speed_only_changes_playback,
 )
 
 

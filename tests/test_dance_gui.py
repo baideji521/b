@@ -66,13 +66,11 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.matrix is not None            # 素材矩阵 + FINAL TIMELINE
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert titles == ["🎵 编排台（主音频→分段→素材→成片）", "素材资产", "音频对齐",
-                          "选择与推荐", "历史与统计"], titles
-        # 编排台是**一页**：主音频在上、下半场是素材池/对齐两块，底下三个按钮
+                          "选择与推荐", "📦 素材矩阵/成片", "历史与统计"], titles
+        # 编排台一页：最上边是「源视频/目标歌/开始音频对齐」，下面是主音频编辑区
         assert window.tabs.widget(0) is window.studio
-        assert window.studio_split.widget(0) is window.master
-        assert window.studio_split.widget(1) is window.studio_lower
-        assert window.studio_lower.widget(0) is window.matrix
-        assert window.studio_lower.widget(1) is window.bench
+        assert window.studio_split.widget(0) is window.bench
+        assert window.studio_split.widget(1) is window.master
         for button in (window.btn_preview_final, window.btn_save_all,
                        window.btn_export_final):
             assert button.minimumHeight() >= 38, button.text()

@@ -67,8 +67,10 @@ class MasterTimeline(QWidget):
         self._playhead: float | None = None
         self._cursor_time = 0.0
         self._dragging = -1                 # 正在拖第几个内部分割点，-1 = 没拖
+        self._panning: tuple[int, float] | None = None   # 抓着音轨挪：(按下时的 x, 那会儿的窗口起点)
         self._view_start = 0.0              # 可见窗口起点（秒）
         self._view_span = 0.0               # 可见窗口跨度；0 = 看全曲
+
 
     # ------------------------------------------------------------------ 输入
     def set_song(self, duration: float, envelope: list[float] | None = None) -> None:
@@ -177,6 +179,7 @@ class MasterTimeline(QWidget):
         self._zones, self._marks = [], []
         self._beats, self._snap = [], []
         self._playhead, self._cursor_time, self._dragging = None, 0.0, -1
+        self._panning = None
         self._view_start, self._view_span = 0.0, 0.0
         self.update()
 
@@ -231,8 +234,26 @@ class MasterTimeline(QWidget):
         return -1
 
     # ------------------------------------------------------------------ 交互
+    def pan_by(self, pixels: float) -> None:
+        """把音轨横着挪 `pixels` 个像素（正数 = 内容往右走，看到的是更早的地方）。
+
+        缩放倍率不动，只搬窗口起点 —— 看长卷轴就是这个手感。全曲视图没得可挪。
+        """
+        if self._view_span <= 0 or self._duration <= 0:
+            return
+        left, right = self.visible_span()
+        per_pixel = (right - left) / max(1, self.width())
+        self.scroll_to(self._view_start - float(pixels) * per_pixel)
+
     def mousePressEvent(self, event) -> None:                # noqa: N802 - Qt 的名字
         if self._duration <= 0:
+            return
+        if (event.button() == Qt.MiddleButton
+                or (event.button() == Qt.LeftButton and event.modifiers() & Qt.AltModifier)):
+            # 中键拖（或 Alt+左键拖）＝ 抓着音轨左右挪。左键单独用来定位/拖边界，
+            # 所以挪动得另给一个键，不然一拖就跳播放位置
+            self._panning = (event.x(), self._view_start)
+            self.setCursor(Qt.ClosedHandCursor)
             return
         if event.button() != Qt.LeftButton:
             return
@@ -251,6 +272,11 @@ class MasterTimeline(QWidget):
         self.seeked.emit(round(moment, 3))
 
     def mouseMoveEvent(self, event) -> None:                 # noqa: N802
+        if self._panning is not None:
+            grabbed_x, _start = self._panning
+            self.pan_by(event.x() - grabbed_x)
+            self._panning = (event.x(), self._view_start)   # 一段一段挪，免得越拖越飘
+            return
         if self._dragging >= 0:
             self.boundary_dragged.emit(self._dragging, round(self._time_of(event.x()), 3))
             return
@@ -258,9 +284,14 @@ class MasterTimeline(QWidget):
         self.setCursor(Qt.SplitHCursor if near else Qt.CrossCursor)
 
     def mouseReleaseEvent(self, event) -> None:              # noqa: N802
+        if self._panning is not None:
+            self._panning = None
+            self.setCursor(Qt.CrossCursor)
+            return
         if self._dragging >= 0:
             index, self._dragging = self._dragging, -1
             self.boundary_committed.emit(index, round(self._time_of(event.x()), 3))
+
 
     # ------------------------------------------------------------------ 画
     def paintEvent(self, event) -> None:                     # noqa: N802

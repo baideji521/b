@@ -731,9 +731,9 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
         assert "对齐/卡点测试" not in titles, "它不该再单独占一个顶级标签"
         assert window.bench is not None
-        # 它现在是编排台下半场的一个内层标签：选源视频 → 后台对齐 → 切片入库，
-        # 本来就是同一条流程里的一步
-        assert window.studio_lower.indexOf(window.bench) >= 0
+        # 它现在就是编排台最上边那一块：选源视频 → 目标歌 → 开始对齐 → 切片入库，
+        # 本来就是同一条流程里的第一步
+        assert window.studio_split.widget(0) is window.bench
         window._song_id = song_id                      # noqa: SLF001
         window.reload()                                # 刷一遍不许抛
         assert window.bench.target.text() == str(song_id), window.bench.target.text()
@@ -743,13 +743,33 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
 
         # 编排台占满整个窗口（左栏收起）；切到普通页时恢复
         window.tabs.setCurrentWidget(window.studio)
-        window.studio_lower.setCurrentWidget(window.bench)
-        assert window.studio_lower.currentWidget() is window.bench
         assert window.split.sizes()[0] == 0, window.split.sizes()
         window.tabs.setCurrentWidget(window.alignment)
         assert window.split.sizes()[0] > 0, "切回普通页之后左栏没有恢复"
+
+        # 编排台上半部分只剩一行工具栏：对齐台那一大片全收起来了
+        assert not window.bench._stack.isVisible()           # noqa: SLF001
+        # 留下的是真正干活的那几件：选视频、开始对齐、入库
+        assert window.bench.btn_start.isVisibleTo(window.bench)
+
+        # 入库三个按钮钉在整页页脚，不再夹在对齐区和主音频编辑区中间
+        assert window.studio_ingest.parent() is window.studio
+        assert window.bench.btn_ingest.parent() is window.studio_ingest
+        assert window.studio_ingest.isAncestorOf(window.bench.btn_save)
+        assert window.studio_ingest.isAncestorOf(window.bench.btn_export)
+
+        # 主音频＝目标歌：只有一处填歌，就在顶栏里；本页自己的目标歌框藏起来了
+        assert window.bench.isAncestorOf(window.master.path), "主音频那一条没并进顶栏"
+        assert not window.bench.target.isVisible()
+        assert not window.bench.btn_target.isVisible()
+        assert not window.master.btn_analyze.isVisible(), "分析按钮该收掉，选完歌自动分析"
+        window.master.path.setText("D:/songs/kapow.mp3")
+        assert window.bench.target.text() == "D:/songs/kapow.mp3", window.bench.target.text()
     finally:
         window.close()
+
+
+
 
 
 TESTS = (

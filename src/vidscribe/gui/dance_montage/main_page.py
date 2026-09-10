@@ -170,6 +170,7 @@ class DanceMontageWindow(QMainWindow):
         self.tabs.addTab(assets, "素材资产")
         self.tabs.addTab(self.alignment, "音频对齐")
         self.tabs.addTab(choose, "选择与推荐")
+        self.tabs.addTab(self.matrix, "📦 素材矩阵/成片")
         self.tabs.addTab(review, "历史与统计")
 
         left = QWidget(self)
@@ -192,17 +193,15 @@ class DanceMontageWindow(QMainWindow):
         return split
 
     def _build_studio(self) -> QWidget:
-        """编排台：**一页从上到下走完整个流程**，就是你画的那张图。
+        """编排台：这一页是**把素材真正对齐、切片、入库**的地方，从上到下：
 
-            🎵 主音频 + 播放条
-            🎤 人声导航 ｜ 音谱图/波形/人声/停顿/可取区间/Segment/播放指针
-            当前状态栏 + [上一停顿][下一停顿][在此分段][可取][播放当前段]
-            📦 素材矩阵（一列一个段落）
-            🎬 FINAL TIMELINE
-            [▶ 预览] [保存] [导出]
+            ① 源视频（可批量选）+ 目标歌 + [开始音频对齐]   ← 一切从这儿起步
+            ② 对齐结果 / 逐格能不能用 / 播放确认 / 切片并加入素材库
+            ③ 主音频编辑区：音谱图·波形·人声·停顿·可取区间·Segment·播放指针
+               （段落模板在这儿定，所有源视频都按它切）
 
-        上下两块用可拖的分隔条隔开（音频那块要高、素材那块要宽），
-        谁都不会把谁挤没。两块本身是原来那两个面板，功能一条没减。
+        素材池和 FINAL TIMELINE 挪去「素材矩阵/成片」那一页 —— 编排台先把东西入好库，
+        挑素材是入库之后的事，两件事挤在一屏里反而谁都看不清。
         """
         holder = QWidget(self)
         self.studio = holder
@@ -211,27 +210,30 @@ class DanceMontageWindow(QMainWindow):
         column.setSpacing(4)
 
         stack = QSplitter(Qt.Vertical, holder)
+        self.bench.use_compact_layout()   # 对齐台只留顶上那一行工具栏
+        # 主音频就是目标歌：把主音频那一条并进顶栏，界面上一首歌只填一处
+        self.bench.adopt_song_row(self.master.take_song_row())
+        self.master.path.textChanged.connect(self._song_picked)
+        stack.addWidget(self.bench)      # 一行：源视频 / 批量选 / 主音频 / 开始对齐
         stack.addWidget(self.master)
-        # 下半场两块并成一个内层标签页：平时看素材池，要对齐/切片时切过去。
-        # 「对齐/卡点测试」不再单独占一个顶级标签 —— 它本来就是这条流程里的一步
-        # （选源视频 → 后台多线程对齐 → 按当前分段算每格能不能用 → 切片入库），
-        # 摆在同一页里才顺手，而且功能一条没删。
-        lower = QTabWidget(holder)
-        lower.addTab(self.matrix, "📦 素材池 / 🎬 FINAL TIMELINE")
-        lower.addTab(self.bench, "🎬 源视频对齐 / 切片入库")
-        self.studio_lower = lower
-        stack.addWidget(lower)
-        stack.setStretchFactor(0, 3)
-        stack.setStretchFactor(1, 2)
-        stack.setSizes([620, 420])
+        stack.setStretchFactor(0, 0)
+        stack.setStretchFactor(1, 1)
+        stack.setSizes([110, 900])
         self.studio_split = stack
         column.addWidget(stack, 1)
 
+        # 入库那三个按钮（保存对齐结果 / 切片并加入素材库 / 导出当前测试片段）钉在整页页脚：
+        # 它们是这一页的出口，不该夹在对齐区和主音频编辑区中间
+        self.studio_ingest = self.bench.take_save_row()
+        self.studio_ingest.setParent(holder)
+        column.addWidget(self.studio_ingest)
+
         row = QHBoxLayout()
+
         row.setContentsMargins(8, 0, 8, 4)
         row.setSpacing(8)
-        self.studio_hint = QLabel("成片 = 主音频 + 每一段你选的素材。段落起止只由上面那条"
-                                  "时间轴决定。", holder)
+        self.studio_hint = QLabel("先把源视频对齐入库，再去「素材矩阵/成片」挑每一段用谁。"
+                                  "段落起止只由主音频那条时间轴决定。", holder)
         self.studio_hint.setWordWrap(True)
         self.btn_preview_final = QPushButton("▶ 预览", holder)
         self.btn_save_all = QPushButton("保存", holder)
@@ -281,12 +283,12 @@ class DanceMontageWindow(QMainWindow):
         self.start(job)
 
     def _tab_changed(self, index: int) -> None:
-        """切到「编排台」时把左边那栏收起来，让它占满整个窗口。
+        """切到「编排台」或「素材矩阵/成片」时把左边那栏收起来，让它占满整个窗口。
 
-        编排台是横向铺开的工作台（导航 + 时间轴 + 素材池），挤在 900 像素里没法用；
-        而它本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
+        这两页都是横向铺开的工作台，挤在 900 像素里没法用；
+        而它们本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
         """
-        wide = self.tabs.widget(int(index)) is self.studio
+        wide = self.tabs.widget(int(index)) in (self.studio, self.matrix)
         sizes = self.split.sizes()
         if wide:
             if sizes[0] > 0:
@@ -310,9 +312,10 @@ class DanceMontageWindow(QMainWindow):
         self.library.changed.connect(self.reload)
         self.alignment.realign_requested.connect(self._realign)
         self.alignment.changed.connect(self.reload)
-        # 测试台确认过的东西才进正式流水线：它自己只算不写
+        # 测试台确认后的入库请求才进正式流水线：它自己只算不写
         self.bench.ingest_requested.connect(self.start)
         self.bench.changed.connect(self.reload)
+
         self.candidates.manual_changed.connect(self.remix.set_manual)
         # 矩阵里拖出来的选择就是"手动指定这一格用谁"，和候选面板同一个出口
         self.matrix.picks_changed.connect(self.remix.set_manual)
@@ -322,14 +325,27 @@ class DanceMontageWindow(QMainWindow):
         self.matrix.preview_requested.connect(self._preview_material)
         self.master.template_changed.connect(lambda _t: self._reload_matrix())
         self.master.template_changed.connect(lambda _t: self._touched("template"))
+        self.recommend.adopted.connect(self._adopt)
+        self.recommend.changed.connect(self.reload)
+        self.history.rerender_requested.connect(self._rerender)
         self._install_shortcuts()
 
     def _touched(self, what: str) -> None:
         """记住最后动的是哪一样，Ctrl+Z 才知道该撤销分段还是撤销编排。"""
         self._last_edit = what
-        self.recommend.adopted.connect(self._adopt)
-        self.recommend.changed.connect(self.reload)
-        self.history.rerender_requested.connect(self._rerender)
+
+    def _song_picked(self, text: str) -> None:
+        """主音频就是目标歌：这边填了文件，对齐要用的目标歌就跟着它走。
+
+        对齐还认库里的歌 id，所以只在真是个路径时才盖 —— 用 `reload()` 填进去的
+        那个数字 id 不能被清掉。
+        """
+        value = str(text or "").strip()
+        if not value:
+            return
+        if self.bench.target.text().strip() != value:
+            self.bench.target.setText(value)
+
 
     # ------------------------------------------------------------------ 库
     def _install_shortcuts(self) -> None:

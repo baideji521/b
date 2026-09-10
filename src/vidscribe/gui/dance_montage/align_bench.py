@@ -163,6 +163,7 @@ class AlignBenchPanel(QWidget):
         self._stack = stack
         inner.addWidget(stack, 1)
         page.setMinimumHeight(640)                # 低于这个高度就出滚动条
+        self._page = page
 
         scroll = QScrollArea(self)
         scroll.setWidgetResizable(True)
@@ -172,7 +173,9 @@ class AlignBenchPanel(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(6)
         outer.addWidget(scroll, 1)
-        outer.addWidget(self._build_save())
+        self._save_box = self._build_save()
+        outer.addWidget(self._save_box)
+        self._outer = outer
 
     # ================================================================ 建界面
     #
@@ -190,6 +193,7 @@ class AlignBenchPanel(QWidget):
     def _build_header(self) -> QWidget:
         holder = QFrame(self)
         holder.setFrameShape(QFrame.StyledPanel)
+        self._header_frame = holder
         grid = QGridLayout(holder)
         grid.setContentsMargins(8, 6, 8, 6)
         grid.setHorizontalSpacing(6)
@@ -206,10 +210,13 @@ class AlignBenchPanel(QWidget):
 
         self.target = _tall(QLineEdit(holder))
         self.target.setPlaceholderText("目标歌文件，或库里的歌 id")
-        btn_target = _big(QPushButton("选音频…", holder), 30)
-        grid.addWidget(QLabel("目标歌", holder), 0, 3)
+        self.btn_target = _big(QPushButton("选音频…", holder), 30)
+        self._target_label = QLabel("目标歌", holder)
+        grid.addWidget(self._target_label, 0, 3)
         grid.addWidget(self.target, 0, 4)
-        grid.addWidget(btn_target, 0, 5)
+        grid.addWidget(self.btn_target, 0, 5)
+        self._header_grid = grid
+
 
         # 批量清单不占版面：列表本体藏起来，只留一个计数和两个按钮。
         # 结果反正会横铺在下面「批量结果」那张表里，没必要在上边再摆一遍
@@ -250,7 +257,7 @@ class AlignBenchPanel(QWidget):
         grid.addLayout(actions, 1, 0, 1, 6)
 
         btn_source.clicked.connect(self._pick_source)
-        btn_target.clicked.connect(self._pick_target)
+        self.btn_target.clicked.connect(self._pick_target)
         btn_more.clicked.connect(self._pick_more)
         btn_clear.clicked.connect(self._clear_more)
         self.btn_start.clicked.connect(self.start)
@@ -261,10 +268,12 @@ class AlignBenchPanel(QWidget):
     def _build_body(self) -> QWidget:
         body = QSplitter(Qt.Horizontal, self)
         body.setChildrenCollapsible(False)
-        body.addWidget(self._build_result())          # 左：这条到底行不行
+        self._result_box = self._build_result()       # 左：这条到底行不行
+        body.addWidget(self._result_box)
         slots = QSplitter(Qt.Vertical, body)          # 中：卡点工具 + 全曲卡点表
         slots.setChildrenCollapsible(False)
-        slots.addWidget(self._build_tools())
+        self._tools_box = self._build_tools()
+        slots.addWidget(self._tools_box)
         slots.addWidget(self._build_positions())
         slots.setStretchFactor(0, 1)
         slots.setStretchFactor(1, 4)
@@ -281,6 +290,48 @@ class AlignBenchPanel(QWidget):
         body.setSizes([400, 540, 560])
         self._body, self._slots, self._preview = body, slots, preview
         return body
+
+    def use_compact_layout(self) -> None:
+        """编排台上半部分只留**一行工具栏**：源视频 / 批量选 / 主音频 / 开始对齐 / 进度。
+
+        对齐台原来那一大片（结果、单点卡点、播这一格、全曲卡点表、批量结果、
+        时间映射、手动 Offset、日志）在编排台全部不显示 —— 那一页要的是
+        「选片 → 对齐 → 入库」，中间的诊断信息去「音频对齐」那一页看。
+
+        控件本身没删：对齐算完照旧往它们里写结果，所以逻辑和它的测试都不动，
+        只是不占版面。
+        """
+        self._stack.setVisible(False)          # 整个主体收起来，只剩顶栏那一行
+        self._page.setMinimumHeight(0)
+        self.setMaximumHeight(self._header_frame.sizeHint().height() + 16)
+
+
+    def adopt_song_row(self, row: QWidget) -> None:
+        """把主音频那一条塞进本页顶栏 —— **主音频就是目标歌**，一首歌只填一次。
+
+        原来顶栏有「目标歌」、主音频编辑区又有一条「主音频」，同一个文件填两遍，
+        还得记住哪个说了算。现在只留主音频这一条：本页自己的目标歌输入框藏起来，
+        由调用方把主音频路径同步进去，对齐照旧从 `self.target` 读。
+        """
+        self._target_label.setVisible(False)
+        self.target.setVisible(False)
+        self.btn_target.setVisible(False)
+        row.setParent(self._header_frame)
+        self._header_grid.addWidget(row, 0, 3, 1, 3)
+
+    def take_save_row(self) -> QWidget:
+        """把「确认之后才入库」那一条交出去，让调用方钉在**整页**最底下。
+
+        原来它只钉在这个控件的底边，编排台下面还压着主音频编辑区，
+        于是入库三个按钮浮在半空。摘出来往页脚一放，位置才符合它的身份：
+        这一页所有操作的出口。
+        """
+        self._outer.removeWidget(self._save_box)
+        self._save_box.setParent(None)
+        return self._save_box
+
+
+
 
 
     def _build_player(self) -> QGroupBox:
