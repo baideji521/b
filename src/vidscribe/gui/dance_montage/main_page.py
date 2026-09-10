@@ -23,6 +23,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QTabWidget,
@@ -61,6 +62,7 @@ class DanceMontageWindow(QMainWindow):
         self.db: Any = None
         self.worker: DanceMontageWorker | None = None
         self._song_id = 0
+        self._last_edit = "picks"      # Ctrl+Z 撤销哪一样：最后动过的那个
         # 上次那份界面状态（窗口位置、分栏比例、各输入框、上次选的目录）。
         # 和主界面共用 gui_settings.json，但各占一个键，互不干扰
         self.settings = gui_settings.load(cfg)
@@ -114,6 +116,8 @@ class DanceMontageWindow(QMainWindow):
         index = state.get("tab")
         if isinstance(index, int) and 0 <= index < self.tabs.count():
             self.tabs.setCurrentIndex(index)
+        # 开窗口时也得按当前这一页决定左栏收不收 —— setCurrentIndex 命中同一页不发信号
+        self._tab_changed(self.tabs.currentIndex())
         if str(self.remix.song.text()).strip().isdigit():
             self._song_typed(self.remix.song.text())
 
@@ -162,12 +166,11 @@ class DanceMontageWindow(QMainWindow):
         review_layout.addWidget(self.statistics, 2)
 
         self.tabs = QTabWidget(self)
+        self.tabs.addTab(self._build_studio(), "🎵 编排台（主音频→分段→素材→成片）")
         self.tabs.addTab(assets, "素材资产")
-        self.tabs.addTab(self.master, "主音频/分段")
         self.tabs.addTab(self.alignment, "音频对齐")
         self.tabs.addTab(self.bench, "对齐/卡点测试")
         self.tabs.addTab(choose, "选择与推荐")
-        self.tabs.addTab(self.matrix, "素材矩阵/成片")
         self.tabs.addTab(review, "历史与统计")
 
         left = QWidget(self)
@@ -189,15 +192,96 @@ class DanceMontageWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._tab_changed)
         return split
 
-    def _tab_changed(self, index: int) -> None:
-        """切到「对齐/卡点测试」或「主音频/分段」时把左边那栏收起来，让它占满整个窗口。
+    def _build_studio(self) -> QWidget:
+        """编排台：**一页从上到下走完整个流程**，就是你画的那张图。
 
-        这两页都是横向铺开的工作台（前者三栏，后者导航+时间轴），挤在 900 像素里没法用；
+            🎵 主音频 + 播放条
+            🎤 人声导航 ｜ 音谱图/波形/人声/停顿/可取区间/Segment/播放指针
+            当前状态栏 + [上一停顿][下一停顿][在此分段][可取][播放当前段]
+            📦 素材矩阵（一列一个段落）
+            🎬 FINAL TIMELINE
+            [▶ 预览] [保存] [导出]
+
+        上下两块用可拖的分隔条隔开（音频那块要高、素材那块要宽），
+        谁都不会把谁挤没。两块本身是原来那两个面板，功能一条没减。
+        """
+        holder = QWidget(self)
+        self.studio = holder
+        column = QVBoxLayout(holder)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(4)
+
+        stack = QSplitter(Qt.Vertical, holder)
+        stack.addWidget(self.master)
+        stack.addWidget(self.matrix)
+        stack.setStretchFactor(0, 3)
+        stack.setStretchFactor(1, 2)
+        stack.setSizes([620, 420])
+        self.studio_split = stack
+        column.addWidget(stack, 1)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(8, 0, 8, 4)
+        row.setSpacing(8)
+        self.studio_hint = QLabel("成片 = 主音频 + 每一段你选的素材。段落起止只由上面那条"
+                                  "时间轴决定。", holder)
+        self.studio_hint.setWordWrap(True)
+        self.btn_preview_final = QPushButton("▶ 预览", holder)
+        self.btn_save_all = QPushButton("保存", holder)
+        self.btn_export_final = QPushButton("导出", holder)
+        for button in (self.btn_preview_final, self.btn_save_all, self.btn_export_final):
+            button.setMinimumHeight(38)
+            button.setMinimumWidth(110)
+        font = self.btn_export_final.font()
+        font.setBold(True)
+        self.btn_export_final.setFont(font)
+
+        row.addWidget(self.studio_hint, 1)
+        row.addWidget(self.btn_preview_final)
+        row.addWidget(self.btn_save_all)
+        row.addWidget(self.btn_export_final)
+        column.addLayout(row)
+
+        self.btn_preview_final.clicked.connect(self._preview_final)
+        self.btn_save_all.clicked.connect(self._save_everything)
+        self.btn_export_final.clicked.connect(self._export_final)
+        return holder
+
+    def _preview_final(self) -> None:
+        """▶ 预览：放主音频（成片的音轨就是它），画面预览走素材卡片上的 ▶。"""
+        self.tabs.setCurrentIndex(0)
+        self.master.play()
+        picks = self.matrix.picks()
+        self.statusBar().showMessage(
+            f"正在放主音频；已定 {len(picks)} 段。单条素材的画面点它卡片上的「▶ 预览」，"
+            "整片效果要导出后看成品。", 8000)
+
+    def _export_final(self) -> None:
+        """导出：拿 FINAL TIMELINE 这份选择走原来的出片流水线，不另造一套。"""
+        picks = self.matrix.picks()
+        if not picks:
+            QMessageBox.information(self, "还没有选择",
+                                    "FINAL TIMELINE 上一段都还没定，先在素材池里挑。")
+            return
+        self.remix.set_manual(picks)
+        job = self.remix.job()
+        job["manual"] = dict(picks)
+        job["recommend"] = False          # 用户已经拍板了，别让推荐再插手
+        if not job.get("song"):
+            QMessageBox.information(self, "还没选目标歌",
+                                    "左边「输入与操作」里先选一首目标歌（或填库里的 id）。")
+            return
+        self.start(job)
+
+    def _tab_changed(self, index: int) -> None:
+        """切到「编排台」或「对齐/卡点测试」时把左边那栏收起来，让它占满整个窗口。
+
+        这两页都是横向铺开的工作台，挤在 900 像素里没法用；
         而它们本来就不需要左边那套混剪参数。切回别的页时恢复原来的宽度。
         """
-        bench = self.tabs.widget(int(index)) in (self.bench, self.master, self.matrix)
+        wide = self.tabs.widget(int(index)) in (self.bench, self.studio)
         sizes = self.split.sizes()
-        if bench:
+        if wide:
             if sizes[0] > 0:
                 self._left_width = sizes[0]
             self.split.setSizes([0, sum(sizes) or 1])
@@ -225,11 +309,17 @@ class DanceMontageWindow(QMainWindow):
         self.candidates.manual_changed.connect(self.remix.set_manual)
         # 矩阵里拖出来的选择就是"手动指定这一格用谁"，和候选面板同一个出口
         self.matrix.picks_changed.connect(self.remix.set_manual)
+        self.matrix.picks_changed.connect(lambda _p: self._touched("picks"))
         self.matrix.refused.connect(lambda text: self.statusBar().showMessage(text, 6000))
         self.matrix.saved.connect(lambda text: self.statusBar().showMessage(text, 4000))
         self.matrix.preview_requested.connect(self._preview_material)
         self.master.template_changed.connect(lambda _t: self._reload_matrix())
+        self.master.template_changed.connect(lambda _t: self._touched("template"))
         self._install_shortcuts()
+
+    def _touched(self, what: str) -> None:
+        """记住最后动的是哪一样，Ctrl+Z 才知道该撤销分段还是撤销编排。"""
+        self._last_edit = what
         self.recommend.adopted.connect(self._adopt)
         self.recommend.changed.connect(self.reload)
         self.history.rerender_requested.connect(self._rerender)
@@ -255,27 +345,28 @@ class DanceMontageWindow(QMainWindow):
         bind("Ctrl+Y", self._redo)
 
     def _save_everything(self) -> None:
-        """Ctrl+S：当前页该存什么就存什么（分段在主音频页，编排在矩阵页）。"""
+        """Ctrl+S / 「保存」：分段和编排一起存（编排台上两样都在同一页）。"""
         current = self.tabs.currentWidget()
-        if current is self.master:
+        if current in (self.studio, self.master):
             self.master.save_template()
-        else:
+        if current in (self.studio, self.matrix):
             self.matrix.save()
         self.save_settings()
 
     def _undo(self) -> None:
-        if self.tabs.currentWidget() is self.master:
+        """Ctrl+Z：撤销**最后动过的那一样**（分段还是素材编排）。"""
+        if self._last_edit == "template":
             self.master.undo()
             return
         if not self.matrix.undo():
-            self.statusBar().showMessage("没有可以撤销的编排改动", 3000)
+            self.master.undo()
 
     def _redo(self) -> None:
-        if self.tabs.currentWidget() is self.master:
+        if self._last_edit == "template":
             self.master.redo()
             return
         if not self.matrix.redo():
-            self.statusBar().showMessage("没有可以重做的编排改动", 3000)
+            self.master.redo()
 
     def _preview_material(self, path: str) -> None:
         """预览一条素材：复用素材库那个播放器，不另造一个。"""

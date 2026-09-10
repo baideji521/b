@@ -741,8 +741,11 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
         # 切到测试台时左边那栏要收起来：三栏工作台挤在 900 像素里没法用
         window.tabs.setCurrentWidget(window.bench)
         assert window.split.sizes()[0] == 0, window.split.sizes()
-        window.tabs.setCurrentIndex(0)
-        assert window.split.sizes()[0] > 0, "切回混剪之后左栏没有恢复"
+        # 切到「音频对齐」这种普通页时要恢复（编排台和测试台一样是宽页，也收着）
+        window.tabs.setCurrentWidget(window.alignment)
+        assert window.split.sizes()[0] > 0, "切回普通页之后左栏没有恢复"
+        window.tabs.setCurrentWidget(window.studio)
+        assert window.split.sizes()[0] == 0, "编排台也该占满整个窗口"
     finally:
         window.close()
 

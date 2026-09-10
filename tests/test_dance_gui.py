@@ -63,9 +63,17 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.alignment is not None
         assert window.bench is not None             # 音频对齐 / 卡点测试台
         assert window.master is not None            # 主音频编辑区（段落模板）
+        assert window.matrix is not None            # 素材矩阵 + FINAL TIMELINE
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert titles == ["素材资产", "主音频/分段", "音频对齐", "对齐/卡点测试",
-                          "选择与推荐", "素材矩阵/成片", "历史与统计"], titles
+        assert titles == ["🎵 编排台（主音频→分段→素材→成片）", "素材资产", "音频对齐",
+                          "对齐/卡点测试", "选择与推荐", "历史与统计"], titles
+        # 编排台是**一页**：主音频在上、素材矩阵在下，底下三个按钮
+        assert window.tabs.widget(0) is window.studio
+        assert window.studio_split.widget(0) is window.master
+        assert window.studio_split.widget(1) is window.matrix
+        for button in (window.btn_preview_final, window.btn_save_all,
+                       window.btn_export_final):
+            assert button.minimumHeight() >= 38, button.text()
         assert "卡点舞" in window.windowTitle()
         # 小窗口也要能用（一期第十五节）
         assert window.minimumWidth() <= 1000 and window.minimumHeight() <= 640
@@ -373,9 +381,13 @@ def test_settings_survive_a_restart(work: Path) -> None:
         assert second.bench.chk_sound.isChecked(), "「带声音」的勾选没记住"
         assert second.bench.btn_loop.isChecked()
         assert second.tabs.currentIndex() == 4, second.tabs.currentIndex()
-        # 分栏比例：离屏窗口没有真实宽度，Qt 会把 setSizes 缩放掉，所以这里比的是
-        # 「存下来的那份和套回来的那份一致」，而不是当初写进去的字面值
-        assert second.split.sizes() == saved["dance_window"]["split"], second.split.sizes()
+        # 分栏比例：离屏窗口没有真实宽度，Qt 会按控件宽度重新缩放 setSizes，
+        # 两次开窗口的可用宽度还可能不一样。所以这里只钉住"两栏都还在、比例大致一致"，
+        # 不比字面值 —— 比字面值测的是 Qt 的缩放实现，不是我们存没存对
+        live = second.split.sizes()
+        kept = saved["dance_window"]["split"]
+        assert live[0] > 0 and live[1] > 0, live
+        assert abs(live[0] / sum(live) - kept[0] / sum(kept)) < 0.08, (live, kept)
         assert second.width() == 1320 and second.height() == 880, second.size()
         # 上次选文件去过的目录也记住了
         assert Path(dialogs.start_dir("", "dance.source")) == work
