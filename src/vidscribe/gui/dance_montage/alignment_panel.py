@@ -135,7 +135,9 @@ class AlignmentPanel(QWidget):
             return
         from ...dance import material_repository as repo
 
-        current = float(row["offset"] or 0.0)
+        # 同样是 offset_seconds。上面那一格改对了，这里漏了一处，
+        # 于是「人工修正偏移…」一点就 IndexError —— 列名只能有一处真相
+        current = float(row["offset_seconds"] or 0.0)
         value, ok = QInputDialog.getDouble(
             self, "人工修正偏移",
             f"{row['source_name']}\n当前偏移 {current:+.3f} 秒\n"

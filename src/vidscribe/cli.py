@@ -1682,8 +1682,8 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
     from vidscribe.dance import material_repository as repo  # noqa: PLC0415
     from vidscribe.dance import material_selection as selection  # noqa: PLC0415
     from vidscribe.dance import (  # noqa: PLC0415
-        media_backend, montage_render, music_structure, recommendation, statistics,
-        strategy as strategy_mod,
+        align_probe, media_backend, montage_render, music_structure, recommendation,
+        statistics, strategy as strategy_mod,
     )
     from vidscribe.dance.types import FilterSpec  # noqa: PLC0415
 
@@ -1733,6 +1733,9 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
                 print(f"[对齐] {outcome.source_path.name}｜失败：{outcome.error}")
         print(f"共 {len(outcomes)} 个源，成功 {len(outcomes) - len(bad)}，失败 {len(bad)}")
         return 1 if bad else 0
+
+    if action == "align-test":
+        return _dance_align_test(cfg, args, db, song, ingest, align_probe, slice_duration)
 
     if action == "slice":
         sources = _dance_sources(cfg, args.sources)
@@ -1875,6 +1878,63 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
         return 0
 
     raise ValueError(f"未知动作 {action!r}")
+
+
+def _dance_align_test(cfg: Config, args: argparse.Namespace, db: Any, song: Any,
+                      ingest: Any, align_probe: Any, slice_duration: float) -> int:
+    """`align-test`：对齐验收 —— **只算不写**，和界面上那个测试台同一条后端。
+
+    存在的意义是让"这条源到底对不对"能在命令行上一次问清楚：offset、置信度、结论、
+    每一格映射到源视频哪一段、覆盖率多少。一条记录都不落库（`persist=False`），
+    所以随便试。确认好了再用 `align`／`slice` 正式来一遍。
+    """
+    sources = _dance_sources(cfg, args.sources)
+    if not sources:
+        raise ValueError("一个源视频都没找到（--sources 给目录或文件）")
+    outcomes = ingest.align_batch(db, song, sources,
+                                  workers=int(args.workers or cfg.dance["align_workers"]),
+                                  force=bool(args.force), persist=False,
+                                  on_log=lambda line: logger.info("%s", line))
+    limit = int(args.limit or 24)
+    bad = 0
+    for outcome in outcomes:
+        print("")
+        print(f"=== {outcome.source_path.name}")
+        if not outcome.ok or outcome.alignment is None:
+            print(f"    对齐失败：{outcome.error}")
+            bad += 1
+            continue
+        align = outcome.alignment
+        print(f"    offset {align.offset:+.3f}s｜置信度 {align.confidence:.3f}"
+              f"｜结论 {align.status}｜{align.window_count} 窗口"
+              f"｜源 {align.source_duration:.2f}s / 歌 {song.duration:.2f}s")
+        print(f"    口径：source_time = target_time - offset"
+              f"（target 10.000s → source {align.source_time(10.0):.3f}s）")
+        rows = align_probe.probe_all(align, song_duration=song.duration,
+                                     source_duration=align.source_duration,
+                                     slice_duration=slice_duration)
+        usable, total, ratio = align_probe.coverage_of(rows)
+        for line in align_probe.diagnose(align, rows):
+            print(f"    {line}")
+        print(f"    覆盖：可用 {usable}/{total} 格，覆盖率 {ratio * 100:.2f}%")
+        print(f"    {'#':>4}  {'目标区间':<21}  {'源区间':<21}  状态")
+        for row in rows[:limit]:
+            print(f"    {row.index:>4}  "
+                  f"{row.target_start:>8.3f} → {row.target_end:<8.3f}  "
+                  f"{row.source_start:>8.3f} → {row.source_end:<8.3f}  {row.status_text}")
+        if len(rows) > limit:
+            print(f"    …… 还有 {len(rows) - limit} 格（--limit 调）")
+        if args.at is not None:
+            one = align_probe.probe_one(align, float(args.at), slice_duration,
+                                        align.source_duration)
+            print(f"    单点：目标 {one.target_start:.3f} → {one.target_end:.3f}"
+                  f" ⇒ 源 {one.source_start:.3f} → {one.source_end:.3f}"
+                  f"｜{one.status_text}"
+                  + (f"（{one.reason}）" if one.reason else ""))
+    print("")
+    print("以上一条都没有入库（align-test 只算不写）。"
+          "确认没问题再跑 `dance-montage slice` 正式切片。")
+    return 1 if bad else 0
 
 
 def _dance_song_admin(cfg: Config, args: argparse.Namespace, db: Any, repo: Any) -> int:
@@ -2129,9 +2189,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_dance = sub.add_parser(
         "dance-montage",
         help="AI_卡点舞：目标歌对齐 → 固定位置切片 → 素材库 → 多版本混剪")
-    p_dance.add_argument("action", choices=("songs", "align", "slice", "materials",
-                                           "recommend", "remix", "stats", "history", "gui"),
-                         help="songs 列目标歌｜align 对齐｜slice 切片入库｜materials 查素材｜"
+    p_dance.add_argument("action", choices=("songs", "align", "align-test", "slice",
+                                           "materials", "recommend", "remix", "stats",
+                                           "history", "gui"),
+                         help="songs 列目标歌｜align 对齐｜align-test 对齐验收（只算不写）｜"
+                              "slice 切片入库｜materials 查素材｜"
                               "recommend 推荐｜remix 出片｜stats 统计｜history 流水｜gui 开界面")
     p_dance.add_argument("--song", default=None, metavar="ID|文件",
                          help="目标歌：库里的 id，或一个音频/视频文件路径（会自动登记分析）")
@@ -2151,6 +2213,8 @@ def build_parser() -> argparse.ArgumentParser:
                               "high_confidence/by_person/exclude_recent")
     p_dance.add_argument("--seed", type=int, default=None, help="随机种子（落库，可复现）")
     p_dance.add_argument("--position", type=int, default=None, help="只看某一个音乐位置")
+    p_dance.add_argument("--at", type=float, default=None, metavar="秒",
+                         help="align-test：额外单独试一个目标歌时刻（映射成源区间）")
     p_dance.add_argument("--person", nargs="*", default=None, help="只看某几个人物")
     p_dance.add_argument("--limit", type=int, default=None, help="列表最多显示几行")
     p_dance.add_argument("--pool", type=int, default=None, metavar="N",

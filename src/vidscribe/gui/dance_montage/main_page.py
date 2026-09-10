@@ -32,6 +32,7 @@ from PyQt5.QtWidgets import (
 
 
 from ...logging_setup import get_logger
+from .align_bench import AlignBenchPanel
 from .alignment_panel import AlignmentPanel
 from .candidate_panel import CandidatePanel
 from .filter_panel import FilterPanel
@@ -65,6 +66,7 @@ class DanceMontageWindow(QMainWindow):
         self.filters = FilterPanel(self)
         self.library = MaterialLibraryPanel(self)
         self.alignment = AlignmentPanel(self)
+        self.bench = AlignBenchPanel(cfg, self)
         self.candidates = CandidatePanel(self)
         self.recommend = RecommendationPanel(self)
         self.history = HistoryPanel(self)
@@ -103,6 +105,7 @@ class DanceMontageWindow(QMainWindow):
         self.tabs = QTabWidget(self)
         self.tabs.addTab(assets, "素材资产")
         self.tabs.addTab(self.alignment, "音频对齐")
+        self.tabs.addTab(self.bench, "对齐/卡点测试")
         self.tabs.addTab(choose, "选择与推荐")
         self.tabs.addTab(review, "历史与统计")
 
@@ -136,6 +139,9 @@ class DanceMontageWindow(QMainWindow):
         self.library.changed.connect(self.reload)
         self.alignment.realign_requested.connect(self._realign)
         self.alignment.changed.connect(self.reload)
+        # 测试台确认过的东西才进正式流水线：它自己只算不写
+        self.bench.ingest_requested.connect(self.start)
+        self.bench.changed.connect(self.reload)
         self.candidates.manual_changed.connect(self.remix.set_manual)
         self.recommend.adopted.connect(self._adopt)
         self.recommend.changed.connect(self.reload)
@@ -180,6 +186,7 @@ class DanceMontageWindow(QMainWindow):
 
         slice_duration = self.remix.slice_duration()
         self.alignment.refresh(self.db, self._song_id)
+        self.bench.refresh(self.db, self._song_id)
         self.candidates.refresh(self.db, self._song_id, slice_duration=slice_duration,
                                 spec=self._pool_spec())
 
@@ -384,6 +391,7 @@ class DanceMontageWindow(QMainWindow):
                 return
             self.worker.stop()
             self.worker.wait(15000)
+        self.bench.shutdown()          # 测试台自己那两个线程也要收干净
         if self.db is not None:
             self.db.close()
             self.db = None

@@ -235,7 +235,8 @@ def align_batch(db: Database, song: TargetSong, sources: Sequence[str | Path], *
                 workers: int = DEFAULT_WORKERS,
                 window_seconds: float = validate.WINDOW_SECONDS,
                 window_count: int = validate.WINDOW_COUNT,
-                force: bool = False, on_log: LogFn | None = None,
+                force: bool = False, persist: bool = True,
+                on_log: LogFn | None = None,
                 on_progress: Callable[[int, int, str], None] | None = None,
                 ) -> list[AlignOutcome]:
     """批量对齐。默认 4 个 worker，上限 6（技术指导第二十四节）。
@@ -245,6 +246,11 @@ def align_batch(db: Database, song: TargetSong, sources: Sequence[str | Path], *
 
     落库放在**主线程**（worker 只算不写）：`Database` 是每线程一条连接 + 整库写串行化，
     让 4 个 worker 同时抢写锁没有任何好处，还让"哪条先写"变得不确定。
+
+    `persist=False` 是**只算不写**模式，给界面上的「音频对齐 / 卡点测试」用：
+    那边只是拿一个视频加一首歌试试对不对，不该因此就往 `videos` 里塞一行、
+    往 `dance_audio_alignments` 里留一条记录。缓存照旧读（只读不写，命中就省一次全曲 FFT），
+    确认没问题之后由 `persist_alignment()` 正式落库。
     """
     log = on_log or (lambda line: logger.info("%s", line))
     report = on_progress or (lambda done, total, stage: None)
@@ -255,7 +261,8 @@ def align_batch(db: Database, song: TargetSong, sources: Sequence[str | Path], *
     cfg_hash = config_hash(align_config(sample_rate=song.sample_rate,
                                         window_seconds=window_seconds,
                                         window_count=window_count))
-    log(f"[批量对齐] {len(paths)} 个源视频，{count} 个 worker，目标歌 {song.path.name}")
+    log(f"[批量对齐] {len(paths)} 个源视频，{count} 个 worker，目标歌 {song.path.name}"
+        + ("" if persist else "（只算不写，不进库）"))
 
     # 第一步（主线程）：登记视频 + 查缓存，命中的直接出结果，不进线程池
     pending: list[tuple[Path, int, str]] = []
@@ -267,12 +274,14 @@ def align_batch(db: Database, song: TargetSong, sources: Sequence[str | Path], *
             results[str(path)] = outcome
             continue
         try:
-            outcome.video_id = db_repo.upsert_video(db, path)
+            if persist:
+                outcome.video_id = db_repo.upsert_video(db, path)
             source_fp = file_fingerprint(path)
         except Exception as exc:  # noqa: BLE001
             outcome.error = f"{type(exc).__name__}: {exc}"
             results[str(path)] = outcome
             continue
+
         key = alignment_cache_key(source_fp, song.fingerprint,
                                   ALIGNMENT_ALGORITHM_VERSION, cfg_hash)
         cached = None if force else repo.alignment_by_key(db, key)
@@ -303,9 +312,10 @@ def align_batch(db: Database, song: TargetSong, sources: Sequence[str | Path], *
                 except Exception as exc:  # noqa: BLE001
                     outcome.error = f"{type(exc).__name__}: {exc}"
                 if outcome.alignment is not None:
-                    outcome.alignment_id = repo.save_alignment(
-                        db, source_video_id=video_id, target_song_id=song.song_id,
-                        cache_key=key, alignment=outcome.alignment, config_hash=cfg_hash)
+                    if persist:
+                        outcome.alignment_id = repo.save_alignment(
+                            db, source_video_id=video_id, target_song_id=song.song_id,
+                            cache_key=key, alignment=outcome.alignment, config_hash=cfg_hash)
                     log(f"[对齐] {path.name}｜offset {outcome.alignment.offset:.3f}s"
                         f"｜{outcome.alignment.confidence:.3f}｜{outcome.alignment.status}")
                 else:
@@ -327,6 +337,44 @@ def _align_worker(song: TargetSong, path: Path, window_seconds: float,
         str(path), str(song.path), sample_rate=song.sample_rate,
         window_seconds=window_seconds, window_count=window_count,
         target_pcm=song.pcm, algorithm_version=ALIGNMENT_ALGORITHM_VERSION)
+
+
+def persist_alignment(db: Database, song: TargetSong, source: str | Path,
+                      alignment: DanceAlignment, *,
+                      window_seconds: float = validate.WINDOW_SECONDS,
+                      window_count: int = validate.WINDOW_COUNT,
+                      on_log: LogFn | None = None) -> AlignOutcome:
+    """把一份**已经算好**的对齐结果正式落库（登记源视频 + 写 dance_audio_alignments）。
+
+    给「音频对齐 / 卡点测试」用：那边先 `align_batch(persist=False)` 只算不写，
+    人工确认过了才点「保存对齐结果」走到这里。缓存键在这里现算，和
+    `align_batch` 用的是同一个 `align_config` + `alignment_cache_key`，
+    所以保存之后再跑正式流程会**命中缓存**，不会为同一份输入重算一次全曲 FFT。
+    """
+    log = on_log or (lambda line: logger.info("%s", line))
+    path = Path(source)
+    outcome = AlignOutcome(source_path=path, alignment=alignment)
+    if not path.is_file():
+        outcome.error = f"文件不存在：{path}"
+        return outcome
+    try:
+        outcome.video_id = db_repo.upsert_video(db, path)
+        source_fp = file_fingerprint(path)
+    except Exception as exc:  # noqa: BLE001 - 登记失败就明确报错，不要留一条半截记录
+        outcome.error = f"{type(exc).__name__}: {exc}"
+        return outcome
+    cfg_hash = config_hash(align_config(sample_rate=song.sample_rate,
+                                        window_seconds=window_seconds,
+                                        window_count=window_count))
+    key = alignment_cache_key(source_fp, song.fingerprint,
+                              ALIGNMENT_ALGORITHM_VERSION, cfg_hash)
+    outcome.alignment_id = repo.save_alignment(
+        db, source_video_id=outcome.video_id, target_song_id=song.song_id,
+        cache_key=key, alignment=alignment, config_hash=cfg_hash)
+    log(f"[保存] {path.name} 的对齐已入库（#{outcome.alignment_id}）"
+        f"｜offset {alignment.offset:+.3f}s｜{alignment.status}")
+    return outcome
+
 
 @dataclass
 class SliceOutcome:
@@ -452,7 +500,8 @@ def _quality_of(alignment: DanceAlignment, sections: Sequence[dict[str, Any]],
 __all__ = [
     "DEFAULT_WORKERS", "MAX_WORKERS",
     "TargetSong", "AlignOutcome", "SliceOutcome",
-    "align_config", "register_song", "align_source", "align_batch", "slice_and_register",
+    "align_config", "register_song", "align_source", "align_batch", "persist_alignment",
+    "slice_and_register",
 ]
 
 

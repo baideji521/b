@@ -422,6 +422,26 @@ def frame_rms(pcm: np.ndarray, n_fft: int = N_FFT, hop: int = HOP) -> np.ndarray
     return out
 
 
+def envelope(pcm: np.ndarray, buckets: int = 600) -> np.ndarray:
+    """画波形用的缩略包络：把整条音轨分成 `buckets` 段，每段取峰值绝对值，再归一到 0~1。
+
+    **只给显示用**，不参与任何判定 —— 所以刻意取峰值而不是 RMS：
+    界面上要一眼看出"鼓点打在哪儿"，RMS 会把它抹平。
+    整条音轨几百万点在 Qt 里逐点画是不可能的，先降到几百个桶再画。
+    """
+    track = np.abs(np.asarray(pcm, dtype=np.float32).reshape(-1))
+    size = max(1, int(buckets))
+    if track.size == 0:
+        return np.zeros(size, dtype=np.float32)
+    if track.size < size:                 # 太短就原样返回，不无中生有地插值
+        peak = float(track.max())
+        return (track / peak if peak > _EPS else track).astype(np.float32)
+    edges = np.linspace(0, track.size, size + 1).astype(np.int64)
+    out = np.maximum.reduceat(track, edges[:-1]).astype(np.float32)
+    peak = float(out.max())
+    return (out / peak).astype(np.float32) if peak > _EPS else out
+
+
 def cross_correlate(a: np.ndarray, b: np.ndarray) -> tuple[np.ndarray, int]:
     """FFT 全互相关，返回 `(相关序列, 零延迟所在下标)`。
 

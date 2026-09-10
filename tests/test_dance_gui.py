@@ -60,8 +60,10 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.candidates is not None and window.recommend is not None  # ③ 选择与推荐
         assert window.history is not None and window.statistics is not None    # ④ 历史与统计
         assert window.alignment is not None
+        assert window.bench is not None             # 音频对齐 / 卡点测试台
         titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert titles == ["素材资产", "音频对齐", "选择与推荐", "历史与统计"], titles
+        assert titles == ["素材资产", "音频对齐", "对齐/卡点测试",
+                          "选择与推荐", "历史与统计"], titles
         assert "卡点舞" in window.windowTitle()
         # 小窗口也要能用（一期第十五节）
         assert window.minimumWidth() <= 1000 and window.minimumHeight() <= 640
