@@ -28,9 +28,10 @@ from .types import DanceAlignment
 class PositionRow:
     """一个固定音乐位置的验收结果。`ok=False` 时 `reason` 一定有话说。
 
-    `head_trim` / `tail_trim` = 这一格首尾各缺了多少秒（源视频不够长导致）。
-    两个都是 0 就是完整覆盖；不为 0 说明是**部分可用**：几何关系仍然精确
-    （`source = target - offset`），只是这一格覆盖的音乐比段落本身短。
+    `head_trim` / `tail_trim` = 这一格首尾各有多少秒**源视频里没有画面**
+    （渲染时用边界帧补足，见 `material_slice.render_material`）。
+    两个都是 0 就是完整覆盖；不为 0 说明这一格是**部分可用**：时长仍然精确等于
+    段落长度（成片不会因此前移），只是那一截是静帧。
     """
 
     index: int
@@ -57,7 +58,7 @@ class PositionRow:
             return "越界"
         if self.partial:
             missing = self.head_trim + self.tail_trim
-            return f"部分可用（缺 {missing:.2f}s）"
+            return f"部分可用（补 {missing:.2f}s 静帧）"
         return "可用"
 
     def to_dict(self) -> dict[str, Any]:
@@ -67,11 +68,10 @@ class PositionRow:
                 "head_trim": self.head_trim, "tail_trim": self.tail_trim}
 
 
-def _trims(wanted_start: float, wanted_end: float, spec) -> tuple[float, float]:
-    """段落原本的范围 vs 实际切出来的范围 → 首尾各缺多少秒。"""
-    head = max(0.0, round(float(spec.target_start) - float(wanted_start), 6))
-    tail = max(0.0, round(float(wanted_end) - float(spec.target_end), 6))
-    return head, tail
+def _trims(spec) -> tuple[float, float]:
+    """这一格首尾各缺多少秒画面。**只读 spec 记好的 pad**，不在这一层重算。"""
+    return (max(0.0, float(getattr(spec, "head_pad", 0.0) or 0.0)),
+            max(0.0, float(getattr(spec, "tail_pad", 0.0) or 0.0)))
 
 
 def map_moment(alignment: DanceAlignment, target_time: float) -> float:
@@ -102,7 +102,7 @@ def probe_one(alignment: DanceAlignment, target_start: float, slice_duration: fl
                            source_start=alignment.source_time(start),
                            source_end=alignment.source_time(end),
                            ok=False, reason=str(exc))
-    head, tail = _trims(start, end, spec)
+    head, tail = _trims(spec)
     return PositionRow(index=int(index), target_start=spec.target_start,
                        target_end=spec.target_end, source_start=spec.source_start,
                        source_end=spec.source_end, ok=True,
@@ -141,7 +141,7 @@ def probe_all(alignment: DanceAlignment, *, song_duration: float, source_duratio
     for position in picks:
         spec = good.get(position.index)
         if spec is not None:
-            head, tail = _trims(position.start, position.end, spec)
+            head, tail = _trims(spec)
             rows.append(PositionRow(index=position.index, target_start=spec.target_start,
                                     target_end=spec.target_end,
                                     source_start=spec.source_start,

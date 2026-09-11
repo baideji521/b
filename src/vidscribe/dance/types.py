@@ -326,6 +326,15 @@ class SliceSpec:
     `source_start = target_start - offset`，`source_end = target_end - offset`。
     源区间越界时**必须报错**，禁止静默 clamp（clamp 会让素材内容和音乐位置错开，
     而这个系统的全部价值就建立在「素材已经绑定到该音乐位置」这一条上）。
+
+    `head_pad` / `tail_pad`：源视频那一头不够长（开头缺一点 / 提前结束）时，
+    有多少秒**没有画面可取**，渲染时用边界帧补上。恒等式：
+
+        target_end − target_start = (source_end − source_start) + head_pad + tail_pad
+        source_start = target_start + head_pad − offset
+
+    目标区间**永远是整段**，`duration` 也是整段 —— 时长精确，成片才不会因为
+    某一格短半秒而整体前移。两个 pad 都是 0 就是完整覆盖（绝大多数格子）。
     """
 
     segment_index: int
@@ -333,10 +342,21 @@ class SliceSpec:
     target_end: float
     source_start: float
     source_end: float
+    head_pad: float = 0.0
+    tail_pad: float = 0.0
 
     @property
     def duration(self) -> float:
         return round(self.target_end - self.target_start, 6)
+
+    @property
+    def source_span(self) -> float:
+        """真有画面的那一截有多长（不含补的边界帧）。"""
+        return round(self.source_end - self.source_start, 6)
+
+    @property
+    def padded(self) -> bool:
+        return bool(self.head_pad > 0.0 or self.tail_pad > 0.0)
 
     def to_dict(self) -> dict[str, Any]:
         data = _dict(self, 6)

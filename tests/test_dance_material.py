@@ -200,6 +200,42 @@ def test_canvas_follows_the_source_resolution(work: Path) -> None:
         db.close()
 
 
+def test_edge_frames_pad_a_short_source_to_the_exact_segment_length(work: Path) -> None:
+    """尾巴不够长的源：用**边界帧**补足，素材时长精确等于段落长度。
+
+    这是"成片不前移、音乐不漂"的落地保证：源只有 4 秒，段落要 3.0→5.0，
+    尾巴缺 1 秒 → 切出来的文件必须还是 2.00 秒，最后 1 秒是最后一帧的静帧。
+    """
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    try:
+        _, pcm = make_song_file(cfg, "t.wav", bpm=120.0, duration=4.0)
+        source = make_source_video(cfg, "short.mp4", pcm, fps=30.0)   # 源只有 4 秒
+
+        # 余量 0：这一段整段不要（老行为，铁律没被破坏）
+        try:
+            slicer.map_to_source(3.0, 5.0, 0.0, 4.0, segment_index=7)
+        except slicer.SourceRangeError as exc:
+            assert "超过源时长" in str(exc), exc
+        else:
+            raise AssertionError("余量 0 时越界居然被放过了")
+
+        spec = slicer.map_to_source(3.0, 5.0, 0.0, 4.0, segment_index=7, tail_room=2.0)
+        assert (spec.source_start, spec.source_end) == (3.0, 4.0), spec
+        assert (spec.head_pad, spec.tail_pad) == (0.0, 1.0), spec
+        assert spec.duration == 2.0, "目标区间必须还是整段"
+        assert spec.padded and spec.source_span == 1.0, spec
+
+        target = Path(cfg.dance_path("material_dir")) / "padded.mp4"
+        slicer.render_material(source, spec, target, canvas=CANVAS)
+        meta = mb.resolve("auto").probe(target)
+        assert abs(meta.duration - 2.0) < 0.08, meta.duration      # 补足到整段
+        assert meta.audio_streams == 0, "素材还是必须无声"
+        assert (meta.width, meta.height) == (CANVAS.width, CANVAS.height), meta
+    finally:
+        db.close()
+
+
 def test_regeneration_keeps_the_old_material(work: Path) -> None:
     """重切素材是**新增一个版本**，绝不物理删除旧素材（素材是长期资产）。"""
     cfg, db = make_project(work)
@@ -304,6 +340,7 @@ TESTS = (
     test_filename_carries_identity,
     test_render_produces_silent_normalized_material,
     test_canvas_follows_the_source_resolution,
+    test_edge_frames_pad_a_short_source_to_the_exact_segment_length,
     test_regeneration_keeps_the_old_material,
     test_resume_only_redoes_what_is_missing,
 )

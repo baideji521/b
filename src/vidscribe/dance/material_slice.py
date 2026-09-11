@@ -55,19 +55,19 @@ def map_to_source(target_start: float, target_end: float, offset: float,
     `head_room` / `tail_room`（秒，默认 0 = 老行为）是**首尾允许缺多少**：
     很多录屏素材开头少一点、结尾早结束一点，于是首段映射到源的负数、
     尾段超过源时长，整段就被判"没有素材"。给了余量之后，这两头改成
-    **取交集**：源区间夹到 `[0, source_duration]`，**目标区间同步缩短相同的量**，
-    于是 `source = target - offset` 一个字都没变，只是这一格覆盖的音乐短了一截。
+    **源区间取交集 + 缺的那一截记进 `head_pad` / `tail_pad`**，渲染时用边界帧补足：
 
         S1 目标 0→12，offset +1 → 源 −1→11
-        head_room=2 ⇒ 源 0→11、目标 1→12（缺了开头 1 秒，其余照常）
+        head_room=2 ⇒ 源 0→11、head_pad=1、目标仍然是 0→12
 
-    这**不是** clamp 源区间那种错位裁剪（那会让画面和音乐错开，是模块开头明令禁止的）：
-    两端一起缩，几何关系是精确的。代价是这一格比段落本身短，成片拼接时这一段会短
-    对应的一截 —— 所以默认为 0，要用得自己把余量填上，明确知道自己在换什么。
+    **目标区间不动、时长不变**：素材文件精确等于段落长度（开头那 1 秒是静帧），
+    所以成片不会因为某一格短一截而整体前移，音乐一点都不漂。
+    几何关系照旧精确：`source_start = target_start + head_pad − offset`。
+    这**不是** clamp 源区间那种错位裁剪（那会让画面和音乐错开，是模块开头明令禁止的）。
     """
     start = round(float(target_start) - float(offset), 6)
     end = round(float(target_end) - float(offset), 6)
-    kept_start, kept_end = round(float(target_start), 6), round(float(target_end), 6)
+    head_pad = tail_pad = 0.0
     if end <= start:
         raise SourceRangeError(f"位置 #{segment_index} 的区间非法：{start} → {end}")
     room_head = max(0.0, float(head_room))
@@ -79,7 +79,7 @@ def map_to_source(target_start: float, target_end: float, offset: float,
                 f"位置 #{segment_index}（目标 {target_start:.3f}→{target_end:.3f}）"
                 f"映射到源 {start:.3f}s，早于源视频开头 {missing:.3f}s —— 不做 clamp，"
                 f"这一段没有对应素材（首段余量 {room_head:.3f}s 不够）")
-        kept_start = round(kept_start + missing, 6)      # 目标同步后移，几何不变
+        head_pad = round(missing, 6)             # 这一截没画面，渲染时补边界帧
         start = 0.0
     duration = float(source_duration)
     if duration > 0 and end > duration + EPS:
@@ -90,14 +90,16 @@ def map_to_source(target_start: float, target_end: float, offset: float,
                 f"映射到源 {start:.3f}→{end:.3f}s，超过源时长 {duration:.3f}s "
                 f"{missing:.3f}s —— 不做 clamp，这一段没有对应素材"
                 f"（尾段余量 {room_tail:.3f}s 不够）")
-        kept_end = round(kept_end - missing, 6)          # 同上，两端一起缩
+        tail_pad = round(missing, 6)
         end = round(duration, 6)
-    if end - start <= EPS or kept_end - kept_start <= EPS:
+    if end - start <= EPS:
         raise SourceRangeError(
-            f"位置 #{segment_index}：夹到源视频范围内之后什么都不剩了")
+            f"位置 #{segment_index}：夹到源视频范围内之后一帧画面都不剩")
     return SliceSpec(segment_index=segment_index,
-                     target_start=kept_start, target_end=kept_end,
-                     source_start=max(0.0, start), source_end=end)
+                     target_start=round(float(target_start), 6),
+                     target_end=round(float(target_end), 6),
+                     source_start=max(0.0, start), source_end=end,
+                     head_pad=head_pad, tail_pad=tail_pad)
 
 
 def plan_slices(alignment: DanceAlignment, *, song_duration: float, source_duration: float,
@@ -177,6 +179,9 @@ def render_material(source: str | Path, spec: SliceSpec, target: Path, *,
     素材一律无声：目标歌是成片唯一正式音轨（技术指导第十六节），源舞蹈视频的原声
     在这一步就丢掉。留着它只会在混剪时诱惑人"混一点原声进去"，那是明确禁止的。
 
+    `spec.head_pad` / `tail_pad` 不为 0 时（源视频那一头不够长），首尾用**边界帧**
+    补足到段落的精确时长 —— 时长准了成片才不会整体前移，代价是那一截是静帧。
+
     渲染走 `media_backend`，业务层不碰编码器细节，也不允许直接 subprocess ffmpeg。
     """
     from . import media_backend  # noqa: PLC0415 - 这里才会碰 cv2/av，GUI 主线程不该导入
@@ -184,7 +189,8 @@ def render_material(source: str | Path, spec: SliceSpec, target: Path, *,
     board = canvas if canvas is not None else media_backend.Canvas()
     engine = backend if backend is not None else media_backend.resolve("auto")
     return engine.extract_clip(source, spec.source_start, spec.source_end, Path(target),
-                               board, on_log=on_log)
+                               board, pad_head=spec.head_pad, pad_tail=spec.tail_pad,
+                               on_log=on_log)
 
 
 def render_plan(source: str | Path, plan: SlicePlan, out_dir: Path, *, canvas=None,

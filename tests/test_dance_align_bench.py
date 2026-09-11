@@ -186,11 +186,10 @@ def test_head_and_tail_rooms_analyse_whatever_the_video_really_has() -> None:
     （开头缺 1 秒、结尾缺 1 秒）。
 
       余量 0（老行为）  S1 越界、S5 越界 → 3/5
-      余量 2 秒         S1 = 目标 1→12 / 源 0→11
-                        S5 = 目标 48→59 / 源 47→58      → 5/5，中间三段一个字不变
+      余量 2 秒         S1 源 0→11、head_pad 1；S5 源 47→58、tail_pad 1 → 5/5
 
-    关键是**几何没变**：`source = target − offset` 仍然精确成立，只是这两格覆盖的
-    音乐短了一截（`head_trim` / `tail_trim` 如实报出来），不是把源区间偷偷挪位。
+    **目标区间和时长一个字不动**（S1 还是 0→12、S5 还是 48→60）：缺的那一截在
+    渲染时用边界帧补足，所以成片不会前移、音乐不漂。中间三段完全不受影响。
     """
     align = _alignment(1.0, source=58.0, target=60.0)
     spans = tuple(target_positions(60.0, 12.0))
@@ -206,13 +205,15 @@ def test_head_and_tail_rooms_analyse_whatever_the_video_really_has() -> None:
                                   head_room=2.0, tail_room=2.0)
     assert all(row.ok for row in loose), [(r.index, r.reason) for r in loose]
     first, last = loose[0], loose[-1]
-    assert (first.target_start, first.target_end) == (1.0, 12.0), first
+    assert (first.target_start, first.target_end) == (0.0, 12.0), first
     assert (first.source_start, first.source_end) == (0.0, 11.0), first
     assert (first.head_trim, first.tail_trim) == (1.0, 0.0), first
-    assert first.partial and "缺 1.00s" in first.status_text, first.status_text
-    assert (last.target_start, last.target_end) == (48.0, 59.0), last
+    assert first.duration == 12.0, "时长必须还是整段，不然成片会整体前移"
+    assert first.partial and "补 1.00s 静帧" in first.status_text, first.status_text
+    assert (last.target_start, last.target_end) == (48.0, 60.0), last
     assert (last.source_start, last.source_end) == (47.0, 58.0), last
     assert (last.head_trim, last.tail_trim) == (0.0, 1.0), last
+    assert last.duration == 12.0, last
     # 中间三段完整，一个字都不许动
     for row in loose[1:4]:
         assert not row.partial and row.duration == 12.0, row
@@ -224,6 +225,9 @@ def test_head_and_tail_rooms_analyse_whatever_the_video_really_has() -> None:
     short = _alignment(0.4, source=59.6, target=60.0)
     row = align_probe.probe_one(short, 0.0, 12.0, 59.6, head_room=0.5)
     assert row.ok and abs(row.head_trim - 0.4) < 1e-6, row
+    # 恒等式：源那一截 + 首尾补的 = 整段
+    assert abs((row.source_end - row.source_start)
+               + row.head_trim + row.tail_trim - 12.0) < 1e-6, row
 
 
 def test_manual_offset_overrides_the_algorithm_and_keeps_the_original() -> None:

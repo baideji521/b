@@ -254,24 +254,24 @@ class AlignBenchPanel(QWidget):
                                  "素材库里的正式素材一条都不会动。")
         self.force = QCheckBox("忽略缓存重算", holder)
         # 首 / 尾允许缺多少秒。素材开头少半秒、结尾早停一秒是常事，那两段本来会
-        # 整段判"没素材"；给了余量就改成取交集（源夹到 [0, 时长]，目标同步缩短同样多）。
+        # 整段判"没素材"；给了余量就改成取交集，缺的那一截切片时用边界帧补足。
         # 每条视频缺多少是**按它自己的时长和 offset 现算**的，不是固定 ±1 秒
         self.head_room = QDoubleSpinBox(holder)
         self.tail_room = QDoubleSpinBox(holder)
         for spin, tip in (
-                (self.head_room, "首段允许缺多少秒：源视频开头不够时，这一格只切"
-                                 "「视频真有的那一截」，目标区间同步后移相同的量。\n"
+                (self.head_room, "首段允许缺多少秒：源视频开头不够时，这一格只取"
+                                 "「视频真有的那一截」，缺的部分用第一帧补足。\n"
                                  "0 = 差一点就整段不要（老行为）。"),
-                (self.tail_room, "尾段允许缺多少秒：源视频提前结束时，这一格只切"
-                                 "「视频真有的那一截」，目标区间同步提前结束。\n"
+                (self.tail_room, "尾段允许缺多少秒：源视频提前结束时，这一格只取"
+                                 "「视频真有的那一截」，缺的部分用最后一帧补足。\n"
                                  "0 = 差一点就整段不要（老行为）。")):
             spin.setRange(0.0, 10.0)
             spin.setSingleStep(0.5)
             spin.setDecimals(2)
             spin.setSuffix(" s")
             spin.setMaximumWidth(90)
-            spin.setToolTip(tip + "\n注意：这样切出来的素材比段落本身短，"
-                                  "成片这一段也会短对应的时间。")
+            spin.setToolTip(tip + "\n素材时长仍然精确等于段落长度（成片不前移、"
+                                  "音乐不漂），代价是那一截画面是静帧。")
         self.head_room.setValue(float(self.cfg.dance.get("slice_head_room", 0.0)))
         self.tail_room.setValue(float(self.cfg.dance.get("slice_tail_room", 0.0)))
         self.bar = QProgressBar(holder)

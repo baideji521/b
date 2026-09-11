@@ -1164,9 +1164,10 @@ class DanceMontageWindow(QMainWindow):
         一段整段落在源视频里面才给格子；越界的那格留空（不偷偷 clamp，
         那会生成画面和音乐错开的素材 —— 这套系统最不能出的错）。
 
-        **首尾例外**：顶栏「首缺≤ / 尾缺≤」给了余量时，头尾两段改成取交集 ——
-        源夹到 `[0, 时长]`，目标同步缩短同样多。判定和切片是同一处
-        （`material_slice.map_to_source`），所以矩阵里看到的格子，切片时一定切得出来。
+        **首尾例外**：顶栏「首缺≤ / 尾缺≤」给了余量时，头尾两段改成源区间取交集，
+        缺的那一截记进 `head_pad` / `tail_pad`，切片时用边界帧补足到整段时长。
+        判定和切片是同一处（`material_slice.map_to_source`），所以矩阵里看到的格子，
+        切片时一定切得出来。
 
         这些格子**不是素材**：没有 material_id、没进库，选中也只是"人工挑选的
         实验数据"，所以矩阵此时按 `attach(None, 0)` 走，一个字都不会写库。
@@ -1193,9 +1194,9 @@ class DanceMontageWindow(QMainWindow):
                 except material_slice.SourceRangeError:
                     continue                 # 这一段在这个视频里不存在，格子留空
                 source_start, source_end = spec.source_start, spec.source_end
-                # 首尾被夹过的话，这一格覆盖的音乐比段落本身短，标出来别让人以为是满的
-                missing = round((float(end) - float(start)) - spec.duration, 3)
-                short = f"　缺 {missing:.2f}s" if missing > 0.001 else ""
+                # 首尾补过静帧的话标出来，别让人以为整段都有画面
+                missing = round(spec.head_pad + spec.tail_pad, 3)
+                short = f"　补 {missing:.2f}s" if missing > 0.001 else ""
                 materials.append({
                     # 内存里的临时编号：负数，一眼看出"不是库里的素材"，
                     # 也保证不会撞上真实 material_id（自增主键都是正数）
@@ -1216,7 +1217,8 @@ class DanceMontageWindow(QMainWindow):
                     "target_end": float(spec.target_end),
                     "note": f"{row.get('name') or ''}｜还没入库（内存里的实时格子）\n"
                             f"offset {offset:+.3f}s｜置信 {float(align.confidence):.3f}"
-                            + (f"\n源视频不够长，这一格缺了 {missing:.2f}s" if short else ""),
+                            + (f"\n源视频这一头不够长，切片时补 {missing:.2f}s 边界帧"
+                               if short else ""),
                 })
             segments.append({"index": int(index), "title": title,
                              "span": (float(start), float(end)),
