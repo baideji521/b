@@ -73,6 +73,18 @@ def _panel(work: Path, *, duration: float = 20.0, with_db: bool = True):
     return panel, cfg, db
 
 
+def _manual(panel) -> None:
+    """切到「手动切分」模式。
+
+    ✂ 切分 / × 取消切分 / ⇆ 合并 / 拖边界现在**只在手动模式下生效**
+    （下拉框默认是等间切分），所以测这几件事之前必须先换挡。
+    """
+    index = panel.mode.findData("manual")
+    assert index >= 0, "分段方式下拉框里没有「手动切分」"
+    panel.mode.setCurrentIndex(index)
+    assert panel.mode_key() == "manual"
+
+
 # ================================================================== M1 ~ M3
 def test_analysis_never_touches_the_segments() -> None:
     """M1：分析只摆参考信息 —— 人声/停顿都在了，分段仍然是空的。"""
@@ -116,6 +128,7 @@ def test_split_snaps_to_the_nearest_reference_point(work: Path) -> None:
     try:
         panel.step.setValue(10.0)
         panel._make_uniform()                                     # noqa: SLF001
+        _manual(panel)
         panel._moved_to(6.04)                                     # noqa: SLF001 - 拍点在 6.0
         panel._split_here()                                       # noqa: SLF001
         assert 6.0 in panel.template.boundaries, panel.template.boundaries
@@ -130,6 +143,7 @@ def test_dragging_too_far_says_why_and_changes_nothing(work: Path) -> None:
     try:
         panel.step.setValue(5.0)
         panel._make_uniform()                                     # noqa: SLF001
+        _manual(panel)
         before = panel.template.boundaries
         panel._drag_commit(1, 5.2)          # 想把 10.0 拖到 5.2，离 5.0 只剩 0.2 秒
         assert panel.template.boundaries == before, panel.template.boundaries
@@ -149,6 +163,7 @@ def test_undo_walks_back_step_by_step(work: Path) -> None:
     try:
         panel.step.setValue(5.0)
         panel._make_uniform()                                     # noqa: SLF001
+        _manual(panel)
         first = panel.template.boundaries
         panel._moved_to(7.5)                                      # noqa: SLF001
         panel._split_here()                                       # noqa: SLF001
@@ -355,6 +370,7 @@ def test_unsplit_removes_a_boundary_not_a_clip(work: Path) -> None:
         panel.step.setValue(5.0)
         panel._make_uniform()                                   # noqa: SLF001
         assert panel.template.boundaries == (5.0, 10.0, 15.0)   # 内部那几条线
+        _manual(panel)
 
         panel._moved_to(9.6)                                    # 离 10.0 那条线最近
         assert panel.unsplit_here() is True
@@ -389,6 +405,65 @@ def test_the_visualisation_area_switches_what_it_shows(work: Path) -> None:
 
 
 
+def test_mode_dropdown_gates_each_kind_of_cut(work: Path) -> None:
+    """分段方式下拉框：选了哪种就**只有哪种**的功能，而且记住上次选的。
+
+    等间切分 → 只给「N 秒一段 + 按这个切」；✂/×/⇆ 收起，硬调也被拒
+    手动切分 → 只给 ✂/×/⇆ 和拖边界；等间那两个控件收起，`_make_uniform` 也被拒
+    """
+    from PyQt5.QtWidgets import QMessageBox
+
+    panel, _cfg, db = _panel(work)
+    original = QMessageBox.information
+    try:
+        assert panel.mode_key() == "uniform", "默认该是等间切分"
+        assert panel.step.isVisibleTo(panel) and panel.btn_uniform.isVisibleTo(panel)
+        assert not panel.btn_split.isVisibleTo(panel), "等间模式还露着 ✂ 切分"
+        assert not panel.btn_unsplit.isVisibleTo(panel)
+
+        panel.step.setValue(5.0)
+        panel._make_uniform()                                   # noqa: SLF001
+        before = panel.template.boundaries
+        assert before == (5.0, 10.0, 15.0), before
+
+        said: list = []
+        QMessageBox.information = staticmethod(          # 拦下"换个模式再来"那个提示
+            lambda *args, **kwargs: (said.append(args[1] if len(args) > 1 else ""),
+                                     QMessageBox.Ok)[1])
+        panel._moved_to(7.5)                                    # noqa: SLF001
+        panel._split_here()                                     # noqa: SLF001
+        panel._merge_here()                                     # noqa: SLF001
+        assert panel.unsplit_here() is False
+        QMessageBox.information = original
+        assert panel.template.boundaries == before, "等间模式下手动那几个居然改了分段"
+        assert len(said) == 3, said           # 三次都明确说了原因，不是静默失败
+        # 拖边界在等间模式下静默无效（拖到一半弹框最烦人）
+        panel._drag_commit(1, 12.0)                             # noqa: SLF001
+        assert panel.template.boundaries == before
+
+        _manual(panel)
+        assert panel.btn_split.isVisibleTo(panel)
+        assert not panel.step.isVisibleTo(panel), "手动模式还露着秒数框"
+        panel._moved_to(7.5)                                    # noqa: SLF001
+        panel._split_here()                                     # noqa: SLF001
+        cut = panel.template.boundaries
+        assert len(cut) == len(before) + 1, cut
+        QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
+        panel._make_uniform()                                   # noqa: SLF001 - 该被拒
+        QMessageBox.information = original
+        assert panel.template.boundaries == cut, "手动模式下等间切分居然生效了"
+
+        # 记住上次选的：state 里带着，restore 回来就是手动
+        assert panel.state()["mode"] == "manual"
+        panel.mode.setCurrentIndex(panel.mode.findData("uniform"))
+        panel.restore({"mode": "manual"})
+        assert panel.mode_key() == "manual"
+        assert panel.btn_split.isVisibleTo(panel)
+    finally:
+        QMessageBox.information = original
+        db.close()
+
+
 def test_playing_one_segment_stops_at_its_end(work: Path) -> None:
     """M11：「播放当前段」到段尾自动停；重做能把撤销掉的那一步做回来。"""
     panel, _cfg, db = _panel(work)
@@ -405,6 +480,7 @@ def test_playing_one_segment_stops_at_its_end(work: Path) -> None:
 
         # 撤销 → 重做
         first = panel.template.boundaries
+        _manual(panel)
         panel._moved_to(12.5)                                   # noqa: SLF001
         panel._split_here()                                     # noqa: SLF001
         cut = panel.template.boundaries
@@ -462,6 +538,7 @@ TESTS = (
     test_the_page_is_actually_usable,
     test_zoom_and_scroll_share_one_axis,
     test_unsplit_removes_a_boundary_not_a_clip,
+    test_mode_dropdown_gates_each_kind_of_cut,
     test_the_visualisation_area_switches_what_it_shows,
     test_playing_one_segment_stops_at_its_end,
     test_the_song_picker_really_opens,

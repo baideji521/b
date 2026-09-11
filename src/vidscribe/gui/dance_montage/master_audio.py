@@ -460,9 +460,11 @@ class MasterAudioPanel(QWidget):
         self.btn_by_pause = _big(QPushButton("照人声停顿分", holder))
         self.btn_save = _big(QPushButton("保存这份分段", holder), bold=True)
 
-        for widget in (self.step, self.btn_uniform, self.min_score, self.btn_by_pause,
-                       self.btn_save):
+        for widget in (self.min_score, self.btn_by_pause, self.btn_save):
             tools.addWidget(widget)
+        # `self.step` / `self.btn_uniform` **不进这一行**：它们被搬到状态栏那一排，
+        # 由「分段方式」下拉框控制显隐（等间切分模式下才露出来）。
+        # 加进这个 flow layout 再 setParent 走会留下一个指向别处的 layout item
         self._segment_tools.setVisible(False)
         column.addWidget(self._segment_tools)
 
@@ -486,6 +488,17 @@ class MasterAudioPanel(QWidget):
         row.setContentsMargins(8, 6, 8, 6)
 
         self.status = QLabel("当前：—", holder)
+        # 分段方式只有两种，**选了哪种就只有哪种的功能**：
+        #   等间切分 → 只给「N 秒一段 + 按这个切」，✂/×/⇆ 和拖边界全部关掉
+        #   手动切分 → 只给 ✂ 切分 / × 取消切分 / ⇆ 合并 / 拖边界，等间那两个控件收起
+        # 拦在动作里（`_uniform_mode()` / `_manual_mode()`），不只是灰按钮 ——
+        # 快捷键 S / Delete 和时间轴右键、拖边界都得认同一条规矩
+        self.mode = QComboBox(holder)
+        self.mode.setMinimumHeight(FIELD_HEIGHT)
+        self.mode.setToolTip("分段方式。选等间切分就只按秒数均分；选手动切分才允许"
+                             "切一刀 / 取消切分 / 拖边界。上次选的会记住。")
+        for text, key in (("等间切分", "uniform"), ("手动切分", "manual")):
+            self.mode.addItem(text, key)
         self.anchor = QComboBox(holder)
         self.anchor.setMinimumHeight(FIELD_HEIGHT)
         for text, key in (("跳到停顿开始", "start"), ("跳到停顿中心", "middle"),
@@ -505,9 +518,16 @@ class MasterAudioPanel(QWidget):
         self.btn_redo.setEnabled(False)
 
         # 顺序照画里那一行走：播放当前段 → 切分 → 取消切分 → 合并 → 撤销 → 重做。
-        # 停顿导航（◀▶ + 锚点）挨在它们前面，都是同一行，天天点的东西不分两处
+        # 停顿导航（◀▶ + 锚点）挨在它们前面，都是同一行，天天点的东西不分两处。
+        # 分段方式那个下拉框摆最前面 —— 它决定后面哪几个控件出现
         row.addWidget(self.status)
-        for widget in (self.anchor, self.btn_prev, self.btn_next, self.btn_play_span,
+        row.addWidget(self.mode)
+        # 等间切分那两个控件从收起来的「起步参数」里搬到这一行（只在等间模式下露出来）
+        self.step.setParent(holder)
+        self.btn_uniform.setParent(holder)
+        self.btn_uniform.setText("按这个切")
+        for widget in (self.step, self.btn_uniform, self.anchor,
+                       self.btn_prev, self.btn_next, self.btn_play_span,
                        self.btn_split, self.btn_unsplit, self.btn_merge,
                        self.btn_undo, self.btn_redo):
             row.addWidget(widget)
@@ -520,7 +540,41 @@ class MasterAudioPanel(QWidget):
         self.btn_play_span.clicked.connect(self.play_current_segment)
         self.btn_undo.clicked.connect(self._undo_once)
         self.btn_redo.clicked.connect(self._redo_once)
+        self.mode.currentIndexChanged.connect(lambda _i: self._apply_mode())
+        self._apply_mode()
         return holder
+
+    # -------------------------------------------------------------- 分段方式
+    def mode_key(self) -> str:
+        """当前分段方式：`uniform`（等间切分）或 `manual`（手动切分）。"""
+        return str(self.mode.currentData() or "uniform")
+
+    def _uniform_mode(self) -> bool:
+        return self.mode_key() == "uniform"
+
+    def _manual_mode(self) -> bool:
+        return self.mode_key() == "manual"
+
+    def _refuse_mode(self, want: str) -> None:
+        """当前模式不给干这件事，说清楚该怎么办（而不是默默什么都不发生）。"""
+        QMessageBox.information(
+            self, "当前是" + ("等间切分" if self._uniform_mode() else "手动切分"),
+            f"{want}属于另一种分段方式。\n"
+            "在状态栏那个下拉框里换成"
+            + ("「手动切分」" if self._uniform_mode() else "「等间切分」") + "再来。")
+
+    def _apply_mode(self) -> None:
+        """按当前模式露出对应的控件、收起另一套。**功能拦在动作里，这里只管界面。**"""
+        uniform = self._uniform_mode()
+        for widget in (self.step, self.btn_uniform):
+            widget.setVisible(uniform)
+        for widget in (self.btn_split, self.btn_unsplit, self.btn_merge):
+            widget.setVisible(not uniform)
+        self.timeline.setToolTip(
+            "左键按住＝拖动播放位置；中键拖（或 Alt+左键拖）＝抓着音轨左右挪；\n"
+            "滚轮＝缩放，Shift+滚轮＝横向滚动；右键＝换显示"
+            + ("。\n当前是**等间切分**：分段线不能拖，改秒数重新切就行。"
+               if uniform else " / 切分。\n当前是**手动切分**：分段线可以直接拖。"))
 
     def use_wide_layout(self) -> None:
         """编排台里让主可视化区**通栏**：左边那列「人声导航」收起来。
@@ -549,7 +603,16 @@ class MasterAudioPanel(QWidget):
             action.setChecked(self.timeline.display_mode == key)
             action.triggered.connect(lambda _c=False, k=key: self.timeline.set_display_mode(k))
         menu.addSeparator()
-        if boundary >= 0:
+        if self._uniform_mode():
+            # 等间切分模式：菜单里只给"按秒数重切"，不给切一刀/取消切分
+            menu.addAction("播放到此处").triggered.connect(
+                lambda _c=False, m=moment: self._seek_and_play(m))
+            if self.timeline.segment_at(moment) >= 0:
+                menu.addAction("▶ 播放当前段").triggered.connect(
+                    lambda _c=False, m=moment: self._play_segment_at(m))
+            menu.addAction(f"⇢ 按 {self.step.value():g} 秒等间切分").triggered.connect(
+                lambda _c=False: self._make_uniform())
+        elif boundary >= 0:
             menu.addAction("× 取消切分").triggered.connect(
                 lambda _c=False, m=moment: self.unsplit_here(m))
         else:
@@ -887,6 +950,9 @@ class MasterAudioPanel(QWidget):
         logger.info("段落编辑被拒：%s", exc)
 
     def _make_uniform(self) -> None:
+        if not self._uniform_mode():
+            self._refuse_mode("等间切分")
+            return
         if self._duration <= 0:
             QMessageBox.information(self, "先分析主音频", "还不知道这首歌多长，先点「分析主音频」。")
             return
@@ -894,6 +960,8 @@ class MasterAudioPanel(QWidget):
         try:
             self._adopt(editor.uniform(self._duration, float(self.step.value()),
                                        target_song_id=self._song_id))
+            self.status.setText(f"等间切分：{self.step.value():g} 秒一段"
+                                f"（现在 {len(self._template.spans)} 段）")
         except editor.SegmentError as exc:
             self._complain(exc)
 
@@ -912,9 +980,22 @@ class MasterAudioPanel(QWidget):
 
     def _split_here(self) -> None:
         """✂ 在当前位置切一刀。先吸附到最近的参考点，免得切出 7.043 这种边界。"""
-        if self._template is None:
-            self._make_uniform()
+        if not self._manual_mode():
+            self._refuse_mode("手动切一刀")
             return
+        if self._template is None:
+            # 手动切分也得有个底子：还没有分段时先按当前秒数铺一份，再切
+            editor = self._editor()
+            if self._duration <= 0:
+                QMessageBox.information(self, "先分析主音频",
+                                        "还不知道这首歌多长，先点「分析主音频」。")
+                return
+            try:
+                self._adopt(editor.uniform(self._duration, float(self.step.value()),
+                                           target_song_id=self._song_id))
+            except editor.SegmentError as exc:
+                self._complain(exc)
+                return
         editor = self._editor()
         moment = editor.snap(self._at, self.timeline.snap_points)
         try:
@@ -931,6 +1012,9 @@ class MasterAudioPanel(QWidget):
         走的还是 `segment_template.merge_at`，所以"合不合法"仍然只有一处判定。
         整首歌只剩一段时没有内部边界可删，说清楚就好，不硬来。
         """
+        if not self._manual_mode():
+            self._refuse_mode("取消切分")
+            return False
         if self._template is None:
             return False
         editor = self._editor()
@@ -953,6 +1037,9 @@ class MasterAudioPanel(QWidget):
 
     def _merge_here(self) -> None:
 
+        if not self._manual_mode():
+            self._refuse_mode("合并段落")
+            return
         if self._template is None:
             return
         editor = self._editor()
@@ -968,8 +1055,8 @@ class MasterAudioPanel(QWidget):
 
     def _drag_preview(self, index: int, moment: float) -> None:
         """拖动过程中的实时预览：吸附到参考点，拖不过去就**不动**（画面上就是拖不过去）。"""
-        if self._template is None:
-            return
+        if not self._manual_mode() or self._template is None:
+            return          # 等间切分模式下分段线是算出来的，不许拖（也不弹框打断拖动）
         editor = self._editor()
         target = editor.snap(moment, self.timeline.snap_points)
         try:
@@ -980,7 +1067,7 @@ class MasterAudioPanel(QWidget):
         self.timeline.set_template(moved)
 
     def _drag_commit(self, index: int, moment: float) -> None:
-        if self._template is None:
+        if not self._manual_mode() or self._template is None:
             return
         editor = self._editor()
         target = editor.snap(moment, self.timeline.snap_points)
@@ -1079,6 +1166,8 @@ class MasterAudioPanel(QWidget):
 
     def state(self) -> dict[str, Any]:
         return {"path": self.path.text().strip(), "step": float(self.step.value()),
+                # 分段方式：下次开界面接着用上次选的那种
+                "mode": self.mode_key(),
                 "min_score": float(self.min_score.value()),
                 "only_strong": bool(self.only_strong.isChecked()),
                 "volume": int(self.volume.value()),
@@ -1094,6 +1183,12 @@ class MasterAudioPanel(QWidget):
         self.path.setText(str(data.get("path") or ""))
         if data.get("step"):
             self.step.setValue(float(data["step"]))
+        # 分段方式按上次选的那种恢复，并立刻把对应那套控件摆出来
+        wanted = str(data.get("mode") or "")
+        index = self.mode.findData(wanted) if wanted else -1
+        if index >= 0:
+            self.mode.setCurrentIndex(index)
+        self._apply_mode()
         if data.get("min_score") is not None:
             self.min_score.setValue(float(data["min_score"]))
         self.only_strong.setChecked(bool(data.get("only_strong")))
