@@ -190,6 +190,9 @@ class ClipJobWorker(QThread):
     `job["kind"]`：
         `"audio"`  把源视频的音轨解成 wav（`winsound` 只认 PCM wav），
                    落在 cache 目录，同一个视频只解一次
+        `"slices"` 把**实时播放行定下的那几段**按顺序各导一个文件到指定目录
+                   （编排台页脚「切片导出」）。库里已经切好的直接拷一份，
+                   内存里的临时格子现场渲染（含首尾补边界帧）
         其它       导出 `start → end` 这一段成一个独立文件（默认）
 
     刻意**不**做"顺手把整格素材都导出来"这种事：这里只是给人工细看用的一次性副本，
@@ -206,8 +209,12 @@ class ClipJobWorker(QThread):
 
     def run(self) -> None:
         try:
-            if str(self.job.get("kind") or "") == "audio":
+            kind = str(self.job.get("kind") or "")
+            if kind == "audio":
                 self.done.emit(True, self._extract_audio())
+                return
+            if kind == "slices":
+                self.done.emit(True, self._export_slices())
                 return
             self.done.emit(True, self._export_clip())
         except Exception as exc:  # noqa: BLE001 - 后台线程抛出去就没人接了
@@ -253,6 +260,64 @@ class ClipJobWorker(QThread):
             on_log=self.log.emit)
         return str(target)
 
+
+
+    def _export_slices(self) -> str:
+        """按顺序把实时播放行定下的那几段各导一个文件，返回落地目录。
+
+        两种来源分开处理，理由是"别做多余的事"：
+          · 库里已经切好的素材（正号 id）→ **直接拷贝**。它已经归一到画布、
+            首尾该补的边界帧也早烤进去了，再解码重编一遍纯属自损画质
+          · 内存里的临时格子（负号 id）→ 现场渲染，`head_pad` / `tail_pad`
+            照样交给 `render_material` 用边界帧补足
+
+        一条失败不中断整批：记一行日志继续下一条（几十段导一半才发现全废最气人）。
+        """
+        import shutil  # noqa: PLC0415
+
+        from ...dance import material_slice, media_backend  # noqa: PLC0415
+        from ...dance.types import SliceSpec  # noqa: PLC0415
+
+        items = list(self.job.get("items") or ())
+        if not items:
+            raise ValueError("没有要导出的片段")
+        out_dir = Path(str(self.job["out_dir"]))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        engine = media_backend.resolve(str(self.cfg.dance["media_backend"]))
+        made, failed = 0, 0
+        for order, item in enumerate(items, 1):
+            target = out_dir / str(item["name"])
+            try:
+                copy_from = str(item.get("copy_from") or "")
+                if copy_from:
+                    shutil.copy2(copy_from, target)
+                    self.log.emit(f"[切片 {order}/{len(items)}] 拷贝已入库的素材 → {target.name}")
+                    made += 1
+                    continue
+                head = float(item.get("head_pad") or 0.0)
+                tail = float(item.get("tail_pad") or 0.0)
+                start = float(item["source_start"])
+                end = float(item["source_end"])
+                spec = SliceSpec(segment_index=int(item.get("segment_index") or 0),
+                                 target_start=0.0,
+                                 target_end=round(end - start + head + tail, 6),
+                                 source_start=start, source_end=end,
+                                 head_pad=head, tail_pad=tail)
+                canvas = media_backend.resolve_canvas(self.cfg, [str(item["source"])])
+                padded = f"（补 {head + tail:.2f}s 边界帧）" if head or tail else ""
+                self.log.emit(f"[切片 {order}/{len(items)}] {start:.3f}→{end:.3f}s"
+                              f"{padded} → {target.name}")
+                material_slice.render_material(str(item["source"]), spec, target,
+                                               canvas=canvas, backend=engine,
+                                               on_log=self.log.emit)
+                made += 1
+            except Exception as exc:  # noqa: BLE001 - 一条坏的不该毁掉整批
+                failed += 1
+                self.log.emit(f"[切片 {order}/{len(items)}] 失败：{type(exc).__name__}: {exc}")
+        self.log.emit(f"[切片导出] 成功 {made} 条、失败 {failed} 条 → {out_dir}")
+        if made <= 0:
+            raise RuntimeError("一条都没导出来（看上面的失败原因）")
+        return str(out_dir)
 
 
 __all__ = ["ENVELOPE_BUCKETS", "DanceAlignWorker", "ClipJobWorker"]

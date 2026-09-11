@@ -450,6 +450,46 @@ def test_changing_the_head_room_refills_the_first_column(work: Path) -> None:
         window.close()
 
 
+def test_slice_export_lists_only_the_realtime_row_in_order(work: Path) -> None:
+    """✂ 切片导出：**只导实时播放行选中的那几段**，按段落顺序编号，带首尾补帧信息。"""
+    from types import SimpleNamespace
+
+    from vidscribe.dance import segment_template as seg
+
+    clip = work / "v.mp4"
+    clip.write_bytes(b"not a real video")      # 这一步只算清单，不解码
+    window, _song_id, _m = _window(work)
+    try:
+        window.master._adopt(seg.uniform(60.0, 12.0), remember=False)   # noqa: SLF001
+        window.master._duration = 60.0                                  # noqa: SLF001
+        window.bench.head_room.setValue(2.0)
+        window.bench.tail_room.setValue(2.0)
+        window._align_rows_ready([{                                     # noqa: SLF001
+            "path": str(clip), "name": "v.mp4",
+            "alignment": SimpleNamespace(offset=1.0, confidence=0.9,
+                                         status="ok", source_duration=58.0)}])
+        # 一段都没选时不许导
+        assert window._slice_items()[0] == []                           # noqa: SLF001
+
+        assert window.matrix.choose(0, -1001) is True                   # S1（开头缺 1s）
+        assert window.matrix.choose(2, -1003) is True                   # S3（完整）
+        items, skipped = window._slice_items()                          # noqa: SLF001
+        assert skipped == [], skipped
+        assert [i["name"] for i in items] == ["01_S01_v_mp4.mp4", "02_S03_v_mp4.mp4"], items
+        assert [i["segment_index"] for i in items] == [0, 2], items
+        # S1 首尾补帧：开头缺 1 秒、结尾不缺
+        assert (items[0]["head_pad"], items[0]["tail_pad"]) == (1.0, 0.0), items[0]
+        assert (items[0]["source_start"], items[0]["source_end"]) == (0.0, 11.0), items[0]
+        # S3 完整：一点都不用补
+        assert (items[1]["head_pad"], items[1]["tail_pad"]) == (0.0, 0.0), items[1]
+        # 每一条的"源那截 + 补的" 必须正好等于段落长度 12 秒
+        for item in items:
+            span = item["source_end"] - item["source_start"]
+            assert abs(span + item["head_pad"] + item["tail_pad"] - 12.0) < 1e-6, item
+    finally:
+        window.close()
+
+
 def _library_counts(window) -> tuple[int, int]:
     """(素材数, 对齐数)。用来钉住"对齐不入库"。"""
     cursor = window.db.execute("SELECT COUNT(*) FROM dance_materials")
@@ -1027,6 +1067,7 @@ TESTS = (
     test_unaligned_rows_disappear_once_alignment_ran,
     test_right_click_can_copy_paste_and_really_delete,
     test_changing_the_head_room_refills_the_first_column,
+    test_slice_export_lists_only_the_realtime_row_in_order,
     test_frames_are_decoded_off_the_gui_thread,
     test_deleting_a_video_releases_the_file_first,
     test_window_has_all_four_regions,

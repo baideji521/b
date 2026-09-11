@@ -91,6 +91,8 @@ class DanceMontageWindow(QMainWindow):
         self.cfg = cfg
         self.db: Any = None
         self.worker: DanceMontageWorker | None = None
+        #: 页脚「切片导出」那条后台线程（渲染要几秒到几十秒，不能在 GUI 线程干）
+        self.slices: Any = None
         self._song_id = 0
         self._last_edit = "picks"      # Ctrl+Z 撤销哪一样：最后动过的那个
         self._live_material = 0        # 实时画面现在开着哪条素材（0 = 空）
@@ -403,8 +405,15 @@ class DanceMontageWindow(QMainWindow):
         self.studio_hint.setWordWrap(True)
         self.btn_preview_final = QPushButton("▶ 预览", holder)
         self.btn_save_all = QPushButton("保存", holder)
+        self.btn_slices = QPushButton("✂ 切片导出…", holder)
+        self.btn_slices.setToolTip(
+            "把**实时播放行**里定下的那几段，按段落顺序单独导出到一个目录。\n"
+            "文件名带序号（01_S01_…），在资源管理器里按名字排就是播放顺序。\n"
+            "源视频那一头不够长的，照样用边界帧补足到整段时长。\n"
+            "只导这一行选中的，没选的段落不管。")
         self.btn_export_final = QPushButton("导出", holder)
-        for button in (self.btn_preview_final, self.btn_save_all, self.btn_export_final):
+        for button in (self.btn_preview_final, self.btn_save_all,
+                       self.btn_slices, self.btn_export_final):
             button.setMinimumHeight(38)
             button.setMinimumWidth(110)
         font = self.btn_export_final.font()
@@ -414,11 +423,13 @@ class DanceMontageWindow(QMainWindow):
         row.addWidget(self.studio_hint, 1)
         row.addWidget(self.btn_preview_final)
         row.addWidget(self.btn_save_all)
+        row.addWidget(self.btn_slices)
         row.addWidget(self.btn_export_final)
         column.addLayout(row)
 
         self.btn_preview_final.clicked.connect(self._preview_final)
         self.btn_save_all.clicked.connect(self._save_everything)
+        self.btn_slices.clicked.connect(self._export_slices)
         self.btn_export_final.clicked.connect(self._export_final)
         return holder
 
@@ -786,6 +797,96 @@ class DanceMontageWindow(QMainWindow):
                                     "顶栏「混剪控制台」里先选一首目标歌（或填库里的 id）。")
             return
         self.start(job)
+
+    def _slice_items(self, out_name: str = "") -> tuple[list[dict[str, Any]], list[str]]:
+        """把实时播放行的选择摊成"导出清单"，返回 `(清单, 说不出口的那几条)`。
+
+        清单**按段落顺序**排，文件名带序号 —— 资源管理器里按名字排就是播放顺序。
+        库里已经切好的素材记 `copy_from`（直接拷），内存里的临时格子记源区间 + 首尾
+        要补多少边界帧（现场渲染）。
+        """
+        items: list[dict[str, Any]] = []
+        skipped: list[str] = []
+        for order, index in enumerate(sorted(self.matrix.picks()), 1):
+            payload = self.matrix.current_payload(int(index))
+            if not payload:
+                skipped.append(f"S{int(index) + 1}：这一格已经空了")
+                continue
+            path = str(payload.get("path") or "")
+            if not path or not Path(path).is_file():
+                skipped.append(f"S{int(index) + 1}：文件不在了（{path}）")
+                continue
+            name = str(payload.get("video_name") or Path(path).stem)
+            safe = "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in name)[:40]
+            item: dict[str, Any] = {
+                "name": f"{order:02d}_S{int(index) + 1:02d}_{safe}.mp4",
+                "segment_index": int(index),
+            }
+            if int(payload.get("material_id") or 0) > 0:
+                # 库里的素材文件本身就是切好的（画布、补帧都已经烤进去了）
+                item["copy_from"] = path
+                items.append(item)
+                continue
+            base = float(payload.get("seek_base", payload.get("target_start") or 0.0) or 0.0)
+            begin = float(payload.get("target_start") or 0.0) - base
+            finish = float(payload.get("target_end") or 0.0) - base
+            source_start = float(payload.get("source_start") or 0.0)
+            source_end = float(payload.get("source_end") or 0.0)
+            if source_end - source_start <= 0.0:
+                skipped.append(f"S{int(index) + 1}：这一格没有可用的源区间")
+                continue
+            item.update({
+                "source": path,
+                "source_start": source_start, "source_end": source_end,
+                # 首尾各缺多少 = 想要的区间 vs 源里真有的区间。和切片那条路同一套算法，
+                # 所以导出来的东西和入库素材逐帧一致
+                "head_pad": max(0.0, round(source_start - begin, 6)),
+                "tail_pad": max(0.0, round(finish - source_end, 6)),
+            })
+            items.append(item)
+        return items, skipped
+
+    def _export_slices(self) -> None:
+        """✂ 切片导出：把实时播放行定下的那几段，按顺序单独导到一个目录。
+
+        **只导这一行选中的**（没选的段落一概不管），首尾不够长的照样补边界帧，
+        所以每个文件的时长精确等于它那一段。不写库、不影响素材库。
+        """
+        if self.slices is not None and self.slices.isRunning():
+            QMessageBox.information(self, "还在导", "上一批切片还没导完。")
+            return
+        items, skipped = self._slice_items()
+        if not items:
+            QMessageBox.information(
+                self, "没有可导出的片段",
+                "实时播放行上一段都还没定 —— 在矩阵里点几格再来。\n"
+                + ("\n".join(skipped[:6]) if skipped else ""))
+            return
+        out = dialogs.open_dir(self, "选切片导出目录",
+                              self.cfg.dance_path("output_dir"), "dance.slice_out")
+        if not out:
+            return
+        if skipped:
+            self.remix.append_log("[切片导出] 跳过：" + "；".join(skipped[:6]))
+        from .align_worker import ClipJobWorker
+
+        self.slices = ClipJobWorker(self.cfg, {"kind": "slices", "items": items,
+                                               "out_dir": out}, self)
+        self.slices.log.connect(self.remix.append_log)
+        self.slices.done.connect(self._slices_done)
+        self.btn_slices.setEnabled(False)
+        self.remix.append_log(f"[切片导出] {len(items)} 段 → {out}")
+        self.statusBar().showMessage(f"正在导出 {len(items)} 段切片…", 0)
+        self.slices.start()
+
+    def _slices_done(self, ok: bool, message: str) -> None:
+        self.btn_slices.setEnabled(True)
+        self.statusBar().clearMessage()
+        if ok:
+            QMessageBox.information(self, "切片导出完成",
+                                    f"已按顺序导出到：\n{message}")
+        else:
+            QMessageBox.warning(self, "切片导出失败", message)
 
     def _wire(self) -> None:
         self.remix.start_requested.connect(self.start)
@@ -1496,6 +1597,8 @@ class DanceMontageWindow(QMainWindow):
         self.bench.shutdown()          # 测试台自己那两个线程也要收干净
         self.master.shutdown()         # 主音频分析线程同理
         self.prefetch.shutdown()       # 片段预解码线程
+        if self.slices is not None and self.slices.isRunning():
+            self.slices.wait(15000)    # 切片导出没有中断口子，等它写完这一条
         self.save_settings()           # 窗口位置、分栏比例、各输入框都留到下次
         if self.db is not None:
             self.db.close()
