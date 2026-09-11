@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox    # noqa: E402
+from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox, QWidget    # noqa: E402
 
 from vidscribe.dance import align_probe                        # noqa: E402
 from vidscribe.dance import alignment_validation as validate    # noqa: E402
@@ -912,12 +912,37 @@ def test_align_click_also_decodes_the_master_audio(work: Path) -> None:
         window.close()
 
 
+def test_the_compact_row_leaves_no_widget_without_a_layout(work: Path) -> None:
+    """编排台那一行是把顶栏 grid 整个清空重排的：**不许漏下任何还看得见的控件**。
+
+    漏下的控件没人给它摆位置，就贴在左上角 (0,0) 互相压着、还被裁掉一半 ——
+    界面上多出一个谁也说不清是什么的小方块（首尾余量那两个框就这么漏过一次）。
+    """
+    panel, _cfg, db = _panel(work)
+    try:
+        panel.use_compact_layout()
+        grid = panel._header_grid                                    # noqa: SLF001
+        managed = {id(grid.itemAt(i).widget()) for i in range(grid.count())
+                   if grid.itemAt(i).widget() is not None}
+        orphans = [type(child).__name__ for child in panel._header_frame.children()  # noqa: SLF001
+                   if isinstance(child, QWidget) and not child.isHidden()
+                   and id(child) not in managed]
+        assert not orphans, f"这些控件没被布局管：{orphans}"
+        # 首尾余量还在这一行里，而且是能点的（它决定 S1/S5 分析多少）
+        assert id(panel._rooms_row) in managed                       # noqa: SLF001
+        assert not panel.head_room.isHidden() and not panel.tail_room.isHidden()
+    finally:
+        db.close()
+
+
 TESTS = (
+
     test_target_to_source_is_a_single_subtraction,
     test_span_maps_to_span,
     test_out_of_range_span_is_refused_not_clamped,
     test_negative_offset_means_source_starts_first,
     test_head_and_tail_rooms_analyse_whatever_the_video_really_has,
+    test_the_compact_row_leaves_no_widget_without_a_layout,
     test_manual_offset_overrides_the_algorithm_and_keeps_the_original,
     test_fixed_two_second_positions,
     test_a_48_second_song_has_24_positions,

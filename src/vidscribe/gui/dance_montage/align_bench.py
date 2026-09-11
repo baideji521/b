@@ -286,6 +286,17 @@ class AlignBenchPanel(QWidget):
         self.bar.setFormat("%v / %m")
         self.bar.setToolTip("只算不写：对齐这一步不登记素材、不切片、不动任何计数")
 
+        # 首/尾余量装成**一个**控件再摆出去：编排台那一行是把顶栏 grid 整个清空重排的，
+        # 散着放的标签和输入框会被漏在外面 —— 没布局管、挤在左上角互相压着还被裁掉一半
+        self._rooms_row = QWidget(holder)
+        rooms = QHBoxLayout(self._rooms_row)
+        rooms.setContentsMargins(0, 0, 0, 0)
+        rooms.setSpacing(4)
+        rooms.addWidget(QLabel("首缺≤", self._rooms_row))
+        rooms.addWidget(self.head_room)
+        rooms.addWidget(QLabel("尾缺≤", self._rooms_row))
+        rooms.addWidget(self.tail_room)
+
         actions = QHBoxLayout()
         actions.setSpacing(6)
         for widget in (btn_more, self.btn_folder, btn_clear, self.more_hint):
@@ -295,10 +306,7 @@ class AlignBenchPanel(QWidget):
         actions.addWidget(self.btn_stop)
         actions.addWidget(self.btn_reset)
         actions.addWidget(self.force)
-        actions.addWidget(QLabel("首缺≤", holder))
-        actions.addWidget(self.head_room)
-        actions.addWidget(QLabel("尾缺≤", holder))
-        actions.addWidget(self.tail_room)
+        actions.addWidget(self._rooms_row)
         actions.addWidget(self.bar, 2)
         grid.addLayout(actions, 1, 0, 1, 6)
 
@@ -380,7 +388,7 @@ class AlignBenchPanel(QWidget):
         grid = self._header_grid
         while grid.count():                     # 重排成画里那一行
             grid.takeAt(0)
-        for column in range(6):
+        for column in range(8):
             grid.setColumnStretch(column, 0)
         # 主音频那一条自己就带「主音频」标签（见 master_audio._build_header），
         # 这里**不再加第二个** —— 之前一行里"🎵 主音频"和"主音频"挨着出现两遍
@@ -389,13 +397,15 @@ class AlignBenchPanel(QWidget):
         grid.addWidget(self._folder_label, 0, 1)
         grid.addWidget(self.folder, 0, 2)
         grid.addWidget(self.btn_folder, 0, 3)
-        grid.addWidget(QLabel("🔗 音频对齐", self._header_frame), 0, 4)
-        grid.addWidget(self.btn_start, 0, 5)
-        grid.addWidget(self.btn_stop, 0, 6)
+        # 首/尾余量跟着「开始音频对齐」走：它就是这一步的参数
+        grid.addWidget(self._rooms_row, 0, 4)
+        grid.addWidget(QLabel("🔗 音频对齐", self._header_frame), 0, 5)
+        grid.addWidget(self.btn_start, 0, 6)
+        grid.addWidget(self.btn_stop, 0, 7)
         grid.setColumnStretch(0, 3)             # 两个路径框占大头
         grid.setColumnStretch(2, 2)
         for widget in (self._folder_label, self.folder, self.btn_folder,
-                       self.btn_start, self.btn_stop):
+                       self._rooms_row, self.btn_start, self.btn_stop):
             widget.setVisible(True)
         self.setMinimumHeight(self._header_frame.minimumSizeHint().height() + 14)
 
