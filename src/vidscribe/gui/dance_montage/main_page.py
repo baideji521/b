@@ -193,7 +193,9 @@ class DanceMontageWindow(QMainWindow):
         self.state["remix"] = self.remix.state()
         self.state["master"] = self.master.state()
         self.state["bench"] = self.bench.state()
-        gui_settings.save(self.cfg, self.settings)
+        # 只写 dance_window 这一个键：主界面手里也捏着一份整份快照，
+        # 整份写回去会被它按老快照抹掉（分段方式就是这么丢的）
+        gui_settings.update(self.cfg, {"dance_window": self.state})
 
 
     # ------------------------------------------------------------------ 界面

@@ -949,7 +949,7 @@ class MainWindow(QMainWindow):
         rect = self.normalGeometry() if self.isMaximized() else self.geometry()
         if rect.width() <= 0 or rect.height() <= 0:
             rect = self.geometry()
-        self.settings.update({
+        patch: dict = {
             "visual_model": self.cmb_model.currentData(),
             "speaker_model": self.cmb_speaker.currentData(),
             "importance_index": self.cmb_importance.currentIndex(),
@@ -969,10 +969,13 @@ class MainWindow(QMainWindow):
             "timeline_row_height": self.table.verticalHeader().defaultSectionSize(),
             "highlight_offsets": list(self._highlight_offsets),
             "bridge_token": self._bridge_token,
-        })
+        }
         for splitter, key in self._splitters():
-            self.settings[key] = splitter.sizes()
-        gui_settings.save(self.cfg, self.settings)
+            patch[key] = splitter.sizes()
+        # 只写自己名下这些键：卡点舞是同进程另一个窗口，各拿一份整份快照，
+        # 整份写回去就会把它后写的 dance_window 按老快照抹掉
+        self.settings.update(patch)
+        gui_settings.update(self.cfg, patch)
 
 
     # ------------------------------------------------------------- 高级选项

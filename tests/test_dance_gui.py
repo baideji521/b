@@ -1060,7 +1060,85 @@ def test_every_panel_fills_its_table_with_real_rows(work: Path) -> None:
         window.close()
 
 
+def test_the_main_window_cannot_wipe_what_the_studio_just_saved(work: Path) -> None:
+    """主界面和卡点舞共用一个 `gui_settings.json`，**各自只写自己名下的键**。
+
+    以前两边都是启动时读整份、退出时写整份：主界面那份快照是开卡点舞之前读的，
+    它一落盘就把卡点舞后写的 `dance_window` 按老快照抹回去 ——
+    选了「手动切分」关掉窗口，再开就又变成「等间切分」，就是这么丢的。
+    """
+    from types import SimpleNamespace
+
+    from vidscribe.gui import main_window as mw
+    from vidscribe.gui import settings as gui_settings
+
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    db.close()
+
+    first = main_page.DanceMontageWindow(cfg)
+    try:
+        assert first.master.mode_key() == "uniform"
+    finally:
+        first.close()
+    # 主界面就是在这一刻开的：它手里这份快照里，分段方式还是"等间切分"
+    stale = gui_settings.load(cfg)
+    assert stale["dance_window"]["master"]["mode"] == "uniform"
+
+    second = main_page.DanceMontageWindow(cfg)
+    try:
+        second.master.mode.setCurrentIndex(second.master.mode.findData("manual"))
+    finally:
+        second.close()
+    assert gui_settings.load(cfg)["dance_window"]["master"]["mode"] == "manual"
+
+    # 主界面这才退出，用的还是那份老快照
+    class _Box:
+        def __init__(self, value: object = 0) -> None:
+            self._v = value
+
+        def currentData(self) -> object:
+            return self._v
+
+        def currentIndex(self) -> int:
+            return 0
+
+        def value(self) -> float:
+            return 0.5
+
+        def isChecked(self) -> bool:
+            return False
+
+    rect = SimpleNamespace(x=lambda: 0, y=lambda: 0,
+                           width=lambda: 800, height=lambda: 600)
+    fake = SimpleNamespace(
+        cfg=cfg, settings=stale, _loading_settings=False,
+        isMaximized=lambda: False, geometry=lambda: rect, normalGeometry=lambda: rect,
+        cmb_model=_Box("qwen"), cmb_speaker=_Box("ecapa"), cmb_importance=_Box(),
+        spin_conf=_Box(), chk_sound=_Box(), chk_auto_ai=_Box(),
+        chk_auto_translate=_Box(), chk_emotion_audio=_Box(), chk_emotion_visual=_Box(),
+        export_dir=None, video_path=None,
+        table=SimpleNamespace(columnCount=lambda: 0, columnWidth=lambda _c: 0,
+                              verticalHeader=lambda: SimpleNamespace(
+                                  defaultSectionSize=lambda: 24)),
+        _highlight_offsets=(), _bridge_token="", _splitters=lambda: (),
+    )
+    mw.MainWindow.save_settings(fake)
+
+    saved = gui_settings.load(cfg)
+    assert saved["dance_window"]["master"]["mode"] == "manual", \
+        "主界面落盘把卡点舞刚存的分段方式抹掉了"
+    assert saved["visual_model"] == "qwen", "主界面自己那几个键还是要存下来"
+
+    third = main_page.DanceMontageWindow(cfg)
+    try:
+        assert third.master.mode_key() == "manual", "重开界面又回到等间切分了"
+    finally:
+        third.close()
+
+
 TESTS = (
+
     test_the_master_audio_drives_the_realtime_row,
     test_segment_frames_are_predecoded_into_memory,
     test_live_window_covers_both_kinds_of_material,
@@ -1079,6 +1157,7 @@ TESTS = (
     test_start_refuses_empty_manual_when_recommend_off,
     test_file_pickers_use_the_system_dialog_and_remember_the_folder,
     test_settings_survive_a_restart,
+    test_the_main_window_cannot_wipe_what_the_studio_just_saved,
     test_launch_installs_an_excepthook,
     test_worker_is_isolated_from_analyze_worker,
     test_worker_runs_the_whole_job,
