@@ -64,6 +64,9 @@ SPECTRUM_ROWS = 96
 
 BUTTON_HEIGHT = 34
 FIELD_HEIGHT = 30
+#: 离末尾还差这么多秒就算"已经播到头了"。播放器最后一次位置回调很少正好落在
+#: 整数时长上（50ms 一次，还有解码余量），留点余量才不会"看着播完了，再按却不重头"
+END_SLACK = 0.12
 
 
 def _big(button, height: int = BUTTON_HEIGHT, *, bold: bool = False):
@@ -857,10 +860,17 @@ class MasterAudioPanel(QWidget):
 
     # ------------------------------------------------------------ 播放 / 视图
     def play(self) -> None:
-        """从当前位置继续播。整曲播放不设自动停。"""
+        """从当前位置继续播。整曲播放不设自动停。
+
+        **播到头了再按播放 = 从头开始**：不然播完一遍播放头停在末尾，
+        想再听一遍还得自己拖回 0，天天听几十遍这一下最烦人。
+        判定留 `END_SLACK` 的余量：播放器最后一次回调很少正好落在整数时长上。
+        """
         if self._duration <= 0:
             return
         self._stop_at = None
+        if self._at >= self._duration - END_SLACK:
+            self.seek_to(0.0)          # 播放头、矩阵、实时画面一起回开头
         self.player.setPosition(int(self._at * 1000))
         self.player.play()
 

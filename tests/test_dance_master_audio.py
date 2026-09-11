@@ -464,6 +464,33 @@ def test_mode_dropdown_gates_each_kind_of_cut(work: Path) -> None:
         db.close()
 
 
+def test_pressing_play_after_the_end_starts_over(work: Path) -> None:
+    """播到头了再按播放 = **从头开始**，不用自己拖回 0；中途暂停再播不许乱跳。"""
+    panel, _cfg, db = _panel(work)
+    try:
+        seen: list = []
+        panel.seek_requested.connect(seen.append)
+
+        panel._moved_to(20.0)                                   # noqa: SLF001 - 播到末尾
+        assert panel._at == 20.0                                # noqa: SLF001
+        panel.play()
+        assert panel._at == 0.0, panel._at                      # noqa: SLF001
+        assert seen[-1] == 0.0, seen        # 矩阵和实时画面也得跟着回开头
+
+        # 差一点点到末尾也算播完了（播放器最后一次回调很少正好落在整数时长上）
+        panel._moved_to(20.0 - 0.05)                            # noqa: SLF001
+        panel.play()
+        assert panel._at == 0.0, panel._at                       # noqa: SLF001
+
+        # 中间某处暂停再按播放：接着播，不许跳回开头
+        panel._moved_to(7.5)                                    # noqa: SLF001
+        seen.clear()
+        panel.play()
+        assert panel._at == 7.5, panel._at                       # noqa: SLF001
+    finally:
+        db.close()
+
+
 def test_playing_one_segment_stops_at_its_end(work: Path) -> None:
     """M11：「播放当前段」到段尾自动停；重做能把撤销掉的那一步做回来。"""
     panel, _cfg, db = _panel(work)
@@ -539,6 +566,7 @@ TESTS = (
     test_zoom_and_scroll_share_one_axis,
     test_unsplit_removes_a_boundary_not_a_clip,
     test_mode_dropdown_gates_each_kind_of_cut,
+    test_pressing_play_after_the_end_starts_over,
     test_the_visualisation_area_switches_what_it_shows,
     test_playing_one_segment_stops_at_its_end,
     test_the_song_picker_really_opens,
