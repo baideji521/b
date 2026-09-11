@@ -35,7 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from PyQt5.QtWidgets import QApplication, QMessageBox          # noqa: E402
+from PyQt5.QtWidgets import QApplication, QLabel, QMessageBox    # noqa: E402
 
 from vidscribe.dance import align_probe                        # noqa: E402
 from vidscribe.dance import alignment_validation as validate    # noqa: E402
@@ -177,6 +177,53 @@ def test_negative_offset_means_source_starts_first() -> None:
     first = align_probe.probe_all(align, song_duration=10.0, source_duration=40.0,
                                  slice_duration=2.0)[0]
     assert first.ok, first.reason
+
+
+def test_head_and_tail_rooms_analyse_whatever_the_video_really_has() -> None:
+    """首尾余量：视频开头少一点、结尾早停一点，这两段**按实际有多少就分析多少**。
+
+    场景就是最常见的那个：60 秒主音频、5 段各 12 秒，视频 offset +1 且只有 58 秒
+    （开头缺 1 秒、结尾缺 1 秒）。
+
+      余量 0（老行为）  S1 越界、S5 越界 → 3/5
+      余量 2 秒         S1 = 目标 1→12 / 源 0→11
+                        S5 = 目标 48→59 / 源 47→58      → 5/5，中间三段一个字不变
+
+    关键是**几何没变**：`source = target − offset` 仍然精确成立，只是这两格覆盖的
+    音乐短了一截（`head_trim` / `tail_trim` 如实报出来），不是把源区间偷偷挪位。
+    """
+    align = _alignment(1.0, source=58.0, target=60.0)
+    spans = tuple(target_positions(60.0, 12.0))
+    assert len(spans) == 5, spans
+
+    strict = align_probe.probe_all(align, song_duration=60.0, source_duration=58.0,
+                                   slice_duration=12.0, positions=spans)
+    assert [row.ok for row in strict] == [False, True, True, True, False], \
+        [(r.index, r.ok, r.reason) for r in strict]
+
+    loose = align_probe.probe_all(align, song_duration=60.0, source_duration=58.0,
+                                  slice_duration=12.0, positions=spans,
+                                  head_room=2.0, tail_room=2.0)
+    assert all(row.ok for row in loose), [(r.index, r.reason) for r in loose]
+    first, last = loose[0], loose[-1]
+    assert (first.target_start, first.target_end) == (1.0, 12.0), first
+    assert (first.source_start, first.source_end) == (0.0, 11.0), first
+    assert (first.head_trim, first.tail_trim) == (1.0, 0.0), first
+    assert first.partial and "缺 1.00s" in first.status_text, first.status_text
+    assert (last.target_start, last.target_end) == (48.0, 59.0), last
+    assert (last.source_start, last.source_end) == (47.0, 58.0), last
+    assert (last.head_trim, last.tail_trim) == (0.0, 1.0), last
+    # 中间三段完整，一个字都不许动
+    for row in loose[1:4]:
+        assert not row.partial and row.duration == 12.0, row
+        assert row.source_start == row.target_start - 1.0, row
+
+    # 缺得比余量多，照旧拒绝 —— 余量是"允许多少"，不是"随便夹"
+    assert not align_probe.probe_one(align, 0.0, 12.0, 58.0, head_room=0.5).ok
+    # 每条视频缺多少是按它自己的时长现算的：这条只缺 0.4 秒，0.5 的余量就够
+    short = _alignment(0.4, source=59.6, target=60.0)
+    row = align_probe.probe_one(short, 0.0, 12.0, 59.6, head_room=0.5)
+    assert row.ok and abs(row.head_trim - 0.4) < 1e-6, row
 
 
 def test_manual_offset_overrides_the_algorithm_and_keeps_the_original() -> None:
@@ -728,8 +775,7 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
 
     window = main_page.DanceMontageWindow(cfg)
     try:
-        titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert "对齐/卡点测试" not in titles, "它不该再单独占一个顶级标签"
+        assert not hasattr(window, "tabs"), "编排台是一页到底，不该再有 Tab"
         assert window.bench is not None
         # 它现在就是编排台最上边那一块：选源视频 → 目标歌 → 开始对齐 → 切片入库，
         # 本来就是同一条流程里的第一步
@@ -741,19 +787,28 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
         assert window.bench.receivers(window.bench.ingest_requested) >= 1
         assert window.bench.receivers(window.bench.changed) >= 1
 
-        # 编排台占满整个窗口（左栏收起）；切到普通页时恢复
-        window.tabs.setCurrentWidget(window.studio)
-        assert window.split.sizes()[0] == 0, window.split.sizes()
-        window.tabs.setCurrentWidget(window.alignment)
-        assert window.split.sizes()[0] > 0, "切回普通页之后左栏没有恢复"
+        # 编排台占满整个窗口：它就是中央控件，音频对齐挪进随时能拉出来的侧栏
+        assert window.centralWidget().isAncestorOf(window.studio)
+        assert window.dock_align.widget() is window.alignment
 
         # 编排台上半部分只剩一行工具栏：对齐台那一大片全收起来了
         assert not window.bench._stack.isVisible()           # noqa: SLF001
-        # 那一行就是画里的三组：主音频 / 视频文件夹 / 音频对齐
+        # 那一行就是画里的三组：主音频 / 视频 / 音频对齐
         assert window.bench.isAncestorOf(window.master.path), "主音频不在顶栏里"
-        assert window.bench.folder.isVisibleTo(window.bench), "视频文件夹那一栏不见了"
+        assert window.bench.folder.isVisibleTo(window.bench), "视频那一栏不见了"
         assert window.bench.btn_folder.isVisibleTo(window.bench)
         assert window.bench.btn_start.isVisibleTo(window.bench)
+        # 「主音频」标签只该出现一次（以前顶栏加一个、主音频那条自己带一个）；
+        # 「源视频」标签整个删掉了
+        labels = [w.text() for w in window.bench._header_frame.findChildren(QLabel)
+                  if w.isVisibleTo(window.bench)]            # noqa: SLF001
+        assert sum("主音频" in text for text in labels) == 1, labels
+        assert not any("源视频" in text for text in labels), labels
+        # 「选视频…」走的是多选文件对话框，不是"整个文件夹一锅端"
+        assert window.bench.btn_folder.text() == "选视频…", window.bench.btn_folder.text()
+        # 点「开始音频对齐」会顺手把主音频解出来（音谱/波形跟着画）
+        assert window.bench.btn_start.receivers(
+            window.bench.btn_start.clicked) >= 2
         # 源视频单选、批量那两个按钮、进度条都不在这一页上
         assert not window.bench.source.isVisibleTo(window.bench)
         assert not window.bench.bar.isVisibleTo(window.bench)
@@ -785,11 +840,80 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
 
 
 
+def test_picking_videos_is_manual_multi_select_not_a_whole_folder(work: Path) -> None:
+    """「选视频…」＝手动多选文件。**目录里没被选中的视频不许自己跑进来。**
+
+    这是测试控制台：一次挑几条对比就够。顺手钉住"目录记下来了"——
+    下次开对话框要落在同一个目录，不然每次都得从主目录重新翻。
+    """
+    from vidscribe.gui.dance_montage import dialogs
+
+    panel, _cfg, db = _panel(work)
+    db.close()
+    folder = work / "clips"
+    folder.mkdir()
+    picked = [folder / "a.mp4", folder / "b.mp4"]
+    for path in (*picked, folder / "c.mp4", folder / "d.mp4"):
+        path.write_bytes(b"x")            # 内容无所谓，这里只测"选了哪些"
+
+    seen: list[list[str]] = []
+    panel.folder_scanned.connect(lambda rows: seen.append(list(rows)))
+    original = dialogs.open_files
+    dialogs.open_files = lambda *_a, **_k: [str(p) for p in picked]
+    try:
+        added = panel._pick_videos()                      # noqa: SLF001
+    finally:
+        dialogs.open_files = original
+
+    assert added == 2, added
+    rows = [panel.more.item(i).text() for i in range(panel.more.count())]
+    assert rows == [str(p) for p in picked], rows
+    assert not any("c.mp4" in r or "d.mp4" in r for r in rows), "没选的视频跑进来了"
+    assert panel.folder.text() == str(folder), panel.folder.text()
+    assert seen and seen[-1] == rows, seen
+    # 手打一个目录进去也只是记住它，不会把里面的视频全塞进来
+    panel.folder.setText(str(folder))
+    panel._folder_typed()                                 # noqa: SLF001
+    assert [panel.more.item(i).text() for i in range(panel.more.count())] == rows
+
+
+def test_align_click_also_decodes_the_master_audio(work: Path) -> None:
+    """点「开始音频对齐」要顺手把主音频解出来，否则左边音谱一直是空占位。"""
+    import numpy as np
+
+    from dance_fixtures import SR, make_project, write_wav
+
+    from vidscribe.gui.dance_montage import main_page
+
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    db.close()
+    seconds = 3.0
+    tone = np.sin(2 * np.pi * 220.0 * np.arange(int(SR * seconds)) / SR) * 0.3
+    song_path = write_wav(work / "master.wav", tone.astype(np.float32))
+
+    window = main_page.DanceMontageWindow(cfg)
+    try:
+        assert window.master.ensure_analyzed() is False, "还没填主音频就不该开工"
+        window.master.path.blockSignals(True)     # 只测 ensure_analyzed 自己的判断
+        window.master.path.setText(str(song_path))
+        window.master.path.blockSignals(False)
+        assert window.master.ensure_analyzed() is True
+        if window.master.worker is not None:      # 等后台解完，别把线程留给下一个用例
+            window.master.worker.wait(20000)
+        _app.processEvents()
+        # 解过的同一首歌不再解第二遍
+        assert window.master.ensure_analyzed() is False
+    finally:
+        window.close()
+
+
 TESTS = (
     test_target_to_source_is_a_single_subtraction,
     test_span_maps_to_span,
     test_out_of_range_span_is_refused_not_clamped,
     test_negative_offset_means_source_starts_first,
+    test_head_and_tail_rooms_analyse_whatever_the_video_really_has,
     test_manual_offset_overrides_the_algorithm_and_keeps_the_original,
     test_fixed_two_second_positions,
     test_a_48_second_song_has_24_positions,
@@ -806,6 +930,8 @@ TESTS = (
     test_the_layout_is_actually_usable,
     test_cli_and_gui_share_one_backend,
     test_the_bench_tab_is_wired_into_the_window,
+    test_picking_videos_is_manual_multi_select_not_a_whole_folder,
+    test_align_click_also_decodes_the_master_audio,
     test_the_old_alignment_panel_can_still_fix_an_offset,
     test_worker_aligns_real_media_without_writing_anything,
 )

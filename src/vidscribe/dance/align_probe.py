@@ -26,7 +26,12 @@ from .types import DanceAlignment
 
 @dataclass(frozen=True)
 class PositionRow:
-    """一个固定音乐位置的验收结果。`ok=False` 时 `reason` 一定有话说。"""
+    """一个固定音乐位置的验收结果。`ok=False` 时 `reason` 一定有话说。
+
+    `head_trim` / `tail_trim` = 这一格首尾各缺了多少秒（源视频不够长导致）。
+    两个都是 0 就是完整覆盖；不为 0 说明是**部分可用**：几何关系仍然精确
+    （`source = target - offset`），只是这一格覆盖的音乐比段落本身短。
+    """
 
     index: int
     target_start: float
@@ -35,19 +40,38 @@ class PositionRow:
     source_end: float
     ok: bool
     reason: str = ""
+    head_trim: float = 0.0
+    tail_trim: float = 0.0
 
     @property
     def duration(self) -> float:
         return round(self.target_end - self.target_start, 6)
 
     @property
+    def partial(self) -> bool:
+        return bool(self.ok and (self.head_trim > 0.0 or self.tail_trim > 0.0))
+
+    @property
     def status_text(self) -> str:
-        return "可用" if self.ok else "越界"
+        if not self.ok:
+            return "越界"
+        if self.partial:
+            missing = self.head_trim + self.tail_trim
+            return f"部分可用（缺 {missing:.2f}s）"
+        return "可用"
 
     def to_dict(self) -> dict[str, Any]:
         return {"index": self.index, "target_start": self.target_start,
                 "target_end": self.target_end, "source_start": self.source_start,
-                "source_end": self.source_end, "ok": self.ok, "reason": self.reason}
+                "source_end": self.source_end, "ok": self.ok, "reason": self.reason,
+                "head_trim": self.head_trim, "tail_trim": self.tail_trim}
+
+
+def _trims(wanted_start: float, wanted_end: float, spec) -> tuple[float, float]:
+    """段落原本的范围 vs 实际切出来的范围 → 首尾各缺多少秒。"""
+    head = max(0.0, round(float(spec.target_start) - float(wanted_start), 6))
+    tail = max(0.0, round(float(wanted_end) - float(spec.target_end), 6))
+    return head, tail
 
 
 def map_moment(alignment: DanceAlignment, target_time: float) -> float:
@@ -56,30 +80,38 @@ def map_moment(alignment: DanceAlignment, target_time: float) -> float:
 
 
 def probe_one(alignment: DanceAlignment, target_start: float, slice_duration: float,
-              source_duration: float = 0.0, *, index: int = 0) -> PositionRow:
+              source_duration: float = 0.0, *, index: int = 0,
+              head_room: float = 0.0, tail_room: float = 0.0) -> PositionRow:
     """试一个卡点：目标区间 → 源区间 + 能不能用。
 
     越界不抛给调用方，翻译成 `ok=False` + 原因 —— 界面要的是"显示为什么不行"，
     而判定本身仍然是 `material_slice.map_to_source` 那一套，一个字都没改。
+
+    `head_room` / `tail_room` 原样转给 `map_to_source`：首尾给了余量之后，
+    源视频不够长的那一头改成取交集，这一格从"越界"变成"部分可用"。
     """
     start = round(float(target_start), 6)
     end = round(start + float(slice_duration), 6)
     duration = float(source_duration if source_duration > 0 else alignment.source_duration)
     try:
         spec = material_slice.map_to_source(start, end, alignment.offset, duration,
-                                            segment_index=int(index))
+                                            segment_index=int(index),
+                                            head_room=head_room, tail_room=tail_room)
     except material_slice.SourceRangeError as exc:
         return PositionRow(index=int(index), target_start=start, target_end=end,
                            source_start=alignment.source_time(start),
                            source_end=alignment.source_time(end),
                            ok=False, reason=str(exc))
+    head, tail = _trims(start, end, spec)
     return PositionRow(index=int(index), target_start=spec.target_start,
                        target_end=spec.target_end, source_start=spec.source_start,
-                       source_end=spec.source_end, ok=True)
+                       source_end=spec.source_end, ok=True,
+                       head_trim=head, tail_trim=tail)
 
 
 def probe_all(alignment: DanceAlignment, *, song_duration: float, source_duration: float,
-              slice_duration: float = 0.0, positions=None) -> list[PositionRow]:
+              slice_duration: float = 0.0, positions=None,
+              head_room: float = 0.0, tail_room: float = 0.0) -> list[PositionRow]:
     """把整首目标歌按位置铺开，逐格标可用/越界。
 
     `positions` 给了就按用户拍板的段落模板铺（长度可以各不相同），没给就等间隔 ——
@@ -94,7 +126,8 @@ def probe_all(alignment: DanceAlignment, *, song_duration: float, source_duratio
              else target_positions(song_duration, slice_duration))
     plan = material_slice.plan_slices(
         alignment, song_duration=song_duration, source_duration=source_duration,
-        slice_duration=slice_duration, positions=picks)
+        slice_duration=slice_duration, positions=picks,
+        head_room=head_room, tail_room=tail_room)
     whole = [why for index, why in plan.skipped if index < 0]
     if whole:
         return [PositionRow(index=p.index, target_start=p.start, target_end=p.end,
@@ -108,10 +141,12 @@ def probe_all(alignment: DanceAlignment, *, song_duration: float, source_duratio
     for position in picks:
         spec = good.get(position.index)
         if spec is not None:
+            head, tail = _trims(position.start, position.end, spec)
             rows.append(PositionRow(index=position.index, target_start=spec.target_start,
                                     target_end=spec.target_end,
                                     source_start=spec.source_start,
-                                    source_end=spec.source_end, ok=True))
+                                    source_end=spec.source_end, ok=True,
+                                    head_trim=head, tail_trim=tail))
             continue
         rows.append(PositionRow(
             index=position.index, target_start=position.start, target_end=position.end,

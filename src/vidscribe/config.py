@@ -217,8 +217,17 @@ DEFAULTS: dict[str, Any] = {
         # 置信度低于此的对齐不切片（0 = 都切，由 status 自己判）。
         # 想严一点就填 0.55（= alignment_validation.LOW_CONFIDENCE）
         "min_confidence": 0.0,
-        # 输出画布与帧率。竖屏 9:16 是卡点舞的默认版式；所有源都被
-        # scale-to-cover + 居中裁切归一到这一套，否则多源没法拼
+        # 首段 / 尾段**允许缺多少秒**（0 = 老行为：差一点就整段不要）。
+        # 很多录屏素材开头少半秒、结尾早停一秒，于是首段映射到源的负数、尾段超过源时长，
+        # 那两段就一条素材都没有。给了余量之后这两头改成取交集：源夹到 [0, 时长]，
+        # 目标同步缩短同样多，`source = target - offset` 一个字不变，只是这一格
+        # 覆盖的音乐短一截 —— 代价是成片这一段会短对应的时间，所以默认 0，要用自己填
+        "slice_head_room": 0.0,
+        "slice_tail_room": 0.0,
+        # 输出画布与帧率。**默认跟素材走**（canvas_auto）：素材是 1080×1440 就出
+        # 1080×1440，一个像素都不裁。关掉 canvas_auto 才用下面这套固定尺寸，
+        # 那时所有源被 scale-to-cover + 居中裁切归一过去（比例不同就会裁掉边）
+        "canvas_auto": True,
         "canvas_width": 1080,
         "canvas_height": 1920,
         "canvas_fps": 30.0,

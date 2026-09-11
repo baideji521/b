@@ -1739,9 +1739,8 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
 
     if action == "slice":
         sources = _dance_sources(cfg, args.sources)
-        canvas = media_backend.Canvas(
-            width=int(cfg.dance["canvas_width"]), height=int(cfg.dance["canvas_height"]),
-            fps=float(cfg.dance["canvas_fps"]))
+        # 画布跟素材走（默认）：3:4 的源切出 3:4 的片段，不裁边
+        canvas = media_backend.resolve_canvas(cfg, sources)
         backend = media_backend.resolve(str(args.backend or cfg.dance["media_backend"]))
         outcomes = ingest.align_batch(db, song, sources,
                                       workers=int(args.workers or cfg.dance["align_workers"]),
@@ -1755,6 +1754,8 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
             result = ingest.slice_and_register(
                 db, song, outcome, slice_duration=slice_duration,
                 material_dir=cfg.dance_path("material_dir"), canvas=canvas,
+                head_room=float(cfg.dance.get("slice_head_room", 0.0)),
+                tail_room=float(cfg.dance.get("slice_tail_room", 0.0)),
                 backend=backend, on_log=lambda line: logger.info("%s", line))
             total += len(result.material_ids)
             state = "成功" if result.ok else f"失败：{result.error}"
@@ -1807,9 +1808,12 @@ def _dance_dispatch(cfg: Config, args: argparse.Namespace, db: Any) -> int:
         return 0
 
     if action == "remix":
-        canvas = media_backend.Canvas(
-            width=int(cfg.dance["canvas_width"]), height=int(cfg.dance["canvas_height"]),
-            fps=float(cfg.dance["canvas_fps"]))
+        # 画布跟这首歌已有的片段走：片段是什么分辨率，成片就是什么分辨率，不裁边
+        clips = db.execute(
+            "SELECT file_path FROM dance_materials "
+            "WHERE target_song_id = ? AND file_path IS NOT NULL LIMIT 32",
+            (song.song_id,)).fetchall()
+        canvas = media_backend.resolve_canvas(cfg, [str(row[0]) for row in clips])
         backend = media_backend.resolve(str(args.backend or cfg.dance["media_backend"]))
         manual = None
         if args.manual:

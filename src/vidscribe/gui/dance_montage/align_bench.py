@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
@@ -126,6 +127,11 @@ class AlignBenchPanel(QWidget):
     ingest_requested = pyqtSignal(dict)
     #: 库里有东西变了（保存了对齐 / 入了素材），主窗口该刷一遍
     changed = pyqtSignal()
+    #: 视频文件夹扫完了 → 里面的视频全路径清单（编排台右侧列表照它铺行）
+    folder_scanned = pyqtSignal(list)
+    #: 一轮对齐算完了 → `[{path,name,alignment,error,cached}]`。
+    #: **这一步没有落库**（`align_batch(persist=False)`），纯粹是算给人看的
+    results_ready = pyqtSignal(list)
 
     def __init__(self, cfg, parent=None) -> None:
         super().__init__(parent)
@@ -205,7 +211,7 @@ class AlignBenchPanel(QWidget):
         self.source = _tall(QLineEdit(holder))
         self.source.setPlaceholderText("源舞蹈视频（完整视频 + 它自己的原始音乐）")
         btn_source = _big(QPushButton("选视频…", holder), 30)
-        grid.addWidget(QLabel("源视频", holder), 0, 0)
+        # 「源视频」那个标签删掉了：输入框的 placeholder 已经把它说明白了
         grid.addWidget(self.source, 0, 1)
         grid.addWidget(btn_source, 0, 2)
 
@@ -226,11 +232,13 @@ class AlignBenchPanel(QWidget):
         self.more_hint = QLabel("批量：0 个", holder)
         self.more_hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
         btn_more = _big(QPushButton("批量选视频…", holder), 30)
-        self._folder_label = QLabel("📁 视频文件夹", holder)
+        self._folder_label = QLabel("📁 视频", holder)
         self.folder = _tall(QLineEdit(holder))
-        self.folder.setPlaceholderText(r"素材文件夹，例如 D:\Videos（里面的视频一次全对齐）")
-        self.btn_folder = _big(QPushButton("选择文件夹", holder), 30)
-        self.btn_folder.setToolTip("挑一个文件夹，里面所有视频（含子目录）一次全进对齐清单")
+        self.folder.setPlaceholderText(r"上次选视频的目录（记住它，下次对话框直接从这儿开始）")
+        self.btn_folder = _big(QPushButton("选视频…", holder), 30)
+        self.btn_folder.setToolTip("手动挑视频，可以按住 Ctrl / Shift 多选，也可以只选一个。\n"
+                                  "**不会把整个文件夹一锅端** —— 这是测试控制台，一次挑几条对比就够。\n"
+                                  "选过的目录会记住，下次打开对话框直接落到那儿。")
         btn_clear = _big(QPushButton("清空批量", holder), 30)
 
 
@@ -245,6 +253,27 @@ class AlignBenchPanel(QWidget):
         self.btn_reset.setToolTip("只清这个页面上的东西（路径、结果、卡点、预览）。\n"
                                  "素材库里的正式素材一条都不会动。")
         self.force = QCheckBox("忽略缓存重算", holder)
+        # 首 / 尾允许缺多少秒。素材开头少半秒、结尾早停一秒是常事，那两段本来会
+        # 整段判"没素材"；给了余量就改成取交集（源夹到 [0, 时长]，目标同步缩短同样多）。
+        # 每条视频缺多少是**按它自己的时长和 offset 现算**的，不是固定 ±1 秒
+        self.head_room = QDoubleSpinBox(holder)
+        self.tail_room = QDoubleSpinBox(holder)
+        for spin, tip in (
+                (self.head_room, "首段允许缺多少秒：源视频开头不够时，这一格只切"
+                                 "「视频真有的那一截」，目标区间同步后移相同的量。\n"
+                                 "0 = 差一点就整段不要（老行为）。"),
+                (self.tail_room, "尾段允许缺多少秒：源视频提前结束时，这一格只切"
+                                 "「视频真有的那一截」，目标区间同步提前结束。\n"
+                                 "0 = 差一点就整段不要（老行为）。")):
+            spin.setRange(0.0, 10.0)
+            spin.setSingleStep(0.5)
+            spin.setDecimals(2)
+            spin.setSuffix(" s")
+            spin.setMaximumWidth(90)
+            spin.setToolTip(tip + "\n注意：这样切出来的素材比段落本身短，"
+                                  "成片这一段也会短对应的时间。")
+        self.head_room.setValue(float(self.cfg.dance.get("slice_head_room", 0.0)))
+        self.tail_room.setValue(float(self.cfg.dance.get("slice_tail_room", 0.0)))
         self.bar = QProgressBar(holder)
         self.bar.setRange(0, 100)
         self.bar.setMinimumHeight(24)
@@ -260,19 +289,23 @@ class AlignBenchPanel(QWidget):
         actions.addWidget(self.btn_stop)
         actions.addWidget(self.btn_reset)
         actions.addWidget(self.force)
+        actions.addWidget(QLabel("首缺≤", holder))
+        actions.addWidget(self.head_room)
+        actions.addWidget(QLabel("尾缺≤", holder))
+        actions.addWidget(self.tail_room)
         actions.addWidget(self.bar, 2)
         grid.addLayout(actions, 1, 0, 1, 6)
 
         btn_source.clicked.connect(self._pick_source)
         self.btn_target.clicked.connect(self._pick_target)
         btn_more.clicked.connect(self._pick_more)
-        self.btn_folder.clicked.connect(self._pick_folder)
+        self.btn_folder.clicked.connect(self._pick_videos)
         self.folder.editingFinished.connect(self._folder_typed)
         btn_clear.clicked.connect(self._clear_more)
         self.btn_start.clicked.connect(self.start)
         self.btn_stop.clicked.connect(self.stop)
         self.btn_reset.clicked.connect(self.reset)
-        self._source_row = (QLabel("源视频", holder), self.source, btn_source)
+        self._source_row = (self.source, btn_source)
         self._batch_row = (btn_more, btn_clear)
         self._song_row: QWidget | None = None      # 编排台把主音频那一条塞进来
         return holder
@@ -306,10 +339,14 @@ class AlignBenchPanel(QWidget):
         return body
 
     def use_compact_layout(self) -> None:
-        """编排台上半场就是画里那一行：**主音频 / 视频文件夹 / 音频对齐**。
+        """编排台上半场就是画里那一行：**主音频 / 视频 / 音频对齐**。
 
-            🎵 主音频 [xxx.mp3][选择音频]  📁 视频文件夹 [D:\\Videos][选择文件夹]
+            主音频 [xxx.mp3][选主音频…]  📁 视频 [D:\\Videos][选视频…]
             🔗 音频对齐 [▶ 开始音频对齐]
+
+        「视频」那一栏是**手动挑文件**（可多选），不是整目录一锅端 —— 这是测试
+        控制台，一次挑几条对比就够；框里显示的是上次挑视频的目录，下次对话框
+        直接从那儿开始。
 
         对齐台原来那一大片（源视频单选、结果、单点卡点、全曲卡点表、批量结果、
         时间映射、手动 Offset、日志、进度条）在编排台都不显示 —— 诊断信息去
@@ -339,17 +376,18 @@ class AlignBenchPanel(QWidget):
             grid.takeAt(0)
         for column in range(6):
             grid.setColumnStretch(column, 0)
-        grid.addWidget(QLabel("🎵 主音频", self._header_frame), 0, 0)
+        # 主音频那一条自己就带「主音频」标签（见 master_audio._build_header），
+        # 这里**不再加第二个** —— 之前一行里"🎵 主音频"和"主音频"挨着出现两遍
         if self._song_row is not None:
-            grid.addWidget(self._song_row, 0, 1)
-        grid.addWidget(self._folder_label, 0, 2)
-        grid.addWidget(self.folder, 0, 3)
-        grid.addWidget(self.btn_folder, 0, 4)
-        grid.addWidget(QLabel("🔗 音频对齐", self._header_frame), 0, 5)
-        grid.addWidget(self.btn_start, 0, 6)
-        grid.addWidget(self.btn_stop, 0, 7)
-        grid.setColumnStretch(1, 3)             # 两个路径框占大头
-        grid.setColumnStretch(3, 2)
+            grid.addWidget(self._song_row, 0, 0)
+        grid.addWidget(self._folder_label, 0, 1)
+        grid.addWidget(self.folder, 0, 2)
+        grid.addWidget(self.btn_folder, 0, 3)
+        grid.addWidget(QLabel("🔗 音频对齐", self._header_frame), 0, 4)
+        grid.addWidget(self.btn_start, 0, 5)
+        grid.addWidget(self.btn_stop, 0, 6)
+        grid.setColumnStretch(0, 3)             # 两个路径框占大头
+        grid.setColumnStretch(2, 2)
         for widget in (self._folder_label, self.folder, self.btn_folder,
                        self.btn_start, self.btn_stop):
             widget.setVisible(True)
@@ -669,6 +707,8 @@ class AlignBenchPanel(QWidget):
             "loop": bool(self.btn_loop.isChecked()),
             "sound": bool(self.chk_sound.isChecked()),
             "force": bool(self.force.isChecked()),
+            "head_room": float(self.head_room.value()),
+            "tail_room": float(self.tail_room.value()),
             "body": list(self._body.sizes()),
             "slots": list(self._slots.sizes()),
             "preview": list(self._preview.sizes()),
@@ -681,7 +721,8 @@ class AlignBenchPanel(QWidget):
         for widget, key in ((self.source, "source"), (self.target, "target")):
             if isinstance(data.get(key), str) and data[key]:
                 widget.setText(data[key])
-        for widget, key in ((self.at, "at"), (self.slice_seconds, "slice")):
+        for widget, key in ((self.at, "at"), (self.slice_seconds, "slice"),
+                            (self.head_room, "head_room"), (self.tail_room, "tail_room")):
             if isinstance(data.get(key), (int, float)):
                 widget.setValue(float(data[key]))
         for widget, key in ((self.btn_loop, "loop"), (self.force, "force")):
@@ -727,10 +768,48 @@ class AlignBenchPanel(QWidget):
         self._show_more_count()
 
     def _folder_typed(self) -> None:
-        """文件夹路径手打完（或被外面填上）→ 立刻把里面的视频装进对齐清单。"""
+        """路径框手打完 → **只记住这个目录**，不再把里面的视频一锅端装进来。
+
+        这是测试控制台：一次挑几条视频对比就够，整目录几十条一起跑是另一回事
+        （要那样做还有 `_pick_folder`，但界面上不给这个入口了）。
+        """
         chosen = self.folder.text().strip()
         if chosen and Path(chosen).is_dir():
-            self._pick_folder(chosen)
+            dialogs.remember("dance.source_dir", chosen, is_dir=True)
+
+    def _pick_videos(self) -> int:
+        """手动挑视频（**可多选，也可以只选一个**），返回新加了几个。
+
+        选过的目录会记进 `dance.source_dir`，下次对话框直接落到那儿 —— 素材通常
+        一直在同一个盘同一个目录，每次从主目录重新翻太烦。
+
+        重复的路径不加第二遍；顺序按名字排，跑批日志才对得上。
+        """
+        chosen = dialogs.open_files(
+            self, "选视频（可多选）",
+            self.folder.text().strip() or self.cfg.dance_path("source_dir"),
+            dialogs.VIDEO_FILTER, "dance.source_dir")
+        if not chosen:
+            return 0
+        existing = {self.more.item(i).text() for i in range(self.more.count())}
+        added = 0
+        for path in sorted(str(p) for p in chosen):
+            if path in existing:
+                continue
+            self.more.addItem(path)
+            added += 1
+        # 路径框显示"这些视频在哪个目录"，它就是下次对话框的起点
+        folder = str(Path(chosen[0]).parent)
+        if self.folder.text().strip() != folder:
+            self.folder.blockSignals(True)
+            self.folder.setText(folder)
+            self.folder.blockSignals(False)
+        self._show_more_count()
+        self.say(f"挑了 {len(chosen)} 个视频，新加 {added} 个（{folder}）")
+        # 编排台右侧列表立刻铺行：对齐之前就能看清这次要处理哪些文件
+        self.folder_scanned.emit([self.more.item(i).text()
+                                  for i in range(self.more.count())])
+        return added
 
     #: 文件夹里认这些后缀（和 dialogs.VIDEO_FILTER 保持一致）
 
@@ -762,8 +841,53 @@ class AlignBenchPanel(QWidget):
             added += 1
         self._show_more_count()
         self.say(f"从文件夹加了 {added} 个视频（{chosen}）")
+        # 编排台右侧列表立刻铺行：对齐之前就能看清这次要处理哪些文件
+        self.folder_scanned.emit([self.more.item(i).text()
+                                  for i in range(self.more.count())])
         return added
 
+
+    def add_sources(self, paths) -> int:
+        """外面（编排台右键粘贴）塞进来的视频，加进批量清单，返回真加了几个。"""
+        existing = {self._same(self.more.item(i).text())
+                    for i in range(self.more.count())}
+        added = 0
+        for raw in sorted(str(p) for p in (paths or ())):
+            if not raw or self._same(raw) in existing:
+                continue
+            self.more.addItem(raw)
+            existing.add(self._same(raw))
+            added += 1
+        if added:
+            self._show_more_count()
+            self.say(f"批量清单加了 {added} 个视频")
+        return added
+
+    def drop_sources(self, paths) -> int:
+        """把这些视频从批量清单里去掉（文件已经被删了），返回去掉几个。
+
+        单视频框里正好是被删的那条时也一起清空 —— 不然点「开始音频对齐」
+        会拿一个不存在的文件去解码。
+        """
+        gone = {self._same(p) for p in (paths or ()) if p}
+        if not gone:
+            return 0
+        removed = 0
+        for index in range(self.more.count() - 1, -1, -1):
+            if self._same(self.more.item(index).text()) in gone:
+                self.more.takeItem(index)
+                removed += 1
+        if self._same(self.source.text().strip()) in gone:
+            self.source.clear()
+        if removed:
+            self._show_more_count()
+            self.say(f"批量清单去掉 {removed} 个（文件已删）")
+        return removed
+
+    @staticmethod
+    def _same(path: str) -> str:
+        """路径比对用的统一写法：Windows 上大小写/分隔符都可能不一样。"""
+        return os.path.normcase(os.path.normpath(str(path))) if path else ""
 
     def _show_more_count(self) -> None:
         count = int(self.more.count())
@@ -791,7 +915,13 @@ class AlignBenchPanel(QWidget):
         return {"song": self.target.text().strip(), "sources": paths,
                 "workers": int(self.cfg.dance["align_workers"]),
                 "force": self.force.isChecked(),
+                "head_room": float(self.head_room.value()),
+                "tail_room": float(self.tail_room.value()),
                 "envelope": len(paths) == 1}
+
+    def rooms(self) -> tuple[float, float]:
+        """当前的首/尾余量。探针、切片、编排台那张实时矩阵都读这一处。"""
+        return float(self.head_room.value()), float(self.tail_room.value())
 
     def start(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -849,6 +979,8 @@ class AlignBenchPanel(QWidget):
         self._batch = list(data.get("results") or [])
         self.say(f"[结束] {message}")
         self._fill_batch()
+        # 编排台右侧那张列表照这份结果填 Offset / 置信度（不入库）
+        self.results_ready.emit(list(self._batch))
 
         best = self._best(self._batch)
         if best is None:
@@ -1003,10 +1135,11 @@ class AlignBenchPanel(QWidget):
             QMessageBox.warning(self, "不知道目标歌多长",
                                 "目标歌时长读不出来，没法算固定位置。")
             return
+        head, tail = self.rooms()
         self._rows = align_probe.probe_all(
             align, song_duration=song, source_duration=self._source_duration(),
             slice_duration=float(self.slice_seconds.value()),
-            positions=self._template_positions())
+            positions=self._template_positions(), head_room=head, tail_room=tail)
         self._fill_positions()
         usable, total, ratio = align_probe.coverage_of(self._rows)
         text = (f"可用 {usable} / {total} 格｜不可用 {total - usable}"
@@ -1088,9 +1221,11 @@ class AlignBenchPanel(QWidget):
         if self._alignment is None:
             QMessageBox.information(self, "还没有对齐结果", "先点「开始音频对齐」。")
             return
+        head, tail = self.rooms()
         row = align_probe.probe_one(self._alignment, float(self.at.value()),
                                     float(self.slice_seconds.value()),
-                                    self._source_duration())
+                                    self._source_duration(),
+                                    head_room=head, tail_room=tail)
         self._show_mapping(float(self.at.value()))
         self._set_span(row)
 
@@ -1257,7 +1392,8 @@ class AlignBenchPanel(QWidget):
                     probes = align_probe.probe_all(
                         align, song_duration=song,
                         source_duration=float(align.source_duration or 0.0),
-                        slice_duration=slice_seconds, positions=picks)
+                        slice_duration=slice_seconds, positions=picks,
+                        head_room=self.rooms()[0], tail_room=self.rooms()[1])
                     usable, total, ratio = align_probe.coverage_of(probes)
                 cells = (str(row.get("name") or ""), f"{align.offset:+.3f}",
                          f"{align.confidence:.3f}",
@@ -1366,6 +1502,8 @@ class AlignBenchPanel(QWidget):
             "song": self.target.text().strip(),
             "sources": [source],
             "slice_duration": float(self.slice_seconds.value()),
+            "head_room": float(self.head_room.value()),
+            "tail_room": float(self.tail_room.value()),
             "do_slice": True, "do_remix": False, "render": False,
             "workers": 1, "recommend": True,
         })

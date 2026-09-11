@@ -406,6 +406,7 @@ def slice_and_register(db: Database, song: TargetSong, outcome: AlignOutcome, *,
                        generation_version: str = MATERIAL_GENERATION_VERSION,
                        person: str = "", source_group: str = "",
                        min_confidence: float = 0.0,
+                       head_room: float = 0.0, tail_room: float = 0.0,
                        on_log: LogFn | None = None,
                        on_progress: Callable[[int, int, str], None] | None = None,
                        ) -> SliceOutcome:
@@ -438,7 +439,7 @@ def slice_and_register(db: Database, song: TargetSong, outcome: AlignOutcome, *,
     plan = material_slice.plan_slices(
         alignment, song_duration=song.duration, source_duration=source_duration,
         slice_duration=slice_duration, positions=positions,
-        source_video_id=outcome.video_id,
+        source_video_id=outcome.video_id, head_room=head_room, tail_room=tail_room,
         target_song_id=song.song_id, generation_version=generation_version)
     result.plan = plan
     result.skipped = len(plan.skipped)

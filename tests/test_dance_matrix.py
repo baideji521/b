@@ -79,6 +79,62 @@ def test_crossing_segments_is_refused_and_changes_nothing() -> None:
     assert mx.accepts(3, _payload(303, 3)) is True
 
 
+def _click(widget) -> None:
+    """在控件正中按下再松手 = 真点了一下。
+
+    走的是真的 `QMouseEvent`，不是直接调 `choose()` —— 要测的就是"用户点一下"
+    这条路，绕开鼠标事件等于没测。QDrag 在离屏环境跑不起来，所以点选这条路
+    必须自己能立住。
+    """
+    from PyQt5.QtCore import QEvent, QPointF, Qt
+    from PyQt5.QtGui import QMouseEvent
+
+    center = QPointF(widget.width() / 2, widget.height() / 2)
+    widget.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, center,
+                                       Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+    widget.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, center,
+                                         Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+
+
+def test_clicking_a_cell_picks_it_for_that_segment() -> None:
+    """X2b：草图上格子写的是「[候选]」——**点一下就该选上**，不必先学会拖。"""
+    panel = mx.MatrixPanel()
+    panel.load([{"index": i, "title": f"S{i + 1}", "span": (float(i), float(i + 1)),
+                 "materials": _rows("a", 3, i)} for i in range(2)])
+    seen: list[tuple[int, int]] = []
+    panel.realtime_changed.connect(lambda seg, mid: seen.append((seg, mid)))
+
+    cell = panel.cells[(2, 1)]              # 第 2 个视频在 S2 上那一格
+    assert panel.picks().get(1) is None, "一开始 S2 该是空的"
+    _click(cell)
+    assert panel.picks().get(1) == cell.material_id, panel.picks()
+    assert seen and seen[-1] == (1, cell.material_id), seen
+
+    # 换人也只要点一下：点同一列另一个视频的格子
+    other = panel.cells[(3, 1)]
+    _click(other)
+    assert panel.picks().get(1) == other.material_id, panel.picks()
+
+    # 再点已经在用的那一条：不重复落库，只当"想看看它"
+    previews: list[str] = []
+    panel.preview_requested.connect(previews.append)
+    before = len(seen)
+    _click(other)
+    assert len(seen) == before, "同一条素材被重复选了一遍"
+    assert previews, "点已经选中的格子，至少该给个预览"
+
+
+def test_a_click_does_not_leak_into_the_next_segment() -> None:
+    """点 S1 的格子只动 S1，别的段一个都不许跟着变。"""
+    panel = mx.MatrixPanel()
+    panel.load([{"index": i, "title": f"S{i + 1}", "span": (float(i), float(i + 1)),
+                 "materials": _rows("a", 2, i)} for i in range(3)])
+    _click(panel.cells[(1, 0)])
+    picks = panel.picks()
+    assert list(picks) == [0], picks
+    assert picks[0] == panel.cells[(1, 0)].material_id
+
+
 # ================================================================== X3 ~ X5
 def test_the_matrix_has_one_column_per_segment() -> None:
     """X3：列数完全跟着 Segment 走 —— 4 段 4 列，加一刀就 5 列，取消就回 4 列。"""
@@ -140,6 +196,27 @@ def test_realtime_row_is_what_the_final_cut_reads() -> None:
     assert panel.picks() == before
     assert words and "S2" in words[-1] and "S1" in words[-1], words
     assert panel.choose(0, 103) is False, "跨段落连 choose() 也不许"
+
+
+def test_right_click_clears_that_segment_not_the_current_one() -> None:
+    """X6b：清空改成格子上右键 —— 清的是**右键那一段**，常驻按钮已经撤了。"""
+    panel = mx.MatrixPanel()
+    panel.load([{"index": i, "title": f"S{i + 1}", "span": (float(i), float(i + 1)),
+                 "materials": _rows("a", 1, i), "current": i * 100 + 1} for i in range(3)])
+    assert not hasattr(panel, "btn_clear"), "「清掉这一段的选择」那颗按钮该撤了"
+    assert panel.picks() == {0: 1, 1: 101, 2: 201}, panel.picks()
+
+    panel.set_current_segment(0)                 # 播放头在 S1，但右键点的是 S3
+    seen: list[tuple] = []
+    panel.realtime_changed.connect(lambda *a: seen.append(a))
+    cell = panel.cells[(1, 2)]                   # 视频 1 在 S3 上那一格
+    cell.cleared.emit(cell.segment_index)        # 右键菜单里那一项就是发这个
+    assert panel.picks() == {0: 1, 1: 101}, panel.picks()
+    assert seen[-1] == (2, 0), seen               # 清的是 S3，不是当前的 S1
+    # 实时播放行那一格也真的空了，撤销能拿回来
+    assert panel.realtime[2].material_id == 0
+    assert panel.undo() is True
+    assert panel.picks() == {0: 1, 1: 101, 2: 201}, panel.picks()
 
 
 def test_current_segment_follows_the_master_audio() -> None:
@@ -265,6 +342,7 @@ TESTS = (
     test_mime_packing_ignores_anything_that_is_not_ours,
     test_realtime_row_is_what_the_final_cut_reads,
     test_current_segment_follows_the_master_audio,
+    test_right_click_clears_that_segment_not_the_current_one,
     test_the_panel_saves_and_restores_the_realtime_row,
     test_candidate_pools_are_isolated_per_segment,
 )

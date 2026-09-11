@@ -244,10 +244,8 @@ class ClipJobWorker(QThread):
         target.parent.mkdir(parents=True, exist_ok=True)
         spec = SliceSpec(segment_index=0, target_start=0.0, target_end=end - start,
                          source_start=start, source_end=end)
-        canvas = media_backend.Canvas(
-            width=int(self.cfg.dance["canvas_width"]),
-            height=int(self.cfg.dance["canvas_height"]),
-            fps=float(self.cfg.dance["canvas_fps"]))
+        # 导出单段测试片：画布就按这条源自己的分辨率，别把 3:4 的素材裁成 9:16
+        canvas = media_backend.resolve_canvas(self.cfg, [str(self.job["source"])])
         self.log.emit(f"[导出] {start:.3f}s → {end:.3f}s → {target.name}")
         material_slice.render_material(
             str(self.job["source"]), spec, target, canvas=canvas,

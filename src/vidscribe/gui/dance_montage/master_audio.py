@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import Qt, QThread, QUrl, pyqtSignal
+from PyQt5.QtCore import QPoint, QRect, QSize, Qt, QThread, QUrl, pyqtSignal
 from PyQt5.QtGui import QKeySequence
 from PyQt5.QtMultimedia import QMediaContent, QMediaPlayer
 from PyQt5.QtWidgets import (
@@ -34,6 +34,7 @@ from PyQt5.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLayout,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
@@ -78,6 +79,85 @@ def _clock(seconds: float) -> str:
     total = max(0.0, float(seconds))
     minutes = int(total // 60)
     return f"{minutes}:{total - minutes * 60:06.3f}"
+
+
+class _FlowLayout(QLayout):
+    """横向排列、**排不下就换行**的布局。
+
+    为什么需要它：`QHBoxLayout` 的最小宽度等于一排控件宽度之和，所以播放条那一排
+    （播放/暂停/停止/音量/速度/视图/放大/缩小）会把整个主音频面板的最小宽度顶到
+    1300 像素上下。编排台要让"视频 + 音谱"只占左半屏时，就是这条最小宽度撑着
+    不让它缩 —— 分栏怎么拖都没用，Qt 会按最小宽度把矩阵挤到最窄。
+
+    换行之后，面板的最小宽度只剩"最宽的那一个控件"，窄了就多占一行高度，
+    按钮一个都不会消失、也不会被裁掉。
+    """
+
+    def __init__(self, parent=None, margin: int = 0, spacing: int = 6) -> None:
+        super().__init__(parent)
+        self._items: list = []
+        self.setContentsMargins(margin, margin, margin, margin)
+        self.setSpacing(spacing)
+
+    # ---------------------------------------------------------- QLayout 接口
+    def addItem(self, item) -> None:                     # noqa: N802 - Qt 的名字
+        self._items.append(item)
+
+    def count(self) -> int:
+        return len(self._items)
+
+    def itemAt(self, index: int):                        # noqa: N802
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index: int):                        # noqa: N802
+        return self._items.pop(index) if 0 <= index < len(self._items) else None
+
+    def expandingDirections(self):                       # noqa: N802
+        return Qt.Orientations(0)
+
+    def hasHeightForWidth(self) -> bool:                 # noqa: N802
+        return True
+
+    def heightForWidth(self, width: int) -> int:         # noqa: N802
+        return self._arrange(QRect(0, 0, width, 0), apply=False)
+
+    def setGeometry(self, rect) -> None:                 # noqa: N802
+        super().setGeometry(rect)
+        self._arrange(rect, apply=True)
+
+    def sizeHint(self) -> QSize:                         # noqa: N802
+        return self.minimumSize()
+
+    def minimumSize(self) -> QSize:                      # noqa: N802
+        """最小宽度＝最宽的那一个控件，不是所有控件之和。**这就是换行的意义。**"""
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        margins = self.contentsMargins()
+        return size + QSize(margins.left() + margins.right(),
+                            margins.top() + margins.bottom())
+
+    def _arrange(self, rect, *, apply: bool) -> int:
+        """把控件按行摆开，返回需要的总高度。`apply=False` 时只算高度不动控件。"""
+        margins = self.contentsMargins()
+        area = rect.adjusted(margins.left(), margins.top(),
+                             -margins.right(), -margins.bottom())
+        x, y, line_height = area.x(), area.y(), 0
+        space = self.spacing()
+        for item in self._items:
+            hint = item.sizeHint()
+            right = x + hint.width()
+            if right > area.right() + 1 and line_height > 0:
+                x = area.x()                     # 这一行放不下了，换下一行
+                y += line_height + space
+                right = x + hint.width()
+                line_height = 0
+            if apply:
+                item.setGeometry(QRect(QPoint(x, y), hint))
+            x = right + space
+            line_height = max(line_height, hint.height())
+        return y + line_height - rect.y() + margins.bottom()
+
 
 
 class MasterAudioWorker(QThread):
@@ -236,12 +316,15 @@ class MasterAudioPanel(QWidget):
 
     # ------------------------------------------------------------ 播放控制条
     def _build_transport(self) -> QWidget:
-        """🎵 MASTER AUDIO 的播放条：播放/暂停/停止、音量、时间、缩放、滚动。"""
+        """🎵 MASTER AUDIO 的播放条：播放/暂停/停止、音量、时间、缩放、滚动。
+
+        用会换行的 `_FlowLayout`：编排台里这一块只占左半屏，窄了就自动折成两行，
+        按钮一个都不少（`QHBoxLayout` 会把面板最小宽度顶到 1300 像素，分栏就拖不动了）。
+        """
         holder = QFrame(self)
         holder.setFrameShape(QFrame.StyledPanel)
-        row = QHBoxLayout(holder)
+        row = _FlowLayout(holder, spacing=6)
         row.setContentsMargins(8, 4, 8, 4)
-        row.setSpacing(6)
 
         self.btn_play = _big(QPushButton("▶ 播放", holder), bold=True)
         self.btn_pause = _big(QPushButton("⏸ 暂停", holder))
@@ -275,10 +358,8 @@ class MasterAudioPanel(QWidget):
 
         for widget in (self.btn_play, self.btn_pause, self.btn_stop, self.clock,
                        QLabel("音量", holder), self.volume,
-                       QLabel("速度", holder), self.speeds):
-            row.addWidget(widget)
-        row.addStretch(1)
-        for widget in (self.follow, QLabel("视图", holder), self.zooms, btn_in, btn_out):
+                       QLabel("速度", holder), self.speeds,
+                       self.follow, QLabel("视图", holder), self.zooms, btn_in, btn_out):
             row.addWidget(widget)
 
         self.btn_play.clicked.connect(self.play)
@@ -331,6 +412,9 @@ class MasterAudioPanel(QWidget):
         column.setSpacing(6)
 
         self.timeline = MasterTimeline(holder)
+        # 音谱/波形这一块**不许被挤没**：左半屏变窄时那几排按钮会折行、占掉纵向空间，
+        # 时间轴是拿剩下的高度，没有下限的话窗口一小它就缩成一条线（看着像"音谱不见了"）
+        self.timeline.setMinimumHeight(200)
         self.timeline.setToolTip("左键按住＝拖动播放位置；拖分段线＝改段落边界；\n"
                                  "中键拖（或 Alt+左键拖）＝抓着音轨左右挪；\n"
                                  "滚轮＝缩放，Shift+滚轮＝横向滚动；右键＝换显示 / 切分。")
@@ -348,8 +432,18 @@ class MasterAudioPanel(QWidget):
         self.timeline.view_changed.connect(self._view_changed)
         column.addWidget(self.scroll)
 
-        tools = QHBoxLayout()
-        tools.setSpacing(6)
+        # 「起步参数」那一排（N 秒一段 / 等间隔起步 / 停顿推荐度 / 照人声停顿分 /
+        # 保存这份分段）**在界面上收起来了** —— 用户明确说不要，编排台上只留
+        # 天天点的那一排（切分 / 取消切分 / 合并 / 撤销 / 重做）。
+        #
+        # 控件本身留着，因为它们不只是按钮：
+        #   · `self.step` / `self.min_score` 是 `_make_uniform` / `_make_by_pause`
+        #     读参数的地方，也进 `state()`（换歌重开还记得上次填的值）
+        #   · `self.btn_save` 那条路仍然有效，页脚「保存」和 Ctrl+S 走的就是
+        #     `save_template()`，不靠这个按钮点
+        # 所以这里只是**不显示**，不是把功能挖掉。
+        self._segment_tools = QWidget(holder)
+        tools = _FlowLayout(self._segment_tools, spacing=6)
         self.step = QDoubleSpinBox(holder)
         self.step.setRange(0.5, 30.0)
         self.step.setSingleStep(0.5)
@@ -362,35 +456,34 @@ class MasterAudioPanel(QWidget):
         self.min_score.setValue(0.5)
         self.min_score.setPrefix("停顿推荐度 ≥ ")
         self.min_score.setMinimumHeight(FIELD_HEIGHT)
-        btn_uniform = _big(QPushButton("等间隔起步", holder))
-        btn_by_pause = _big(QPushButton("照人声停顿分", holder))
+        self.btn_uniform = _big(QPushButton("等间隔起步", holder))
+        self.btn_by_pause = _big(QPushButton("照人声停顿分", holder))
         self.btn_save = _big(QPushButton("保存这份分段", holder), bold=True)
 
-        # 这一行是"起步参数"：偶尔动一次。真正天天点的（切分/取消/合并/撤销/重做）
-        # 全在下面那一行，和画里的顺序一致
-        for widget in (self.step, btn_uniform, self.min_score, btn_by_pause):
+        for widget in (self.step, self.btn_uniform, self.min_score, self.btn_by_pause,
+                       self.btn_save):
             tools.addWidget(widget)
-        tools.addStretch(1)
-        tools.addWidget(self.btn_save)
-        column.addLayout(tools)
+        self._segment_tools.setVisible(False)
+        column.addWidget(self._segment_tools)
+
 
 
         self.timeline.seeked.connect(self._moved_to)
         self.timeline.boundary_dragged.connect(self._drag_preview)
         self.timeline.boundary_committed.connect(self._drag_commit)
-        btn_uniform.clicked.connect(self._make_uniform)
-        btn_by_pause.clicked.connect(self._make_by_pause)
+        self.btn_uniform.clicked.connect(self._make_uniform)
+        self.btn_by_pause.clicked.connect(self._make_by_pause)
         self.btn_save.clicked.connect(self.save_template)
         # 撤销/重做那两个按钮在下面那一行建（照画里的顺序），接线也在那儿
         return holder
 
     # ------------------------------------------------------------ 下：状态栏
     def _build_status(self) -> QWidget:
+        """当前段落状态 + 停顿导航 + 切分/合并/撤销那一排。窄了就折行，见 `_FlowLayout`。"""
         holder = QFrame(self)
         holder.setFrameShape(QFrame.StyledPanel)
-        row = QHBoxLayout(holder)
+        row = _FlowLayout(holder, spacing=8)
         row.setContentsMargins(8, 6, 8, 6)
-        row.setSpacing(8)
 
         self.status = QLabel("当前：—", holder)
         self.anchor = QComboBox(holder)
@@ -413,7 +506,7 @@ class MasterAudioPanel(QWidget):
 
         # 顺序照画里那一行走：播放当前段 → 切分 → 取消切分 → 合并 → 撤销 → 重做。
         # 停顿导航（◀▶ + 锚点）挨在它们前面，都是同一行，天天点的东西不分两处
-        row.addWidget(self.status, 1)
+        row.addWidget(self.status)
         for widget in (self.anchor, self.btn_prev, self.btn_next, self.btn_play_span,
                        self.btn_split, self.btn_unsplit, self.btn_merge,
                        self.btn_undo, self.btn_redo):
@@ -522,6 +615,24 @@ class MasterAudioPanel(QWidget):
         target = self.path.text().strip()
         if target and target != self._analyzed_path and Path(target).is_file():
             self.analyze()
+
+    def ensure_analyzed(self) -> bool:
+        """这首主音频还没解过就先解一遍，返回"这次有没有真开工"。
+
+        给「开始音频对齐」用：对齐要拿主音频当尺子，界面上也得同时把音频**解出来**
+        —— 波形 / 人声 / 音谱在 `_analyzed()` 里画上去。不然点了对齐，
+        左边那块还是"选一首主音频，这里会画出音谱图"的空占位，看着像没反应。
+
+        幂等：同一首歌解过就不再解；正在解也不会插第二个 worker（`analyze()` 自己拦）。
+        解析在后台线程里跑，所以不会挡住对齐那条线程。
+        """
+        target = self.path.text().strip()
+        if not target or not Path(target).is_file():
+            return False
+        if target == self._analyzed_path and self._duration > 0:
+            return False
+        self.analyze()
+        return True
 
     def analyze(self) -> None:
         """后台分析主音频。**不改分段** —— 分析只是把参考信息摆出来。"""
@@ -651,7 +762,7 @@ class MasterAudioPanel(QWidget):
         self._refresh_status()
 
     def seek_to(self, moment: float) -> None:
-        """外面（视频位置那条带子、右键菜单）要求跳到某一秒：**播放器也真的跟着跳**。
+        """外面（矩阵、右键菜单）要求跳到某一秒：**播放器也真的跟着跳**。
 
         主音频是唯一时间权威，所以定位只能从这一个入口进，别处不许自己算时间。
         """
@@ -716,7 +827,12 @@ class MasterAudioPanel(QWidget):
         self.status.setText(f"正在播 {span.name}（{span.start:.3f}→{span.end:.3f}）")
 
     def _position_changed(self, milliseconds: int) -> None:
-        """播放器每 50ms 回调一次：播放头、时钟、当前段、人声状态一起更新。"""
+        """播放器每 50ms 回调一次：播放头、时钟、当前段、人声状态一起更新。
+
+        **也要把位置广播出去**（`seek_requested`）：编排台右边那张矩阵要靠它把
+        当前列描边、左边实时画面要靠它跟着播。以前这里只更新自己，位置只在
+        手动拖动时才广播，所以一按播放右边和左边就都不动了。
+        """
         moment = max(0.0, float(milliseconds) / 1000.0)
         if self._stop_at is not None and moment >= self._stop_at:
             self.player.pause()
@@ -728,6 +844,7 @@ class MasterAudioPanel(QWidget):
             self.timeline.ensure_visible(moment)
         self._refresh_clock()
         self._refresh_status()
+        self.seek_requested.emit(round(moment, 3))
 
     def _refresh_clock(self) -> None:
         self.clock.setText(f"{_clock(self._at)} / {_clock(self._duration)}")
@@ -952,6 +1069,12 @@ class MasterAudioPanel(QWidget):
     def at(self) -> float:
         """当前播放位置（秒）。别的面板要跟着它走，就读这一个。"""
         return float(self._at)
+
+    @property
+    def duration(self) -> float:
+        """主音频时长（秒）；还没解出来就是 0。别的面板按它算段落。"""
+        return float(self._duration)
+
 
 
     def state(self) -> dict[str, Any]:

@@ -45,34 +45,64 @@ class SourceRangeError(ValueError):
 
 
 def map_to_source(target_start: float, target_end: float, offset: float,
-                  source_duration: float, *, segment_index: int = 0) -> SliceSpec:
+                  source_duration: float, *, segment_index: int = 0,
+                  head_room: float = 0.0, tail_room: float = 0.0) -> SliceSpec:
     """单个音乐位置 → 源区间。越界直接抛 `SourceRangeError`。
 
     这是**严格版**：给单个位置用，越界就是错误。批量切片走 `plan_slices`，
     那边把越界记进 `skipped` 并附原因（也是显式的，只是不中断整批）。
+
+    `head_room` / `tail_room`（秒，默认 0 = 老行为）是**首尾允许缺多少**：
+    很多录屏素材开头少一点、结尾早结束一点，于是首段映射到源的负数、
+    尾段超过源时长，整段就被判"没有素材"。给了余量之后，这两头改成
+    **取交集**：源区间夹到 `[0, source_duration]`，**目标区间同步缩短相同的量**，
+    于是 `source = target - offset` 一个字都没变，只是这一格覆盖的音乐短了一截。
+
+        S1 目标 0→12，offset +1 → 源 −1→11
+        head_room=2 ⇒ 源 0→11、目标 1→12（缺了开头 1 秒，其余照常）
+
+    这**不是** clamp 源区间那种错位裁剪（那会让画面和音乐错开，是模块开头明令禁止的）：
+    两端一起缩，几何关系是精确的。代价是这一格比段落本身短，成片拼接时这一段会短
+    对应的一截 —— 所以默认为 0，要用得自己把余量填上，明确知道自己在换什么。
     """
     start = round(float(target_start) - float(offset), 6)
     end = round(float(target_end) - float(offset), 6)
+    kept_start, kept_end = round(float(target_start), 6), round(float(target_end), 6)
     if end <= start:
         raise SourceRangeError(f"位置 #{segment_index} 的区间非法：{start} → {end}")
+    room_head = max(0.0, float(head_room))
+    room_tail = max(0.0, float(tail_room))
     if start < -EPS:
+        missing = -start
+        if missing > room_head + EPS:
+            raise SourceRangeError(
+                f"位置 #{segment_index}（目标 {target_start:.3f}→{target_end:.3f}）"
+                f"映射到源 {start:.3f}s，早于源视频开头 {missing:.3f}s —— 不做 clamp，"
+                f"这一段没有对应素材（首段余量 {room_head:.3f}s 不够）")
+        kept_start = round(kept_start + missing, 6)      # 目标同步后移，几何不变
+        start = 0.0
+    duration = float(source_duration)
+    if duration > 0 and end > duration + EPS:
+        missing = end - duration
+        if missing > room_tail + EPS:
+            raise SourceRangeError(
+                f"位置 #{segment_index}（目标 {target_start:.3f}→{target_end:.3f}）"
+                f"映射到源 {start:.3f}→{end:.3f}s，超过源时长 {duration:.3f}s "
+                f"{missing:.3f}s —— 不做 clamp，这一段没有对应素材"
+                f"（尾段余量 {room_tail:.3f}s 不够）")
+        kept_end = round(kept_end - missing, 6)          # 同上，两端一起缩
+        end = round(duration, 6)
+    if end - start <= EPS or kept_end - kept_start <= EPS:
         raise SourceRangeError(
-            f"位置 #{segment_index}（目标 {target_start:.3f}→{target_end:.3f}）"
-            f"映射到源 {start:.3f}s，早于源视频开头 —— 不做 clamp，这一段没有对应素材")
-    if float(source_duration) > 0 and end > float(source_duration) + EPS:
-        raise SourceRangeError(
-            f"位置 #{segment_index}（目标 {target_start:.3f}→{target_end:.3f}）"
-            f"映射到源 {start:.3f}→{end:.3f}s，超过源时长 {source_duration:.3f}s"
-            f" —— 不做 clamp，这一段没有对应素材")
+            f"位置 #{segment_index}：夹到源视频范围内之后什么都不剩了")
     return SliceSpec(segment_index=segment_index,
-                     target_start=round(float(target_start), 6),
-                     target_end=round(float(target_end), 6),
+                     target_start=kept_start, target_end=kept_end,
                      source_start=max(0.0, start), source_end=end)
 
 
 def plan_slices(alignment: DanceAlignment, *, song_duration: float, source_duration: float,
                 slice_duration: float = 0.0, positions=None, source_video_id: int = 0,
-                target_song_id: int = 0,
+                target_song_id: int = 0, head_room: float = 0.0, tail_room: float = 0.0,
                 generation_version: str = MATERIAL_GENERATION_VERSION) -> SlicePlan:
     """一个源视频对一首目标歌的完整切片计划。
 
@@ -110,7 +140,8 @@ def plan_slices(alignment: DanceAlignment, *, song_duration: float, source_durat
     for position in picks:
         try:
             specs.append(map_to_source(position.start, position.end, alignment.offset,
-                                       source_duration, segment_index=position.index))
+                                       source_duration, segment_index=position.index,
+                                       head_room=head_room, tail_room=tail_room))
         except SourceRangeError as exc:
             skipped.append((position.index, str(exc)))
     logger.info("切片计划：offset %.3fs｜%d 个位置可切、%d 个跳过（源 %.2fs / 歌 %.2fs）",

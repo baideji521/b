@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from PyQt5.QtCore import Qt                                   # noqa: E402
 from PyQt5.QtWidgets import QApplication                      # noqa: E402
 
 from dance_fixtures import fake_library, make_project         # noqa: E402
@@ -82,7 +83,69 @@ def test_the_master_audio_drives_the_realtime_row(work: Path) -> None:
         window.close()
 
 
+def test_segment_frames_are_predecoded_into_memory(work: Path) -> None:
+    """片段预解码：**播放/定位/逐帧全部不再解码**，所以才不卡、才能核卡点。
+
+    证明方式够狠：`preload` 之后直接把 cv2 的读写头 `release()` 掉。如果播放
+    还偷偷在解码，后面的 seek / 逐帧一定拿不到画面；能照样出帧就说明帧真在内存里。
+
+    这里会 import cv2（`FramePlayer` 自己延迟 import 的）。它改写
+    QT_QPA_PLATFORM_PLUGIN_PATH 只影响**之后**创建的 QApplication，
+    而本文件顶上那个 QApplication 早就建好了 —— 和真实程序里的先后顺序一致。
+    """
+    from dance_fixtures import song, write_video
+    from vidscribe.gui.player import CACHE_EDGE, FramePlayer
+
+    clip = write_video(work / "cache.mp4", song(duration=2.0), fps=24.0,
+                       width=1080, height=1440)      # 3:4：素材基本都是这个比例
+    player = FramePlayer()
+    try:
+        assert player.open(clip), "测试素材解不开"
+        assert not player.is_cached(), "还没 preload 就说自己在放内存"
+        assert player.preload(0.5, 1.5), "1 秒的片段应该缓存得下"
+        begin, end = player.cached_span()
+        assert abs(begin - 0.5) < 0.05 and abs(end - 1.5) < 0.1, (begin, end)
+        # 缓存的帧被缩到闸门以内，否则 1080×1440 几秒就能吃掉几百 MB
+        assert max(player._image.width(), player._image.height()) <= CACHE_EDGE  # noqa: SLF001
+
+        player._cap.release()                                    # noqa: SLF001
+        player.seek(1.0)
+        assert abs(player.position() - 1.0) < 0.05, player.position()
+        first = player.position()
+        player.step_frame(1)                                     # 逐帧：往后一帧
+        assert abs(player.position() - first - 1 / 24.0) < 0.01, player.position()
+        player.step_frame(-1)                                    # 再回来，回到原处
+        assert abs(player.position() - first) < 0.01, player.position()
+        assert not player.is_playing(), "逐帧必须先停住"
+
+        # 越界不炸也不乱跳：贴到最近的一端
+        player.seek(0.0)
+        assert abs(player.position() - begin) < 0.05, player.position()
+    finally:
+        player.close_video()
+        assert not player.is_cached(), "关掉视频要把缓存放掉，不然内存只涨不降"
+
+
+def test_live_window_covers_both_kinds_of_material(work: Path) -> None:
+    """预解码的窗口用一条公式覆盖两种素材：库里的片段文件 / 内存里的实时格子。"""
+    window, _song_id, _m = _window(work)
+    try:
+        # ① 库里的片段：文件本身就是这一段，base = target_start → 0 起
+        begin, end = window._live_window(                        # noqa: SLF001
+            {"target_start": 6.0, "target_end": 9.0})
+        assert (round(begin, 3), round(end, 3)) == (0.0, 3.0), (begin, end)
+        # ② 实时格子：放的是整条源视频，base = offset → source_start 起
+        begin, end = window._live_window(                        # noqa: SLF001
+            {"target_start": 6.0, "target_end": 9.0, "seek_base": 2.0})
+        assert (round(begin, 3), round(end, 3)) == (4.0, 7.0), (begin, end)
+        # ③ 缺时间信息就别猜，返回 None（外面自动退回流式播放）
+        assert window._live_window({"path": "x.mp4"}) is None    # noqa: SLF001
+    finally:
+        window.close()
+
+
 def test_window_has_all_four_regions(work: Path) -> None:
+
 
     """一期第二十四节的四个区域，面板一个都不能少。"""
     window, _song_id, _m = _window(work)
@@ -95,20 +158,54 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert window.bench is not None             # 源视频对齐 / 切片入库（在编排台里）
         assert window.master is not None            # 主音频编辑区（段落模板）
         assert window.matrix is not None            # 素材矩阵（就在编排台里）
-        titles = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-        assert titles == ["🎵 编排台（主音频→分段→素材→成片）", "素材资产", "音频对齐",
-                          "选择与推荐", "历史与统计"], titles
-        # 编排台一页走完：一行工具栏 → 视频（上）+ 音谱（下）→ 素材矩阵
-        assert window.tabs.widget(0) is window.studio
+        # 一页到底：没有 Tab，编排台就是整个窗口的正面
+        assert not hasattr(window, "tabs"), "编排台不该再被塞进 Tab 里"
+        assert window.centralWidget().isAncestorOf(window.studio)
+        # 音频对齐是随时能点到的右侧侧栏（默认收着，不挡编排台）
+        # 窗口自己没 show，子控件 isVisible() 恒 False，所以看"有没有被显式收起来"
+        assert window.dock_align.widget() is window.alignment
+        assert window.dock_align.isHidden() is True
+        window.btn_dock_align.click()
+        assert window.dock_align.isHidden() is False
+        window.btn_dock_align.click()
+        assert window.dock_align.isHidden() is True
+        # 输入与操作在左侧侧栏里
+        assert window.dock_remix.widget().isAncestorOf(window.remix)
+        # 其余三组走弹窗，点了才建，建完面板还是原来那几个实例
+        assets = window._open_panel("assets")            # noqa: SLF001 - 测试里直接开
+        assert assets.isAncestorOf(window.filters) and assets.isAncestorOf(window.library)
+        assert window._open_panel("assets") is assets    # noqa: SLF001 - 只建一次
+        choose = window._open_panel("choose")            # noqa: SLF001
+        assert choose.isAncestorOf(window.candidates) and choose.isAncestorOf(window.recommend)
+        review = window._open_panel("review")            # noqa: SLF001
+        assert review.isAncestorOf(window.history) and review.isAncestorOf(window.statistics)
+        for window_ in (assets, choose, review):
+            window_.close()
+        # 编排台一页走完：一行工具栏 → 左半边视频+音谱 / 右半边素材矩阵
         assert window.studio_split.widget(0) is window.bench
-        stage = window.studio_split.widget(1)
+        assert window.studio_split.widget(1) is window.body_split
+        stage = window.body_split.widget(0)
         assert stage.isAncestorOf(window.live), "视频画面不在音谱那一块里"
-        assert stage.isAncestorOf(window.coverage)
         assert stage.isAncestorOf(window.master)
+        # 「视频位置」那条覆盖带已经删掉了（用户不要）
+        assert not hasattr(window, "coverage")
+        # 「起步参数」那一排（N 秒一段 / 等间隔起步 / 停顿推荐度 / 照人声停顿分 /
+        # 保存这份分段）在界面上收起来了；控件还在，参数和 Ctrl+S 那条路不受影响
+        assert window.master._segment_tools.isHidden()    # noqa: SLF001
+        assert window.master.step is not None and window.master.btn_save is not None
         # 上边视频、下边音谱：拿它们在同一个布局里的纵坐标比一下
         assert window.stage_split.widget(0).isAncestorOf(window.live)
         assert window.stage_split.widget(1).isAncestorOf(window.master)
-        assert window.studio_split.widget(2) is window.matrix
+        # 右半边三块：视频列表 / 实时播放（自己单独一行）/ 段落候选矩阵
+        assert window.body_split.widget(1) is window.right_split
+        assert window.right_split.count() == 3, window.right_split.count()
+        assert window.right_split.widget(0) is window.video_list
+        assert window.right_split.widget(1) is window.matrix.realtime_box
+        assert window.right_split.widget(2) is window.matrix
+        # 实时播放那一块已经从矩阵里搬出来了，不该还在矩阵内部
+        assert not window.matrix.isAncestorOf(window.matrix.realtime_box)
+        assert window.body_split.orientation() == Qt.Horizontal
+        assert window.right_split.orientation() == Qt.Vertical
 
 
         for button in (window.btn_preview_final, window.btn_save_all,
@@ -117,6 +214,382 @@ def test_window_has_all_four_regions(work: Path) -> None:
         assert "卡点舞" in window.windowTitle()
         # 小窗口也要能用（一期第十五节）
         assert window.minimumWidth() <= 1000 and window.minimumHeight() <= 640
+    finally:
+        window.close()
+
+
+def test_video_and_spectrum_take_only_the_left_half(work: Path) -> None:
+    """视频 + 音谱同一块、视频在上音谱在下，**而且只占左半边**，右半边留给视频列表。
+
+    这条必须量真实像素：只看控件树的话，"列表在右边"和"列表被挤成一条缝"
+    长得一模一样。主音频那两排按钮以前是 QHBoxLayout，最小宽度顶到 1300 上下，
+    左半边怎么拖都缩不下来 —— 换成会折行的 `_FlowLayout` 才真的对半分。
+    """
+    window, _song_id, _m = _window(work)
+    try:
+        window.resize(1600, 1000)
+        window.show()
+        _app.processEvents()
+
+        stage = window.body_split.widget(0)
+        stage_x = stage.mapTo(window, stage.rect().topLeft()).x()
+        right = window.video_list
+        right_x = right.mapTo(window, right.rect().topLeft()).x()
+        video_y = window.live.mapTo(window, window.live.rect().topLeft()).y()
+        audio_y = window.master.mapTo(window, window.master.rect().topLeft()).y()
+
+        assert video_y < audio_y, "视频得在音谱上边"
+        assert right_x >= stage_x + stage.width() - 8, "视频列表没在右半边"
+        share = stage.width() / max(1, window.width())
+        assert 0.3 <= share <= 0.7, f"左半边占了 {share:.0%}，不是半边"
+        # 左半边还得真能拖窄：最小宽度别再被那排按钮顶住
+        assert stage.minimumSizeHint().width() <= 700, stage.minimumSizeHint().width()
+    finally:
+        window.close()
+
+
+def test_the_right_list_shows_folder_videos_and_alignment_results(work: Path) -> None:
+    """右侧列表：选完文件夹先列文件，对齐算完再填 Offset / 置信度，**全程不落库**。"""
+    from types import SimpleNamespace
+
+    window, _song_id, _m = _window(work)
+    try:
+        before = _library_counts(window)
+
+        window.bench.folder_scanned.emit([str(work / "girl01.mp4"),
+                                          str(work / "girl02.mp4")])
+        rows = window.video_list.rows()
+        assert [r["视频"] for r in rows] == ["girl01.mp4", "girl02.mp4"], rows
+        assert all(r["状态"] == "未对齐" for r in rows), rows
+        assert all(r["Offset"] == "—" for r in rows), rows
+        assert "2 个视频" in window.video_list.hint.text(), window.video_list.hint.text()
+
+        window.bench.results_ready.emit([
+            {"path": str(work / "girl01.mp4"), "name": "girl01.mp4",
+             "alignment": SimpleNamespace(offset=3.201, confidence=0.981,
+                                          status="ok", source_duration=62.4)},
+            {"path": str(work / "girl02.mp4"), "name": "girl02.mp4",
+             "alignment": None, "error": "音轨解不开"},
+        ])
+        rows = {r["视频"]: r for r in window.video_list.rows()}
+        assert rows["girl01.mp4"]["Offset"] == "+3.201", rows
+        assert rows["girl01.mp4"]["置信度"] == "0.981", rows
+        assert rows["girl01.mp4"]["时长"] == "62.40s", rows
+        assert rows["girl01.mp4"]["状态"] == "✅ 可用", rows
+        assert "失败" in rows["girl02.mp4"]["状态"], rows
+        # 对齐只是算给人看：库里的素材/对齐条数一条都没变
+        assert _library_counts(window) == before, (_library_counts(window), before)
+        # 字号比全局 12px 小一号
+        assert "font-size:11px" in window.video_list.table.styleSheet()
+    finally:
+        window.close()
+
+
+def test_unaligned_rows_disappear_once_alignment_ran(work: Path) -> None:
+    """对齐跑完，还挂着「未对齐」的行必须清掉；路径写法不同也要落到同一行。"""
+    from types import SimpleNamespace
+
+    window, _song_id, _m = _window(work)
+    try:
+        window.bench.folder_scanned.emit([str(work / "a.mp4"), str(work / "b.mp4")])
+        assert len(window.video_list.rows()) == 2
+        # 结果里的路径故意换个写法（斜杠 + 大小写）：还是同一个文件，不许另开一行
+        odd = str(work / "a.mp4").replace("\\", "/").upper()
+        window.bench.results_ready.emit([
+            {"path": odd, "name": "a.mp4",
+             "alignment": SimpleNamespace(offset=1.5, confidence=0.9,
+                                         status="ok", source_duration=30.0)}])
+        rows = window.video_list.rows()
+        assert len(rows) == 1, rows            # b.mp4 那行「未对齐」被清掉了
+        assert rows[0]["Offset"] == "+1.500", rows
+        assert all(r["状态"] != "未对齐" for r in rows), rows
+    finally:
+        window.close()
+
+
+def test_right_click_can_copy_paste_and_really_delete(work: Path) -> None:
+    """右键：全选 / 复制 / 粘贴 / 删除。**删除是真删本地文件**，删完清干净。"""
+    from PyQt5.QtWidgets import QMessageBox
+
+    files = []
+    for name in ("v1.mp4", "v2.mp4"):
+        path = work / name
+        path.write_bytes(b"not really a video")     # 右键这几个动作不解码
+        files.append(str(path))
+
+    window, _song_id, _m = _window(work)
+    try:
+        panel = window.video_list
+        window.bench.folder_scanned.emit(files)
+        panel.table.selectAll()
+        assert sorted(panel.selected_paths()) == sorted(files), panel.selected_paths()
+
+        assert panel.copy_selected() == panel.selected_paths()
+        panel.drop_files(files)                     # 假装列表被清空了
+        assert panel.rows() == []
+        assert sorted(panel.paste_files()) == sorted(files), "粘贴没把文件加回来"
+        assert len(panel.rows()) == 2
+
+        # 删除：确认框答"是"，文件真的从磁盘上消失
+        original = QMessageBox.warning
+        QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Yes)
+        try:
+            panel.table.selectAll()
+            gone = panel.delete_selected()
+        finally:
+            QMessageBox.warning = original
+        assert sorted(gone) == sorted(files), gone
+        assert all(not Path(p).exists() for p in files), "文件还在，没真删"
+        assert panel.rows() == [], panel.rows()
+        # 批量清单也跟着清了，否则下一轮对齐会去算不存在的文件
+        assert window.bench.more.count() == 0, window.bench.more.count()
+    finally:
+        window.close()
+
+
+def test_frames_are_decoded_off_the_gui_thread(work: Path) -> None:
+    """预取线程真的在后台解片段，播放器拿现成的装上（GUI 线程一帧都不解）。"""
+    import time
+
+    from dance_fixtures import song, write_video
+    from vidscribe.gui.player import FramePlayer, FramePrefetcher
+
+    clip = write_video(work / "warm.mp4", song(duration=3.0), fps=24.0,
+                       width=540, height=960)
+    got: list[tuple] = []
+    pump = FramePrefetcher()
+    pump.ready.connect(lambda *args: got.append(args))
+    try:
+        pump.request(str(clip), 0.5, 1.5)
+        deadline = time.monotonic() + 30.0
+        while not got and time.monotonic() < deadline:
+            _app.processEvents()
+            time.sleep(0.02)
+        assert got, "后台线程没把帧送回来"
+        path, begin, end, bundle = got[0]
+        assert (round(begin, 3), round(end, 3)) == (0.5, 1.5), (begin, end)
+        assert len(bundle[0]) >= 20, len(bundle[0])       # 1 秒 @24fps
+    finally:
+        pump.shutdown()
+
+    player = FramePlayer()
+    try:
+        assert player.open(clip)
+        assert player.adopt_cache(path, begin, end, bundle) is True
+        assert player.is_cached(), "预取的帧没装上"
+        assert abs(player.cached_span()[0] - 0.5) < 0.05, player.cached_span()
+        # 换了别的文件就不许收：不然画面和素材对不上
+        assert player.adopt_cache(str(work / "other.mp4"), begin, end, bundle) is False
+    finally:
+        player.close_video()
+
+
+def test_deleting_a_video_releases_the_file_first(work: Path) -> None:
+    """右键删除：**先松开占用再删**。播放器还开着的话 Windows 会锁住这个文件。"""
+    from PyQt5.QtWidgets import QMessageBox
+
+    from dance_fixtures import song, write_video
+
+    clip = write_video(work / "locked.mp4", song(duration=1.5), fps=24.0,
+                       width=320, height=240)
+    window, _song_id, _m = _window(work)
+    try:
+        window.bench.folder_scanned.emit([str(clip)])
+        assert window.live.open(str(clip)), "先让播放器占着这个文件"
+        assert window.live.holds(str(clip))
+
+        original = QMessageBox.warning
+        QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Yes)
+        try:
+            window.video_list.table.selectAll()
+            gone = window.video_list.delete_selected()
+        finally:
+            QMessageBox.warning = original
+
+        assert gone == [str(clip)], gone
+        assert not clip.exists(), "占用没松开，文件删不掉"
+        assert window.live.path() == "", "播放器还attach着已经删掉的文件"
+    finally:
+        window.close()
+
+
+def _library_counts(window) -> tuple[int, int]:
+    """(素材数, 对齐数)。用来钉住"对齐不入库"。"""
+    cursor = window.db.execute("SELECT COUNT(*) FROM dance_materials")
+    materials = int(cursor.fetchone()[0])
+    cursor = window.db.execute("SELECT COUNT(*) FROM dance_audio_alignments")
+    return materials, int(cursor.fetchone()[0])
+
+
+def test_the_right_matrix_is_live_and_follows_the_cuts(work: Path) -> None:
+    """右侧矩阵**入库之前就有内容**，列数跟着音谱上的分段走，越界的格子留空。
+
+    每一格按对齐那层唯一的换算现算：`源时间 = 目标时间 − offset`。
+    整段落不进源视频就不给格子（不偷偷 clamp —— 那会让画面和音乐错开）。
+    """
+    from types import SimpleNamespace
+
+    window, _song_id, _m = _window(work)
+    try:
+        window.master._duration = 12.0            # noqa: SLF001 - 假装主音频解过了
+        window.remix.slice_preset.setCurrentIndex(2)   # 2.0 秒一段 → 6 段
+        window.bench.results_ready.emit([
+            # 整条 60 秒，offset 3：0→12s 这一段整段都在它里面
+            {"path": str(work / "girl01.mp4"), "name": "girl01.mp4",
+             "alignment": SimpleNamespace(offset=3.0, confidence=0.9, status="ok",
+                                          source_duration=60.0)},
+            # 只有 5 秒，offset 0：后面几段落在视频外面，那些格子必须空着
+            {"path": str(work / "girl02.mp4"), "name": "girl02.mp4",
+             "alignment": SimpleNamespace(offset=0.0, confidence=0.8, status="ok",
+                                          source_duration=5.0)},
+        ])
+
+        assert len(window.matrix.segments) == 6, len(window.matrix.segments)
+        assert window.matrix.db is None, "实时格子不该挂着库连接（免得写进去）"
+        # 第一段 0→2s：长视频 offset=3 会算出源 −3→−1（负的）→ 拒绝，不给格子；
+        # 短视频 offset=0 算出源 0→2，在 5 秒之内 → 有格子
+        first = window.matrix.segments[0]["materials"]
+        assert [row["video_name"] for row in first] == ["girl02.mp4"], first
+        assert first[0]["source_start"] == 0.0 and first[0]["seek_base"] == 0.0, first
+        assert int(first[0]["material_id"]) < 0, "内存格子的 id 该是负数"
+        # 中间那段 4→6s：长视频算出源 1→3，落在里面 → 有格子（源时间 = 目标 − offset）
+        middle = {row["video_name"]: row for row in window.matrix.segments[2]["materials"]}
+        assert abs(middle["girl01.mp4"]["source_start"] - 1.0) < 1e-9, middle
+        assert abs(middle["girl01.mp4"]["seek_base"] - 3.0) < 1e-9, middle
+        # 最后一段（10→12s）：短视频进不去，只剩长视频那一格
+        last = window.matrix.segments[-1]["materials"]
+        assert [row["video_name"] for row in last] == ["girl01.mp4"], last
+
+        # 切一刀就多一列：这里直接改分段数（模拟 ✂ 切分之后 template 变了）
+        window.remix.slice_preset.setCurrentIndex(0)   # 1.0 秒一段 → 12 段
+        window._reload_matrix()                        # noqa: SLF001
+        assert len(window.matrix.segments) == 12, len(window.matrix.segments)
+    finally:
+        window.close()
+
+
+def test_live_cells_can_be_clicked_and_dragged_into_the_realtime_row(work: Path) -> None:
+    """内存里的实时格子**照样能点、能拖进「实时播放」行**。
+
+    这条是补一个真窟窿：之前只检查了生成出来的格子数据，没有真去点/拖一下，
+    结果两处"只认正数 id / 少了 segment_index"的判定把实时格子全拒了 ——
+    界面上表现就是"下边的片段拉不到实时播放里边"。
+    """
+    from types import SimpleNamespace
+
+    from PyQt5.QtGui import QDragEnterEvent
+    from PyQt5.QtCore import QPoint
+
+    from vidscribe.gui.dance_montage import matrix_panel as mx
+
+    window, _song_id, _m = _window(work)
+    try:
+        window.master._duration = 12.0            # noqa: SLF001
+        window.remix.slice_preset.setCurrentIndex(2)      # 2 秒一段
+        window.bench.results_ready.emit([
+            {"path": str(work / f"{name}.mp4"), "name": f"{name}.mp4",
+             "alignment": SimpleNamespace(offset=0.0, confidence=0.9, status="ok",
+                                          source_duration=60.0)}
+            for name in ("girl01", "girl02")
+        ])
+        first = window.matrix.segments[0]["materials"]
+        assert len(first) == 2, first
+        cells = [window.matrix.cells[(row["video_id"], 0)] for row in first]
+        target = window.matrix.realtime[0]
+
+        # ① 点一下就选上，而且这一格变绿（"被采用"要看得见）
+        window.matrix._cell_clicked(dict(cells[0].payload))    # noqa: SLF001
+        assert target.material_id == cells[0].material_id, target.material_id
+        assert window.matrix.picks()[0] == cells[0].material_id
+        assert cells[0].is_chosen() is True
+        assert cells[1].is_chosen() is False
+
+        # ② 同一列另一格拖上来就换人（业务层的落格判定），颜色也跟着换
+        assert target.drop_payload(dict(cells[1].payload)) is True
+        assert target.material_id == cells[1].material_id
+        assert cells[1].is_chosen() is True
+        assert cells[0].is_chosen() is False, "被替换掉的那一格该回到原色"
+
+        # ③ 真的拖拽事件也认（dragEnter 必须 accept，否则光标是禁止符号、松手没反应）
+        # mime 必须**先存进变量**：内联传进 QDragEnterEvent 的话 Python 这边引用计数
+        # 立刻归零，Qt 那边还握着指针 —— 进程直接 access violation 崩掉
+        data = mx.pack(dict(cells[0].payload))
+        enter = QDragEnterEvent(QPoint(5, 5), Qt.CopyAction, data,
+                                Qt.LeftButton, Qt.NoModifier)
+        target.dragEnterEvent(enter)
+        assert enter.isAccepted(), "实时格子被拒了，界面上就是「拖不进去」"
+
+        # ④ 跨列照旧拒绝：素材和音乐位置是绑死的（这一格还是 ② 摆上去的那条）
+        other = window.matrix.cells[(first[0]["video_id"], 2)]
+        assert target.drop_payload(dict(other.payload)) is False
+        assert target.material_id == cells[1].material_id
+    finally:
+        window.close()
+
+
+def test_playback_broadcasts_the_position_so_the_page_follows(work: Path) -> None:
+    """主音频**一边播一边广播位置**，右边矩阵和左边画面才跟得上。
+
+    以前位置只在手动拖动时广播（`_moved_to`），播放回调 `_position_changed`
+    只更新自己那一块 —— 于是一按播放，矩阵的当前列不走、左边画面也不动。
+    """
+    window, _song_id, _m = _window(work)
+    try:
+        seen: list[float] = []
+        window.master.seek_requested.connect(seen.append)
+        window.master._position_changed(1500)          # noqa: SLF001 - 假装播到 1.5s
+        assert seen and abs(seen[-1] - 1.5) < 1e-6, seen
+        window.master._position_changed(3250)          # noqa: SLF001
+        assert abs(seen[-1] - 3.25) < 1e-6, seen
+    finally:
+        window.close()
+
+
+def test_the_left_player_follows_the_master_audio(work: Path) -> None:
+    """实时播放行摆了谁，主音频走到哪儿，左边画面就播那一段的那个位置。
+
+    这条把整条链一次走完：位置广播 → 当前是第几段 → 那一格的素材 → 打开+定位。
+    两个真 bug 曾经卡在这条链上：
+      · 「当前是第几段」只问 `master.template`，没切过分段时永远是 −1；
+      · `FramePlayer.position` 是方法不是属性，`float(方法)` 抛 TypeError，
+        而这是在槽里 —— PyQt 直接把进程干掉，界面上就是"按了播放没反应"。
+    """
+    from types import SimpleNamespace
+
+    window, _song_id, _m = _window(work)
+    try:
+        window.master._duration = 12.0            # noqa: SLF001
+        window.remix.slice_preset.setCurrentIndex(2)      # 2 秒一段 → 6 段
+        window.bench.results_ready.emit([
+            {"path": str(work / "girl01.mp4"), "name": "girl01.mp4",
+             "alignment": SimpleNamespace(offset=0.0, confidence=0.9, status="ok",
+                                          source_duration=60.0)},
+        ])
+        cell = window.matrix.cells[(1, 1)]        # 视频 1 在 S2（2→4s）那一格
+        window.matrix._cell_clicked(dict(cell.payload))   # noqa: SLF001
+        assert window.matrix.picks() == {1: cell.material_id}
+
+        calls: list[str] = []
+        window.live.open = lambda path: (calls.append(f"open:{Path(path).name}"), True)[1]
+        window.live.seek = lambda seconds: calls.append(f"seek:{seconds:.3f}")
+        window.live.play = lambda: calls.append("play")
+        window.live.pause = lambda: calls.append("pause")
+        window.live.close_video = lambda: calls.append("close")
+        window.live.position = lambda: 0.0
+        window.live.set_audio_enabled = lambda _on: None
+
+        window.master.seek_requested.emit(3.0)   # 主音频走到 3.0s，落在 S2
+        assert window.matrix.current_segment == 1, window.matrix.current_segment
+        assert window._live_material == cell.material_id   # noqa: SLF001
+        assert "open:girl01.mp4" in calls, calls
+        # 段落内位置 = 3.0 − seek_base(0.0)；offset 只减一次
+        assert "seek:3.000" in calls, calls
+        assert "素材" in window.live_note.text()
+
+        # 走到没选素材的那一段 → 画面清空，不拿别的段顶替
+        window.master.seek_requested.emit(9.0)
+        assert window._live_material == 0          # noqa: SLF001
+        assert "close" in calls, calls
     finally:
         window.close()
 
@@ -388,7 +861,8 @@ def test_settings_survive_a_restart(work: Path) -> None:
     first = main_page.DanceMontageWindow(cfg)
     try:
         first.resize(1320, 880)
-        first.split.setSizes([480, 840])
+        first.studio_split.setSizes([120, 900])
+        first.body_split.setSizes([700, 820])
         first.remix.song.setText(str(song_id))
         first.remix.slice_preset.setCurrentIndex(1)          # 1.5 秒
         first.remix.person.setText("小A")
@@ -401,7 +875,7 @@ def test_settings_survive_a_restart(work: Path) -> None:
         first.bench.chk_sound.setChecked(True)
         first.bench.chk_sound.blockSignals(False)
         first.bench.btn_loop.setChecked(True)
-        first.tabs.setCurrentIndex(3)       # 「选择与推荐」——它不会把左栏收起来
+        first.dock_align.setVisible(True)      # 侧栏开着，下次开窗口该还是开着
         dialogs.remember("dance.source", work / "girl01.mp4")
     finally:
         first.close()                                       # closeEvent 里落盘
@@ -420,14 +894,20 @@ def test_settings_survive_a_restart(work: Path) -> None:
         assert abs(second.bench.slice_seconds.value() - 1.5) < 1e-6
         assert second.bench.chk_sound.isChecked(), "「带声音」的勾选没记住"
         assert second.bench.btn_loop.isChecked()
-        assert second.tabs.currentIndex() == 3, second.tabs.currentIndex()
-        # 分栏比例：离屏窗口没有真实宽度，Qt 会按控件宽度重新缩放 setSizes，
-        # 两次开窗口的可用宽度还可能不一样。所以这里只钉住"两栏都还在、比例大致一致"，
+        assert second.dock_align.isHidden() is False, "侧栏开着的状态没记住"
+        # 分栏比例：离屏窗口没有真实尺寸，Qt 会按控件大小重新缩放 setSizes，
+        # 两次开窗口的可用尺寸还可能不一样。所以这里只钉住"每一块都还在、比例大致一致"，
         # 不比字面值 —— 比字面值测的是 Qt 的缩放实现，不是我们存没存对
-        live = second.split.sizes()
-        kept = saved["dance_window"]["split"]
-        assert live[0] > 0 and live[1] > 0, live
-        assert abs(live[0] / sum(live) - kept[0] / sum(kept)) < 0.08, (live, kept)
+        live = second.studio_split.sizes()
+        kept = saved["dance_window"]["studio_split"]
+        assert len(live) == 2 and all(v >= 0 for v in live), live
+        assert sum(live) > 0 and sum(kept) > 0, (live, kept)
+        assert abs(live[-1] / sum(live) - kept[-1] / sum(kept)) < 0.12, (live, kept)
+        # 左半边（视频+音谱）和右半边（矩阵）的宽度比例也记住了
+        live = second.body_split.sizes()
+        kept = saved["dance_window"]["body_split"]
+        assert len(live) == 2 and sum(live) > 0, live
+        assert abs(live[0] / sum(live) - kept[0] / sum(kept)) < 0.12, (live, kept)
         assert second.width() == 1320 and second.height() == 880, second.size()
         # 上次选文件去过的目录也记住了
         assert Path(dialogs.start_dir("", "dance.source")) == work
@@ -505,6 +985,12 @@ def test_every_panel_fills_its_table_with_real_rows(work: Path) -> None:
 
 TESTS = (
     test_the_master_audio_drives_the_realtime_row,
+    test_segment_frames_are_predecoded_into_memory,
+    test_live_window_covers_both_kinds_of_material,
+    test_unaligned_rows_disappear_once_alignment_ran,
+    test_right_click_can_copy_paste_and_really_delete,
+    test_frames_are_decoded_off_the_gui_thread,
+    test_deleting_a_video_releases_the_file_first,
     test_window_has_all_four_regions,
     test_panels_show_real_library,
     test_every_panel_fills_its_table_with_real_rows,

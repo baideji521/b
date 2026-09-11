@@ -33,6 +33,7 @@ from dance_fixtures import (                                     # noqa: E402
     make_project,
     make_song_file,
     make_source_video,
+    write_video,
 )
 from vidscribe.dance import MATERIAL_GENERATION_VERSION          # noqa: E402
 from vidscribe.dance import material_ingest as ingest            # noqa: E402
@@ -157,6 +158,48 @@ def test_render_produces_silent_normalized_material(work: Path) -> None:
         db.close()
 
 
+def test_canvas_follows_the_source_resolution(work: Path) -> None:
+    """画布自动跟素材走：3:4 的源出 3:4 的成片，一个像素都不裁。
+
+    这条钉的是"自动识别分辨率"这件事本身：
+      · 尺寸一致 → 就用它
+      · 尺寸不一致 → 按**出现最多**的那个归一（少数派才被裁）
+      · 关掉 canvas_auto → 回到配置里那套固定画布
+    """
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    try:
+        _, pcm = make_song_file(cfg, "t.wav", bpm=120.0, duration=4.0)
+        # 3:4（素材基本都是这个比例）两条 + 一条 16:9 的少数派
+        tall_a = make_source_video(cfg, "tall_a.mp4", pcm, fps=24.0)
+        tall_b = make_source_video(cfg, "tall_b.mp4", pcm, fps=24.0)
+        wide = write_video(Path(cfg.dance["source_dir"]) / "wide.mp4", pcm,
+                           fps=24.0, width=256, height=144)
+
+        found = mb.canvas_for([tall_a, tall_b])
+        assert found is not None
+        assert (found.width, found.height) == (128, 128), found   # 夹具默认 128×128
+        assert abs(found.fps - 24.0) < 0.01, found
+
+        # 多数派说话：两条 128×128 压过一条 256×144
+        mixed = mb.canvas_for([tall_a, wide, tall_b])
+        assert (mixed.width, mixed.height) == (128, 128), mixed
+
+        # 走配置这条总入口：默认自动
+        auto = mb.resolve_canvas(cfg, [tall_a])
+        assert (auto.width, auto.height) == (128, 128), auto
+        # 关掉就回到固定画布
+        cfg.dance["canvas_auto"] = False
+        fixed = mb.resolve_canvas(cfg, [tall_a])
+        assert (fixed.width, fixed.height) == (int(cfg.dance["canvas_width"]),
+                                               int(cfg.dance["canvas_height"])), fixed
+        # 一个都探不到时也不能炸，退回固定画布
+        cfg.dance["canvas_auto"] = True
+        assert mb.resolve_canvas(cfg, []) == fixed
+    finally:
+        db.close()
+
+
 def test_regeneration_keeps_the_old_material(work: Path) -> None:
     """重切素材是**新增一个版本**，绝不物理删除旧素材（素材是长期资产）。"""
     cfg, db = make_project(work)
@@ -260,6 +303,7 @@ TESTS = (
     test_coverage_reports_the_truth,
     test_filename_carries_identity,
     test_render_produces_silent_normalized_material,
+    test_canvas_follows_the_source_resolution,
     test_regeneration_keeps_the_old_material,
     test_resume_only_redoes_what_is_missing,
 )

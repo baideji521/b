@@ -8,7 +8,8 @@
     002.mp4 │  [S1]    │  [S2]    │  [S3]    │  [S4]    │
     003.mp4 │  [S1]    │  [S2]    │  [S3]    │  [S4]    │
 
-用法只有一个动作：**在同一列里把某个视频的格子往上拖到实时播放行**，松手即生效。
+用法只有一个动作：**在格子上点一下**，这一段就用它，实时播放行立刻换人。
+也可以按住往上拖到实时播放行 —— 两种都行，都是一步到位，
 不需要"选择 + 应用 + 确认"三步。
 
 **硬限制**：拖动只能在同一列（同一个 Segment）里。`003/S3` 拖到实时播放行的 S1
@@ -34,7 +35,7 @@ from PyQt5.QtWidgets import (
     QGridLayout,
     QHBoxLayout,
     QLabel,
-    QPushButton,
+    QMenu,
     QScrollArea,
     QVBoxLayout,
     QWidget,
@@ -53,6 +54,10 @@ CELL_WIDTH = 132
 CELL_HEIGHT = 46
 HEAD_WIDTH = 150
 PLACEHOLDER = "—"
+
+#: 比全局 12px 小三号。矩阵是"一眼扫几十格"的表，字小一点一屏能多看几列几行；
+#: 实时播放那一块被搬出去之后不再继承本面板的样式，所以它自己也要设一遍
+FONT_SIZE = 9
 
 
 def pack(payload: dict[str, Any]) -> QMimeData:
@@ -80,9 +85,16 @@ def accepts(segment_index: int, payload: dict[str, Any]) -> bool:
 
 
 class CandidateCell(QFrame):
-    """矩阵里的一格：某个视频在某个 Segment 上的那段素材。按住往上拖就能用它。"""
+    """矩阵里的一格：某个视频在某个 Segment 上的那段素材。
+
+    点一下 = 这一段就用它（`chosen`）；按住往上拖到实时播放行也一样。
+    双击 = 只想看看这一格（`picked`）。
+    右键 = 一个小菜单，主菜是"把这一段从实时播放里清掉"（`cleared`）。
+    """
 
     picked = pyqtSignal(dict)          # 双击 = 想预览这一格
+    chosen = pyqtSignal(dict)          # 单击 = 这一段就用它
+    cleared = pyqtSignal(int)          # 右键清掉 = 这一段（段号）不用任何素材
 
     def __init__(self, payload: dict[str, Any], parent=None) -> None:
         super().__init__(parent)
@@ -90,12 +102,16 @@ class CandidateCell(QFrame):
         self.segment_index = int(self.payload.get("segment_index", -1))
         self.material_id = int(self.payload.get("material_id") or 0)
         self._press: QPoint | None = None
+        self._dragged = False
+        self._chosen = False
         self.setFrameShape(QFrame.StyledPanel)
+        self.setCursor(Qt.PointingHandCursor)
         self.setFixedSize(CELL_WIDTH, CELL_HEIGHT)
         self.setToolTip(f"{self.payload.get('video_name') or ''}　"
                         f"S{self.segment_index + 1}\n"
                         f"{self.payload.get('note') or ''}\n"
-                        "按住往上拖到「实时播放」那一行 = 这一段用它（只能在本列内拖）")
+                        "点一下 = 这一段用它；也可以按住往上拖到「实时播放」那一行"
+                        "（只能在本列内拖）；双击 = 只预览这一格")
 
         box = QVBoxLayout(self)
         box.setContentsMargins(6, 3, 6, 3)
@@ -107,9 +123,27 @@ class CandidateCell(QFrame):
         box.addWidget(self.title)
         box.addWidget(self.detail)
 
+    def set_chosen(self, chosen: bool) -> None:
+        """这一格**正被这一段采用**就变绿；被别人替换掉就回到原色。
+
+        只改样式，数据一个字不动 —— 谁被采用的唯一真相在实时播放行那一格上。
+        """
+        self._chosen = bool(chosen)
+        if self._chosen:
+            self.setStyleSheet(f"QFrame{{border:2px solid {theme.DONE};"
+                               f"background:{theme.DONE_DIM};}}")
+            self.title.setStyleSheet(f"color:{theme.TEXT}; font-weight:600;")
+        else:
+            self.setStyleSheet("")
+            self.title.setStyleSheet("")
+
+    def is_chosen(self) -> bool:
+        return self._chosen
+
     def mousePressEvent(self, event) -> None:            # noqa: N802 - Qt 的名字
         if event.button() == Qt.LeftButton:
             self._press = event.pos()
+            self._dragged = False
 
     def mouseMoveEvent(self, event) -> None:             # noqa: N802
         """走了几个像素才算拖：不然轻轻一点也会启动拖拽，手一抖就换素材。"""
@@ -117,13 +151,40 @@ class CandidateCell(QFrame):
             return
         if (event.pos() - self._press).manhattanLength() < 12:
             return
+        self._dragged = True             # 拖过了：松手时别再当成"点一下"
         drag = QDrag(self)
         drag.setMimeData(pack(self.payload))
         drag.exec_(Qt.CopyAction)
         self._press = None
 
+    def mouseReleaseEvent(self, event) -> None:          # noqa: N802
+        """松手且没拖动过 = 点了一下 = 这一段就用它。
+
+        草图上格子写的是「[候选]」，用户的动作就是"点它"。拖拽保留给
+        习惯拖的人，但绝不能要求先拖才会生效。
+        """
+        if event.button() != Qt.LeftButton:
+            return
+        pressed, self._press = self._press, None
+        if pressed is None or self._dragged:
+            self._dragged = False
+            return
+        if (event.pos() - pressed).manhattanLength() >= 12:
+            return                       # 手抖出格了，不算点选
+        self.chosen.emit(dict(self.payload))
+
     def mouseDoubleClickEvent(self, event) -> None:      # noqa: N802
         self.picked.emit(dict(self.payload))
+
+    def contextMenuEvent(self, event) -> None:           # noqa: N802
+        """右键小菜单。清的是**你右键这一格所属的那一段**，不是"当前段"。"""
+        menu = QMenu(self)
+        menu.addAction("这一段就用它", lambda: self.chosen.emit(dict(self.payload)))
+        menu.addAction("只播这一段看看", lambda: self.picked.emit(dict(self.payload)))
+        menu.addSeparator()
+        menu.addAction(f"从实时播放清掉 S{self.segment_index + 1}",
+                       lambda: self.cleared.emit(self.segment_index))
+        menu.exec_(event.globalPos())
 
 
 class RealtimeCell(QFrame):
@@ -131,6 +192,7 @@ class RealtimeCell(QFrame):
 
     replaced = pyqtSignal(int, int)            # 段落, 新的素材 id
     refused = pyqtSignal(int, int)            # 段落, 被拒的那条属于哪一段
+    cleared = pyqtSignal(int)                 # 右键清掉 = 这一段不用任何素材
 
     def __init__(self, segment_index: int, title: str = "", parent=None) -> None:
         super().__init__(parent)
@@ -207,6 +269,14 @@ class RealtimeCell(QFrame):
         self.replaced.emit(self.segment_index, self.material_id)
         return True
 
+    def contextMenuEvent(self, event) -> None:           # noqa: N802
+        """右键：把这一段清空 —— 成片这一段就没画面（也不会拿别的段顶）。"""
+        menu = QMenu(self)
+        action = menu.addAction(f"从实时播放清掉 S{self.segment_index + 1}",
+                                lambda: self.cleared.emit(self.segment_index))
+        action.setEnabled(bool(self.material_id))
+        menu.exec_(event.globalPos())
+
 
 class MatrixPanel(QWidget):
     """素材矩阵 + 实时播放行。
@@ -223,11 +293,14 @@ class MatrixPanel(QWidget):
     picks_changed = pyqtSignal(dict)           # {段落: 素材id}
     refused = pyqtSignal(str)                  # 给状态栏的一句人话
     preview_requested = pyqtSignal(str)        # 素材文件路径
+    #: 双击某一格 = **单独试听这一段**（带上整份 payload：源区间、offset 都在里面）
+    segment_preview = pyqtSignal(dict)
     saved = pyqtSignal(str)                    # 落库之后的一句人话
     realtime_changed = pyqtSignal(int, int)    # 段落, 现在这一段用哪条素材
 
     def __init__(self, parent=None, db=None, song_id: int = 0) -> None:
         super().__init__(parent)
+        self.setStyleSheet(f"font-size:{FONT_SIZE}px;")
         self.db = db
         self.song_id = int(song_id or 0)
         self.cells: dict[tuple[int, int], CandidateCell] = {}   # (视频id, 段落) → 格子
@@ -243,9 +316,24 @@ class MatrixPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
-        layout.addWidget(QLabel("📦 素材矩阵：列＝Segment，行＝视频，第一行＝实时播放（成片就读它）。"
-                                "把某个视频的格子往上拖到实时播放行 = 这一段用它；"
-                                "跨列拖不过去。", self))
+        # 说明文字必须**允许折行**：不折行的 QLabel 最小宽度＝整句话的像素宽，
+        # 这一句能把面板的最小宽度顶到 1400 上下，摆在分栏里会把左半屏挤到两成
+        note = QLabel("📦 列＝Segment，行＝视频，第一行＝实时播放（成片读它）。"
+                      "点格子 = 这一段用它；跨列不生效；**右键 = 把这一段从实时播放清掉**。",
+                      self)
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        # 「实时播放」自己一块：**可以被外面搬走**（`take_realtime_row()`），
+        # 编排台就是把它单独摆在中间一行 —— 它是成片的定稿行，不该和候选挤在一张表里。
+        # 没人搬走时就留在本面板顶部，单独用这个面板的地方看起来和以前一样。
+        self.realtime_box = QWidget(self)
+        self.realtime_box.setStyleSheet(f"font-size:{FONT_SIZE}px;")
+        self.top_grid = QGridLayout(self.realtime_box)
+        self.top_grid.setContentsMargins(0, 0, 0, 0)
+        self.top_grid.setHorizontalSpacing(4)
+        self.top_grid.setVerticalSpacing(4)
+        layout.addWidget(self.realtime_box)
 
         self.area = QScrollArea(self)
         self.area.setWidgetResizable(True)
@@ -260,13 +348,12 @@ class MatrixPanel(QWidget):
         bar = QHBoxLayout()
         bar.setSpacing(8)
         self.hint = QLabel("还没有素材。先定好分段，再把源视频对齐入库。", self)
+        self.hint.setWordWrap(True)
         self.hint.setStyleSheet(f"color:{theme.TEXT_DIM};")
-        self.btn_clear = QPushButton("清掉这一段的选择", self)
-        self.btn_clear.setMinimumHeight(30)
-        self.btn_clear.setToolTip("把「实时播放」行里当前那一段清空（这一段就变成没素材）")
-        self.btn_clear.clicked.connect(self._clear_current)
+        # 「清掉这一段」不再占一颗常驻按钮：它是"偶尔用一次"的动作，
+        # 而且按钮说的是"当前那一段"，和手里点的那一格未必是同一段（歧义）。
+        # 现在改成在格子上右键 → 清的就是**你右键那一段**，指向明确
         bar.addWidget(self.hint, 1)
-        bar.addWidget(self.btn_clear)
         layout.addLayout(bar)
 
     def attach(self, db, song_id: int) -> None:
@@ -308,10 +395,11 @@ class MatrixPanel(QWidget):
         self._build_header()
         self._build_realtime()
         self._build_rows()
-        self.grid.setRowStretch(len(self.videos) + 2, 1)
+        self.grid.setRowStretch(len(self.videos) + 1, 1)
         self.grid.setColumnStretch(len(self.segments) + 1, 1)
         self._quiet = False
         self._last_picks = self.picks()
+        self._paint_chosen()
         self._say_summary()
 
     def _build_header(self) -> None:
@@ -328,27 +416,56 @@ class MatrixPanel(QWidget):
             label.setStyleSheet(f"color:{theme.ACCENT};")
             self.grid.addWidget(label, 0, column)
 
+    def take_realtime_row(self) -> QWidget:
+        """把「实时播放」那一块交出去（编排台单独摆在中间一行）。
+
+        和 `align_bench.take_save_row()` 同一个套路：控件还是这个面板的控件、
+        信号一条没变，只是父窗口换人。
+        """
+        layout = self.layout()
+        if layout is not None:
+            layout.removeWidget(self.realtime_box)
+        self.realtime_box.setParent(None)
+        return self.realtime_box
+
     def _build_realtime(self) -> None:
-        head = QLabel("▶ 实时播放", self.board)
+        """实时播放那一块：上面一行段落标题，下面一行"这一段最终用谁"。
+
+        标题在这儿重复一遍是故意的 —— 它被搬到中间单独成行之后，
+        不能靠下面候选表的表头来认列。
+        """
+        head = QLabel("▶ 实时播放（成片读这一行）", self.realtime_box)
         head.setFixedWidth(HEAD_WIDTH)
+        head.setWordWrap(True)
         head.setToolTip("成片就读这一行；某一段空着 = 那一段没有素材，播放时画面就是空的")
-        self.grid.addWidget(head, 1, 0)
+        self.top_grid.addWidget(head, 1, 0)
         for column, spec in enumerate(self.segments, start=1):
             index = int(spec.get("index", column - 1))
-            cell = RealtimeCell(index, str(spec.get("title") or ""), self.board)
+            span = spec.get("span") or ()
+            title = str(spec.get("title") or f"S{index + 1}")
+            text = title if len(span) != 2 else \
+                f"{title}　{float(span[0]):.2f}→{float(span[1]):.2f}s"
+            label = QLabel(text, self.realtime_box)
+            label.setFixedWidth(CELL_WIDTH)
+            label.setStyleSheet(f"color:{theme.ACCENT};")
+            self.top_grid.addWidget(label, 0, column)
+
+            cell = RealtimeCell(index, title, self.realtime_box)
             chosen = int(spec.get("current") or 0)
             for row in spec.get("materials") or ():
                 if int(row.get("material_id") or 0) == chosen:
                     cell.set_material(row)
             cell.replaced.connect(self._realtime_replaced)
             cell.refused.connect(self._say_refused)
-            self.grid.addWidget(cell, 1, column)
+            cell.cleared.connect(self.clear_segment)
+            self.top_grid.addWidget(cell, 1, column)
             self.realtime.append(cell)
+        self.top_grid.setColumnStretch(len(self.segments) + 1, 1)
 
     def _build_rows(self) -> None:
         by_segment = {int(spec.get("index", i)): (spec.get("materials") or ())
                       for i, spec in enumerate(self.segments)}
-        for row_index, video in enumerate(self.videos, start=2):
+        for row_index, video in enumerate(self.videos, start=1):
             head = QLabel(str(video["video_name"]), self.board)
             head.setFixedWidth(HEAD_WIDTH)
             head.setToolTip(str(video["video_name"]))
@@ -365,7 +482,9 @@ class MatrixPanel(QWidget):
                     self.grid.addWidget(empty, row_index, column)
                     continue
                 cell = CandidateCell(payload, self.board)
-                cell.picked.connect(lambda p: self.preview_requested.emit(str(p.get("path") or "")))
+                cell.picked.connect(self._cell_double_clicked)
+                cell.chosen.connect(self._cell_clicked)
+                cell.cleared.connect(self.clear_segment)
                 self.grid.addWidget(cell, row_index, column)
                 self.cells[(int(video["video_id"]), index)] = cell
 
@@ -377,11 +496,12 @@ class MatrixPanel(QWidget):
         return None
 
     def _clear(self) -> None:
-        while self.grid.count():
-            item = self.grid.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.setParent(None)
+        for grid in (self.top_grid, self.grid):
+            while grid.count():
+                item = grid.takeAt(0)
+                widget = item.widget()
+                if widget is not None:
+                    widget.setParent(None)
         self.cells.clear()
         self.realtime.clear()
         self.videos.clear()
@@ -429,6 +549,40 @@ class MatrixPanel(QWidget):
                 return cell.drop_payload(candidate.payload)
         return False
 
+    def _cell_double_clicked(self, payload: dict[str, Any]) -> None:
+        """双击某一格 = **只试听这一段**，不改"这一段用谁"。
+
+        两个信号都发：`segment_preview` 带完整 payload（编排台按源区间只播这一截），
+        `preview_requested` 只带路径，给还在用老接口的地方兜着。
+        """
+        self.segment_preview.emit(dict(payload))
+        self.preview_requested.emit(str(payload.get("path") or ""))
+
+    def _paint_chosen(self) -> None:
+        """候选格子的颜色跟着实时播放行走：这一段采用的那一格绿，同列其余回白。"""
+        picks = self.picks()
+        for (_video_id, index), cell in self.cells.items():
+            cell.set_chosen(picks.get(int(index)) == cell.material_id)
+
+    def _cell_clicked(self, payload: dict[str, Any]) -> None:
+        """点了某一格：这一段就用它。跨段落进不来（格子自己就属于那一列）。
+
+        `material_id` 只排除 0（＝没有素材）：**负数是合法的** —— 那是切片入库
+        之前编排台按 offset 现算出来的内存格子，照样能选、能拖，只是不落库。
+        """
+        segment_index = int(payload.get("segment_index", -1))
+        material_id = int(payload.get("material_id") or 0)
+        if segment_index < 0 or material_id == 0:
+            return
+        cell = self._cell(segment_index)
+        if cell is None:
+            return
+        if cell.material_id == material_id:
+            # 点的就是已经在用的那条：当成"想看看它"，不必再落一次库
+            self.preview_requested.emit(str(payload.get("path") or ""))
+            return
+        cell.drop_payload(payload)
+
     def _realtime_replaced(self, segment_index: int, material_id: int) -> None:
         """实时播放行换人 = 一次人工决策：立刻落库 + 记流水账 + 通知外面换预览。
 
@@ -440,14 +594,18 @@ class MatrixPanel(QWidget):
             self._future.clear()
         self._persist(int(segment_index), int(material_id))
         self._last_picks = self.picks()
+        self._paint_chosen()
         self.picks_changed.emit(self.picks())
         self.realtime_changed.emit(int(segment_index), int(material_id))
         self._say_summary()
 
-    def _clear_current(self) -> None:
-        """把当前那一段清空：这一段就变成"没素材"，播放时画面保持空。"""
-        index = self._current if self._current >= 0 else (
-            self.realtime[0].segment_index if self.realtime else -1)
+    def clear_segment(self, index: int) -> None:
+        """把某一段从实时播放里清掉：这一段就变成"没素材"，播放时画面保持空。
+
+        入口是格子上的右键菜单（候选格和实时播放格都有）。传进来的 `index`
+        就是右键那一格所属的段落 —— 不看"当前播到哪一段"，免得清错。
+        """
+        index = int(index)
         cell = self._cell(index)
         if cell is None:
             return
@@ -458,11 +616,19 @@ class MatrixPanel(QWidget):
         if self.db is not None and self.song_id > 0:
             from ...dance import material_repository as repo  # noqa: PLC0415
 
-            repo.clear_final_selection(self.db, self.song_id, int(index))
+            repo.clear_final_selection(self.db, self.song_id, index)
         self._last_picks = self.picks()
+        self._paint_chosen()
         self.picks_changed.emit(self.picks())
-        self.realtime_changed.emit(int(index), 0)
+        self.realtime_changed.emit(index, 0)
         self._say_summary()
+
+    def _clear_current(self) -> None:
+        """清当前那一段（Ctrl+Z 之类的旧入口还用得上，也方便测试直接调）。"""
+        index = self._current if self._current >= 0 else (
+            self.realtime[0].segment_index if self.realtime else -1)
+        if index >= 0:
+            self.clear_segment(index)
 
 
     def _persist(self, segment_index: int, material_id: int) -> None:
@@ -529,6 +695,7 @@ class MatrixPanel(QWidget):
         finally:
             self._quiet = False
         self._last_picks = self.picks()
+        self._paint_chosen()
         self.picks_changed.emit(self.picks())
         self._say_summary()
         return True

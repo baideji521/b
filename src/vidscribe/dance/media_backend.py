@@ -524,6 +524,60 @@ def resolve(name: str = "") -> MediaBackend:
     return backend
 
 
+def canvas_for(paths, fps: float = 0.0) -> Canvas | None:
+    """按素材**实际分辨率**定画布：取出现最多的那个尺寸（并列时取像素多的）。
+
+    这样 3:4 的源出 3:4 的成片、竖屏出竖屏，`fit_frame` 那一步就成了原尺寸直通，
+    一个像素都不裁。只有素材尺寸真的不一致时才有人被裁 —— 那时按"多数派"归一
+    仍然是损失最小的选择（少数派才被 cover 裁边）。
+
+    帧率同理跟素材走（`fps` 传了就用传进来的）。探不到任何东西返回 None，
+    调用方退回配置里那套固定画布。
+    """
+    counted: dict[tuple[int, int], int] = {}
+    rates: dict[tuple[int, int], float] = {}
+    backend = resolve()
+    for path in paths or ():
+        if not path:
+            continue
+        try:
+            meta = backend.probe(path)
+        except Exception as exc:            # noqa: BLE001 - 探不动就跳过，不能因此不出片
+            logger.warning("探测分辨率失败 %s：%s", path, exc)
+            continue
+        # 宽高必须是偶数：H.264 的 yuv420p 要求，奇数尺寸编码器直接拒
+        width, height = int(meta.width) // 2 * 2, int(meta.height) // 2 * 2
+        if width <= 0 or height <= 0:
+            continue
+        key = (width, height)
+        counted[key] = counted.get(key, 0) + 1
+        if meta.fps > 0.1:
+            rates[key] = max(rates.get(key, 0.0), float(meta.fps))
+    if not counted:
+        return None
+    best = max(counted, key=lambda size: (counted[size], size[0] * size[1]))
+    rate = float(fps) if fps and fps > 0.1 else rates.get(best, DEFAULT_FPS)
+    return Canvas(width=best[0], height=best[1], fps=rate)
+
+
+def resolve_canvas(cfg, paths=()) -> Canvas:
+    """出片画布的**唯一入口**。默认"跟素材走"，配置里关了才用固定尺寸。
+
+    `canvas_auto` 打开（默认）+ 能探到素材 → 用素材自己的分辨率，成片不裁边；
+    关了、或者一个素材都探不到 → 用 `canvas_width/height/fps` 那套固定值。
+    """
+    dance = getattr(cfg, "dance", {}) or {}
+    width = int(dance.get("canvas_width") or 0)
+    height = int(dance.get("canvas_height") or 0)
+    fps = float(dance.get("canvas_fps") or 0.0)
+    if bool(dance.get("canvas_auto", True)):
+        found = canvas_for(paths, fps=fps)
+        if found is not None:
+            return found
+    return Canvas(width=width or DEFAULT_WIDTH, height=height or DEFAULT_HEIGHT,
+                  fps=fps or DEFAULT_FPS)
+
+
 def is_complete_video(path: str | Path) -> bool:
     """封装是否完整。渲染中途崩掉的残片必须挡在登记之外。
 

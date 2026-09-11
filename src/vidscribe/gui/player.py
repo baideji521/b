@@ -12,19 +12,155 @@ InvalidMedia（ASCII 路径、8.3 短路径都试过），播放器完全不可�
 - 每次 play/seek 都从当前秒切出剩余片段再播（切一次毫秒级）
 - 真实时间（perf_counter）是主时钟：画面每次 tick 按「起点 + 已过真实秒数」算出该显示第几帧，
   落后就 grab 跳帧。声音也按真实时间走，两边共用一个钟才不会越播越偏
+
+**片段预解码**（`preload`）：卡点要看的是"这一刀到底压在鼓点上没有"，几秒的片段来回拖
+十几遍，每次都让 cv2 重新定位 + 从关键帧啃回来 —— 这就是卡的来源。所以对已经知道
+起止的片段，先把这几秒**逐帧解成内存里的 QImage 列表**，之后播放/定位/逐帧都只是
+数组下标，主线程一帧都不解码。内存靠"解码时先缩到 `CACHE_EDGE` 以内 + 总量封顶"控制，
+放不下就整段退回流式播放（不做半段缓存 —— 半段的行为没法跟用户解释）。
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 
-from PyQt5.QtCore import Qt, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ..audio import slice_wav
+from ..logging_setup import get_logger
 from . import theme
+
+logger = get_logger(__name__)
+
+#: 预取队列最多排这么多活。超了就丢旧的 —— 用户已经翻到别处去了
+PREFETCH_QUEUE = 4
+
+#: 预解码时把画面缩到最长边不超过这么多像素。3:4 竖屏 1080×1440 的一帧 RGB888 是 4.7MB，
+#: 原尺寸缓存 2 秒（60 帧）就是 280MB —— 直接把机器吃穿。缩到 540 长边后一帧约 0.64MB
+#: （405×540），而实时播放那个框本身也就三四百像素高，肉眼看不出差别。
+#: 缩放用 INTER_NEAREST：实测 1080p→540 用 INTER_AREA 要 4.7ms/帧，NEAREST 只要 0.45ms，
+#: 一个 2 秒片段就差 250ms —— 这点画质换的是"切段落时不卡一下"。
+CACHE_EDGE = 540
+#: 单段最多缓存多少帧（30fps 下 ≈ 20 秒）。卡点片段通常 1~5 秒，超过这个数说明
+#: 调用方传的不是"一个片段"，那就别缓存了
+CACHE_MAX_FRAMES = 600
+#: 缓存总字节上限。到顶就整段放弃缓存，退回流式播放
+CACHE_MAX_BYTES = 192 * 1024 * 1024
+
+
+def _shrunk_image(cv2, frame) -> QImage:
+    """BGR ndarray → 缩小过的 QImage。**先缩后转色**（转色在 1080p 上做要贵一倍）。
+
+    必须 `.copy()`：QImage 只是包了 ndarray 的内存，帧一被回收画面就成花屏。
+    """
+    height, width = frame.shape[:2]
+    longest = max(height, width)
+    if longest > CACHE_EDGE:
+        scale = CACHE_EDGE / float(longest)
+        frame = cv2.resize(frame, (max(1, int(width * scale)), max(1, int(height * scale))),
+                           interpolation=cv2.INTER_NEAREST)
+    rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    height, width, _ = rgb.shape
+    return QImage(rgb.data, width, height, 3 * width, QImage.Format_RGB888).copy()
+
+
+def decode_window(path, begin: float, end: float) -> tuple[list[QImage], int, float]:
+    """把 `path` 的 [begin, end) 逐帧解成内存里的图，返回 (帧, 起始帧号, fps)。
+
+    **播放器和后台预取线程共用这一份**：两边解出来的东西必须一模一样，
+    否则"预取的和现场解的对不上一帧"这种问题根本查不出来。
+    自己开自己的 `VideoCapture` —— cv2 的读写头不是线程安全的，不许共享。
+    """
+    import cv2  # noqa: PLC0415
+
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        cap.release()
+        return ([], 0, 0.0)
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        fps = fps if fps > 0.1 else 25.0
+        total = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+        duration = total / fps if total > 0 else 0.0
+        begin = max(0.0, float(begin))
+        end = min(float(end), duration) if duration > 0 else float(end)
+        if end - begin <= 0.0:
+            return ([], 0, fps)
+        first = int(begin * fps)                 # 和 seek() 用同一套 floor 换算
+        count = int(round((end - begin) * fps)) + 1
+        if count > CACHE_MAX_FRAMES:
+            return ([], first, fps)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, first)
+        frames: list[QImage] = []
+        budget = CACHE_MAX_BYTES
+        for _ in range(count):
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                break                            # 到文件尾了，有多少算多少
+            image = _shrunk_image(cv2, frame)
+            budget -= image.byteCount()
+            if budget < 0:
+                return ([], first, fps)          # 放不下就整段放弃，不做半段缓存
+            frames.append(image)
+        return (frames, first, fps)
+    finally:
+        cap.release()
+
+
+class FramePrefetcher(QThread):
+    """后台把片段解成内存帧。**解码绝不能在 GUI 线程上做。**
+
+    实测 1080×1440（3:4，素材基本都是这个）一帧要 8ms，一个 2 秒片段 60 帧就是 0.5 秒 ——
+    在段落切换那一刻现场解，界面就是实打实卡半秒。所以这条线程提前解好，
+    播放器到点直接 `adopt_cache()` 装上，GUI 线程一帧都不解。
+    """
+
+    ready = pyqtSignal(str, float, float, object)     # path, begin, end, (帧, 起始帧号, fps)
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self._jobs: list[tuple[str, float, float]] = []
+        self._lock = threading.Lock()
+        self._wake = threading.Event()
+        self._stop = False
+
+    def request(self, path, begin: float, end: float) -> None:
+        """排一个活。重复的活不排第二遍；新活插到队头（当前要播的最急）。"""
+        job = (str(path), round(float(begin), 3), round(float(end), 3))
+        with self._lock:
+            if job in self._jobs:
+                return
+            self._jobs.insert(0, job)
+            del self._jobs[PREFETCH_QUEUE:]      # 排太多说明没人要了，丢掉旧的
+        self._wake.set()
+        if not self.isRunning():
+            self.start()
+
+    def shutdown(self) -> None:
+        self._stop = True
+        self._wake.set()
+        self.wait(3000)
+
+    def run(self) -> None:                       # noqa: D102 - QThread 的入口
+        while not self._stop:
+            with self._lock:
+                job = self._jobs.pop(0) if self._jobs else None
+            if job is None:
+                self._wake.wait(0.2)
+                self._wake.clear()
+                continue
+            path, begin, end = job
+            try:
+                bundle = decode_window(path, begin, end)
+            except Exception as exc:             # noqa: BLE001 - 线程里炸了要报出来，别静默死掉
+                logger.warning("片段预解码失败 %s [%.3f, %.3f]：%s", path, begin, end, exc)
+                continue
+            if bundle[0]:
+                self.ready.emit(path, begin, end, bundle)
 
 
 class FramePlayer(QWidget):
@@ -64,6 +200,12 @@ class FramePlayer(QWidget):
         self._audio_cut: Path | None = None
         self._audio_on = False
 
+        # 片段预解码：整段的帧都在这个列表里，第 0 个对应文件里的第 `_cache_first` 帧。
+        # 非空 = 当前处于"内存播放"模式，播放/定位/逐帧都不再碰 cv2
+        self._cache: list[QImage] = []
+        self._cache_first = 0
+        self._path = ""                # 当前打开的文件（预取的帧要拿它核对是不是同一个）
+
 
 
     # ------------------------------------------------------------------ 打开
@@ -82,6 +224,7 @@ class FramePlayer(QWidget):
             self.view.setText("无法解码这个视频")
             return False
         self._cap = cap
+        self._path = str(path)
         fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
         self._fps = fps if fps > 0.1 else 25.0
         frames = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
@@ -93,14 +236,128 @@ class FramePlayer(QWidget):
         return True
 
     def close_video(self) -> None:
+        """关掉视频。**Windows 上这一步就是"解除文件占用"** —— 想删文件先调它。"""
         self.pause()
         if self._cap is not None:
             self._cap.release()
             self._cap = None
+        self._drop_cache()
+        self._path = ""
         self._image = None
         self._position = 0.0
         self._frame_index = 0
         self._clear_audio()
+
+    def path(self) -> str:
+        """当前打开的是哪个文件（没开就是空串）。"""
+        return self._path
+
+    def holds(self, path) -> bool:
+        """是不是正占着这个文件。删文件之前拿它判断该不该先松手。"""
+        if not self._path or not path:
+            return False
+        try:
+            return Path(str(path)) == Path(self._path)
+        except (TypeError, ValueError):
+            return False
+
+    # -------------------------------------------------------------- 片段预解码
+    def _drop_cache(self) -> None:
+        self._cache = []
+        self._cache_first = 0
+
+    def is_cached(self) -> bool:
+        """当前是不是在放内存里的帧。"""
+        return bool(self._cache)
+
+    def cached_span(self) -> tuple[float, float]:
+        """缓存覆盖的文件时间区间（左闭右开）。没缓存时是 (0, 0)。"""
+        if not self._cache:
+            return (0.0, 0.0)
+        return (round(self._cache_first / self._fps, 3),
+                round((self._cache_first + len(self._cache)) / self._fps, 3))
+
+    def preload(self, begin: float, end: float) -> bool:
+        """把 [begin, end) 逐帧解到内存（**在当前线程上解**，会卡住界面）。
+
+        只在"用户主动等一下也认"的地方用，比如双击单独看一格。跟着主音频播的
+        那条路走 `FramePrefetcher` + `adopt_cache`，绝不在 GUI 线程上解码。
+
+        失败（片段太长、内存放不下、文件读不动）就**保持流式播放**并返回 False ——
+        调用方不需要写两套播放逻辑，播放/定位接口在两种模式下行为一致，
+        差别只有"卡不卡"。
+        """
+        self._drop_cache()
+        if self._cap is None or not self._path:
+            return False
+        frames, first, _fps = decode_window(self._path, begin, end)
+        return self._install(frames, first)
+
+    def adopt_cache(self, path, begin: float, end: float, bundle) -> bool:
+        """装上**别人（预取线程）解好的**帧。文件对不上就不收。
+
+        这是"不卡"的关键一步：段落切换时 GUI 线程只做一次列表赋值，
+        真正的 0.6 秒解码早在后台线程干完了。
+        """
+        if not self._path or Path(str(path)) != Path(self._path):
+            return False
+        frames, first, fps = bundle
+        if fps > 0.1 and abs(fps - self._fps) > 0.01:
+            return False                          # fps 都不一样，说明不是同一个文件
+        span = self.cached_span()
+        if self._cache and abs(span[0] - float(begin)) < 0.001:
+            return True                           # 已经装着同一段了，别白折腾
+        return self._install(list(frames), int(first))
+
+    def _install(self, frames: list[QImage], first: int) -> bool:
+        """把一段帧真正装进播放器，并把画面/时钟落到这一段的开头。"""
+        if len(frames) < 2:
+            self._drop_cache()
+            return False
+        keep_playing = self._playing
+        self._cache = frames
+        self._cache_first = int(first)
+        self.seek(round(first / self._fps, 3))
+        if keep_playing:
+            self._clock_origin = time.perf_counter()
+            self._clock_base = self._position
+        return True
+
+    def _show_cached(self, seconds: float) -> None:
+        """显示缓存里对应 `seconds` 的那一帧（越界就贴到最近的一端）。
+
+        **同一帧就直接回**：跟着主音频走时每 50ms 会来纠一次偏，而一帧有 33ms，
+        大半次纠偏落在已经显示着的那一帧上。一次缩放 + setPixmap 要 3ms，
+        白做的话每秒就白烧几十毫秒 —— 那就是"内存播放了还觉得有点顿"的来源。
+        """
+        index = int(seconds * self._fps) - self._cache_first
+        index = max(0, min(index, len(self._cache) - 1))
+        if index >= len(self._cache) - 1 and self._playing:
+            self.pause()                         # 片段播完就停，不往后溢到下一段
+        frame = self._cache_first + index
+        if frame == self._frame_index and self._image is not None:
+            return
+        self._frame_index = frame
+        self._position = round(self._frame_index / self._fps, 3)
+        self._image = self._cache[index]
+        self._repaint()
+        self.positionChanged.emit(self._position)
+
+    def step_frame(self, delta: int = 1) -> None:
+        """逐帧走。**核卡点就靠它**：停下来一帧一帧比画面和鼓点。
+
+        缓存模式下只是换个下标（零解码），没缓存时退化成按帧长 seek。
+        """
+        self.pause()
+        step = int(delta)
+        if not step:
+            return
+        if self._cache:
+            self._show_cached((self._frame_index + step) / self._fps)
+            self._clock_base = self._position
+            self._clock_origin = time.perf_counter()
+            return
+        self.seek(max(0.0, (self._frame_index + step) / self._fps))
 
     # ------------------------------------------------------------------ 声音
     @staticmethod
@@ -215,10 +472,15 @@ class FramePlayer(QWidget):
             return
         cv2 = self._cv2
         seconds = max(0.0, seconds if self._duration <= 0 else min(seconds, max(self._duration - 0.05, 0.0)))
-        # 用 floor：跳到「这一秒正在显示的那一帧」，和 video_io.plan_frame_indices
-        # 以及高光剪辑的起剪帧号用同一套换算，点时间轴才不会差一帧
-        self._cap.set(cv2.CAP_PROP_POS_FRAMES, int(seconds * self._fps))
-        self._render_next()
+        if self._cache:
+            # 内存模式：定位就是算个下标，不碰 cv2。跟随主音频时每 50ms 纠一次偏
+            # 也照样不掉帧 —— 卡顿的根子（重复 seek → 关键帧重解）就是在这儿断掉的
+            self._show_cached(seconds)
+        else:
+            # 用 floor：跳到「这一秒正在显示的那一帧」，和 video_io.plan_frame_indices
+            # 以及高光剪辑的起剪帧号用同一套换算，点时间轴才不会差一帧
+            self._cap.set(cv2.CAP_PROP_POS_FRAMES, int(seconds * self._fps))
+            self._render_next()
         # 声音没有定位接口，只能停掉再从新位置切片重播
         self._stop_audio()
         if self._playing:
@@ -233,7 +495,11 @@ class FramePlayer(QWidget):
         # 画面对齐真实时间的绝对钟：目标帧 = (播放起点位置 + 已过真实秒数) * fps。
         # 不能按「上一次 tick 到现在过了几帧」四舍五入推进——余下的零头会被丢掉，
         # 定时器每次晚一点就攒成系统性慢放，而声音是独立按真实时间走的，于是越播越不同步。
-        target = int((self._clock_base + (time.perf_counter() - self._clock_origin)) * self._fps)
+        moment = self._clock_base + (time.perf_counter() - self._clock_origin)
+        if self._cache:
+            self._show_cached(moment)
+            return
+        target = int(moment * self._fps)
         if target <= self._frame_index:
             return  # 还没到下一帧，这轮不动画面
         skip = target - self._frame_index - 1
@@ -260,18 +526,32 @@ class FramePlayer(QWidget):
         current_index = max(next_index - 1.0, 0.0)
         self._frame_index = int(current_index)
         self._position = round(current_index / self._fps, 3)
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, _ = rgb.shape
-        self._image = QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+        self._image = self._to_image(frame)
         self._repaint()
         self.positionChanged.emit(self._position)
         return True
 
+    def _to_image(self, frame, shrink: bool = False) -> QImage:
+        """BGR ndarray → QImage。`shrink` 用于预解码：先缩小再存，内存才压得住。
+
+        必须 `.copy()`：QImage 只是包了 ndarray 的内存，帧一被回收画面就成花屏。
+        """
+        cv2 = self._cv2
+        if shrink:
+            return _shrunk_image(cv2, frame)
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, _ = rgb.shape
+        return QImage(rgb.data, w, h, 3 * w, QImage.Format_RGB888).copy()
+
     def _repaint(self) -> None:
         if self._image is None:
             return
+        # 播放时用 Fast：3:4 竖屏 1080×1440 每帧做一次双线性平滑缩放，30fps 就能把
+        # 主线程吃掉一大块（解码/转色/缩放全在这条线程上），画面反而顿。
+        # 停下来看单帧时再用 Smooth —— 那时候要的是清楚，不是帧率。
+        mode = Qt.FastTransformation if self._playing else Qt.SmoothTransformation
         pix = QPixmap.fromImage(self._image).scaled(
-            self.view.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+            self.view.size(), Qt.KeepAspectRatio, mode
         )
         self.view.setPixmap(pix)
 

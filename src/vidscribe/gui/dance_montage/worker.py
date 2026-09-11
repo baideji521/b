@@ -101,10 +101,10 @@ class DanceMontageWorker(QThread):
 
                 slice_duration = float(self.job.get("slice_duration")
                                        or self.cfg.dance["slice_duration"])
-                canvas = media_backend.Canvas(
-                    width=int(self.cfg.dance["canvas_width"]),
-                    height=int(self.cfg.dance["canvas_height"]),
-                    fps=float(self.cfg.dance["canvas_fps"]))
+                # 画布跟素材走（默认）：3:4 的源出 3:4 的成片，不裁边。
+                # 源视频尺寸不一致时按多数派归一，见 media_backend.canvas_for
+                canvas = media_backend.resolve_canvas(self.cfg, sources)
+                self._say(f"[画布] {canvas.width}×{canvas.height} @ {canvas.fps:g}fps")
                 backend = media_backend.resolve(str(self.cfg.dance["media_backend"]))
                 strategy_mod.ensure_presets(db)
 
@@ -142,6 +142,10 @@ class DanceMontageWorker(QThread):
                             canvas=canvas, backend=backend,
                             person=str(self.job.get("person") or ""),
                             min_confidence=float(self.cfg.dance["min_confidence"]),
+                            head_room=float(self.job.get(
+                                "head_room", self.cfg.dance.get("slice_head_room", 0.0))),
+                            tail_room=float(self.job.get(
+                                "tail_room", self.cfg.dance.get("slice_tail_room", 0.0))),
                             on_log=self._say)
                         result["materials"] += len(sliced.material_ids)
                     self._stage("建立素材库")
