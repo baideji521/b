@@ -132,6 +132,8 @@ class AlignBenchPanel(QWidget):
     #: 一轮对齐算完了 → `[{path,name,alignment,error,cached}]`。
     #: **这一步没有落库**（`align_batch(persist=False)`），纯粹是算给人看的
     results_ready = pyqtSignal(list)
+    #: 首/尾余量被改了 → 矩阵、卡点表都要按新余量重算一遍
+    rooms_changed = pyqtSignal()
 
     def __init__(self, cfg, parent=None) -> None:
         super().__init__(parent)
@@ -274,6 +276,10 @@ class AlignBenchPanel(QWidget):
                                   "音乐不漂），代价是那一截画面是静帧。")
         self.head_room.setValue(float(self.cfg.dance.get("slice_head_room", 0.0)))
         self.tail_room.setValue(float(self.cfg.dance.get("slice_tail_room", 0.0)))
+        # 改了余量必须让外面重铺矩阵 / 重算卡点表：不然数值变了、界面还是老样子，
+        # 用户会以为这个框没用（第一版就是这么被误判的）
+        self.head_room.valueChanged.connect(lambda _v: self.rooms_changed.emit())
+        self.tail_room.valueChanged.connect(lambda _v: self.rooms_changed.emit())
         self.bar = QProgressBar(holder)
         self.bar.setRange(0, 100)
         self.bar.setMinimumHeight(24)
@@ -721,10 +727,21 @@ class AlignBenchPanel(QWidget):
         for widget, key in ((self.source, "source"), (self.target, "target")):
             if isinstance(data.get(key), str) and data[key]:
                 widget.setText(data[key])
-        for widget, key in ((self.at, "at"), (self.slice_seconds, "slice"),
-                            (self.head_room, "head_room"), (self.tail_room, "tail_room")):
+        for widget, key in ((self.at, "at"), (self.slice_seconds, "slice")):
             if isinstance(data.get(key), (int, float)):
                 widget.setValue(float(data[key]))
+        for widget, key, fallback in (
+                (self.head_room, "head_room", float(self.cfg.dance.get("slice_head_room", 0.0))),
+                (self.tail_room, "tail_room", float(self.cfg.dance.get("slice_tail_room", 0.0)))):
+            saved = data.get(key)
+            if not isinstance(saved, (int, float)):
+                continue
+            # 存着 0 只可能是**加边界帧补足之前**那一版留下的（那时默认就是 0），
+            # 照着恢复的话新默认永远生效不了，界面看着就像这个功能没做。
+            # 真想要 0，就把配置里的 slice_head_room / slice_tail_room 写成 0
+            if float(saved) <= 0.0 and fallback > 0.0:
+                continue
+            widget.setValue(float(saved))
         for widget, key in ((self.btn_loop, "loop"), (self.force, "force")):
             if isinstance(data.get(key), bool):
                 widget.setChecked(data[key])

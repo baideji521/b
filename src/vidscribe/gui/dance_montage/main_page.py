@@ -812,6 +812,9 @@ class DanceMontageWindow(QMainWindow):
         self.bench.results_ready.connect(self.video_list.set_results)
         # 对齐结果留在内存里：切片入库之前，右侧那张实时矩阵就靠它算每一格
         self.bench.results_ready.connect(self._align_rows_ready)
+        # 首/尾余量一改，矩阵和卡点表立刻按新余量重算 —— 不然改了数值界面没反应，
+        # 看着就像这个框不起作用
+        self.bench.rooms_changed.connect(self._rooms_changed)
         self.video_list.picked.connect(self._video_picked)
         # 右键删除/粘贴要同步到批量清单，否则"列表里没了，跑批还在算它"
         self.video_list.about_to_delete.connect(self._release_files)
@@ -1099,6 +1102,21 @@ class DanceMontageWindow(QMainWindow):
             self._live_material = 0
         for key in [k for k in self._frames if k[0] in keys]:
             self._frames.pop(key, None)
+
+    def _rooms_changed(self) -> None:
+        """首/尾余量改了：矩阵按新余量重铺，卡点表也重算一遍。
+
+        余量只影响"哪几格算得出来"，不改对齐、不改分段，所以这里只是重算显示，
+        一个字都不会落库。
+        """
+        head, tail = self.bench.rooms()
+        self._reload_matrix()
+        # 卡点表要有对齐结果才算得出来；没有就安静跳过（用户还没点开始对齐）
+        if getattr(self.bench, "_alignment", None) is not None:   # noqa: SLF001
+            self.bench.generate_positions()
+        self.statusBar().showMessage(
+            f"首尾余量：首缺≤{head:.2f}s、尾缺≤{tail:.2f}s"
+            f"（缺的那一截切片时用边界帧补足，时长不变）", 6000)
 
     def _videos_removed(self, paths) -> None:
         """右键删掉了几个视频（文件已经从磁盘上没了）—— 把它们从内存里也清干净。

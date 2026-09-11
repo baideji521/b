@@ -413,6 +413,43 @@ def test_deleting_a_video_releases_the_file_first(work: Path) -> None:
         window.close()
 
 
+def test_changing_the_head_room_refills_the_first_column(work: Path) -> None:
+    """改「首缺≤」必须**立刻**让 S1 那一列长出格子。
+
+    第一版漏了这条连线：数值改了但没人重铺矩阵，S1 一直空着，看起来就像
+    这个输入框根本没接上。
+    """
+    from types import SimpleNamespace
+
+    from vidscribe.dance import segment_template as seg
+
+    window, _song_id, _m = _window(work)
+    try:
+        window.master._adopt(seg.uniform(60.0, 12.0), remember=False)   # noqa: SLF001
+        window.master._duration = 60.0                                  # noqa: SLF001
+        window.bench.head_room.setValue(0.0)
+        window.bench.tail_room.setValue(0.0)
+        # offset +1、源只有 58 秒 → S1 开头缺 1 秒、S5 结尾缺 1 秒
+        window._align_rows_ready([{                                     # noqa: SLF001
+            "path": str(work / "v.mp4"), "name": "v.mp4",
+            "alignment": SimpleNamespace(offset=1.0, confidence=0.9,
+                                         status="ok", source_duration=58.0)}])
+        assert (1, 1) in window.matrix.cells, "中间那几段本来就该有格子"
+        assert (1, 0) not in window.matrix.cells, "余量 0 时 S1 该是空的"
+        assert (1, 4) not in window.matrix.cells, "余量 0 时 S5 该是空的"
+
+        window.bench.head_room.setValue(2.0)      # 只改这一个：S1 应该立刻出现
+        assert (1, 0) in window.matrix.cells, "改了首缺余量，S1 还是空的"
+        assert (1, 4) not in window.matrix.cells, "尾缺余量还是 0，S5 不该动"
+        window.bench.tail_room.setValue(2.0)
+        assert (1, 4) in window.matrix.cells, "改了尾缺余量，S5 还是空的"
+        # 补的量如实写在格子上，别让人以为整段都有画面
+        assert "补 1.00s" in window.matrix.cells[(1, 0)].payload["detail"], \
+            window.matrix.cells[(1, 0)].payload["detail"]
+    finally:
+        window.close()
+
+
 def _library_counts(window) -> tuple[int, int]:
     """(素材数, 对齐数)。用来钉住"对齐不入库"。"""
     cursor = window.db.execute("SELECT COUNT(*) FROM dance_materials")
@@ -989,6 +1026,7 @@ TESTS = (
     test_live_window_covers_both_kinds_of_material,
     test_unaligned_rows_disappear_once_alignment_ran,
     test_right_click_can_copy_paste_and_really_delete,
+    test_changing_the_head_room_refills_the_first_column,
     test_frames_are_decoded_off_the_gui_thread,
     test_deleting_a_video_releases_the_file_first,
     test_window_has_all_four_regions,

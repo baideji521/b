@@ -38,6 +38,9 @@ ProgressFn = Callable[[int, int, str], None]
 PART_SUFFIX = ".part"
 #: 允许的浮点误差（秒）。源区间刚好贴着片尾时不该因为 1e-9 被判越界
 EPS = 1e-6
+#: 首尾补边界帧最多能占一格的多大比例。补得比真画面还多的"素材"不是素材，
+#: 是一张会动半下的照片 —— 余量填得再大也不许越过这条线
+MAX_PAD_SHARE = 0.5
 
 
 class SourceRangeError(ValueError):
@@ -95,6 +98,12 @@ def map_to_source(target_start: float, target_end: float, offset: float,
     if end - start <= EPS:
         raise SourceRangeError(
             f"位置 #{segment_index}：夹到源视频范围内之后一帧画面都不剩")
+    span = round(float(target_end) - float(target_start), 6)
+    if head_pad + tail_pad > span * MAX_PAD_SHARE + EPS:
+        raise SourceRangeError(
+            f"位置 #{segment_index}（目标 {target_start:.3f}→{target_end:.3f}）"
+            f"只有 {end - start:.3f}s 真画面，要补 {head_pad + tail_pad:.3f}s 静帧，"
+            f"超过这一格的一半 —— 这种素材没有意义，不给")
     return SliceSpec(segment_index=segment_index,
                      target_start=round(float(target_start), 6),
                      target_end=round(float(target_end), 6),
