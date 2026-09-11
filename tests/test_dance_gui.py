@@ -1137,12 +1137,47 @@ def test_the_main_window_cannot_wipe_what_the_studio_just_saved(work: Path) -> N
         third.close()
 
 
+def test_the_video_list_numbers_every_row_from_one(work: Path) -> None:
+    """视频列表第一列是**屏幕上的序号**：1..N 连号，换排序 / 删行之后重新数。
+
+    序号不是身份 —— 行的真身还是那格里存的全路径，所以排序之后
+    对齐结果照旧落在自己那一行上。
+    """
+    from vidscribe.gui.dance_montage import video_list as vl
+
+    window, _song_id, _m = _window(work)
+    try:
+        panel = window.video_list
+        assert vl.COLUMNS[0] == "#", vl.COLUMNS
+        window.bench.folder_scanned.emit([str(work / "girl03.mp4"),
+                                          str(work / "girl01.mp4"),
+                                          str(work / "girl02.mp4")])
+        rows = panel.rows()
+        assert [r["#"] for r in rows] == ["1", "2", "3"], rows
+        # 默认按文件名升序，序号跟着屏幕顺序走
+        assert [r["视频"] for r in rows] == ["girl01.mp4", "girl02.mp4", "girl03.mp4"], rows
+
+        panel.table.sortItems(vl.COL_NAME, Qt.DescendingOrder)
+        rows = panel.rows()
+        assert [r["视频"] for r in rows] == ["girl03.mp4", "girl02.mp4", "girl01.mp4"], rows
+        assert [r["#"] for r in rows] == ["1", "2", "3"], "换了排序序号没重新数"
+
+        panel.drop_files([str(work / "girl02.mp4")])
+        rows = panel.rows()
+        assert [r["#"] for r in rows] == ["1", "2"], rows
+        assert [r["视频"] for r in rows] == ["girl03.mp4", "girl01.mp4"], rows
+    finally:
+        window.close()
+
+
 TESTS = (
+
 
     test_the_master_audio_drives_the_realtime_row,
     test_segment_frames_are_predecoded_into_memory,
     test_live_window_covers_both_kinds_of_material,
     test_unaligned_rows_disappear_once_alignment_ran,
+    test_the_video_list_numbers_every_row_from_one,
     test_right_click_can_copy_paste_and_really_delete,
     test_changing_the_head_room_refills_the_first_column,
     test_slice_export_lists_only_the_realtime_row_in_order,

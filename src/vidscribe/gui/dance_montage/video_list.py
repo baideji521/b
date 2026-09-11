@@ -1,9 +1,14 @@
 """右侧「视频列表」：视频文件夹里的每个视频 + 它跟主音频的对齐结果。
 
-    视频                     时长      状态        Offset    置信度
-    ─────────────────────────────────────────────────────────────
-    202609100047_tiktok.mp4  62.40s   ✅ 可用     +3.201    0.981
-    girl02.mp4               61.80s   ⚠ 低置信    +8.700    0.431
+    #   视频                     时长      状态        Offset    置信度
+    ─────────────────────────────────────────────────────────────────
+    1   202609100047_tiktok.mp4  62.40s   ✅ 可用     +3.201    0.981
+    2   girl02.mp4               61.80s   ⚠ 低置信    +8.700    0.431
+
+第一列「#」是**屏幕上的序号**：从 1 开始连号，点表头换排序、删行、粘进新视频
+之后都会重新数一遍，所以它永远等于"这是从上往下第几个"。它**不是身份**——
+每一行的真身还是存在「视频」那一格里的全路径（`Qt.UserRole`）。
+
 
 **只列文件夹里的视频，不读库。**对齐算完就填进来，一条素材都不会因此产生 ——
 入库是页脚「切片并加入素材库」那个按钮的事，两件事分开。
@@ -43,7 +48,13 @@ from PyQt5.QtWidgets import (
 
 from .. import theme
 
-COLUMNS = ("视频", "时长", "状态", "Offset", "置信度")
+COLUMNS = ("#", "视频", "时长", "状态", "Offset", "置信度")
+
+#: 列号一律走这几个名字，别再写字面量 —— 加了「#」之后所有列都往右挪了一格
+COL_INDEX = 0
+COL_NAME = 1
+COL_STATUS = 3
+
 
 #: 比全局 12px 小一号：这一栏是"扫一眼几十行"的清单，字小才装得下
 FONT_SIZE = 11
@@ -97,10 +108,18 @@ class VideoListPanel(QWidget):
         self.table.verticalHeader().setVisible(False)
         self.table.verticalHeader().setDefaultSectionSize(ROW_HEIGHT)
         self.table.setSortingEnabled(True)
+        #: 正在重新数序号。`sortIndicatorChanged` 会在排序时打回来，不挡一下会套娃
+        self._numbering = False
         # 字号比全局小一号：几十行的清单，字小一点一屏能多看十几行
         self.table.setStyleSheet(f"font-size:{FONT_SIZE}px;")
         self.table.horizontalHeader().setStyleSheet(f"font-size:{FONT_SIZE}px;")
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(
+            COL_INDEX, QHeaderView.ResizeToContents)
+        # 换了排序方式，序号要跟着重新数：它表示"从上往下第几个"，不是身份
+        self.table.horizontalHeader().sortIndicatorChanged.connect(
+            lambda *_args: self._renumber())
+
         self.table.doubleClicked.connect(self._row_picked)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
@@ -244,9 +263,11 @@ class VideoListPanel(QWidget):
                                     PLACEHOLDER, PLACEHOLDER))
             added += 1
         self.table.setSortingEnabled(True)
-        self.table.sortItems(0, Qt.AscendingOrder)
+        self.table.sortItems(COL_NAME, Qt.AscendingOrder)
+        self._renumber()
         self._say(self._aligned_count())
         return added
+
 
     def drop_files(self, paths) -> int:
         """把这些文件的行从表里去掉（只动表格，磁盘的事由调用方负责）。"""
@@ -258,13 +279,17 @@ class VideoListPanel(QWidget):
             self.table.removeRow(row)
             gone += 1
         if gone:
+            self._renumber()                      # 删掉几行，序号重新连上
             self._say(self._aligned_count())
         return gone
 
+
     def _aligned_count(self) -> int:
         return sum(1 for row in range(self.table.rowCount())
-                   if (self.table.item(row, 2).text() if self.table.item(row, 2) else "")
+                   if (self.table.item(row, COL_STATUS).text()
+                       if self.table.item(row, COL_STATUS) else "")
                    in STATUS_TEXT.values())
+
 
     def _say_line(self, line: str) -> None:
         """在提示行尾巴上补一句刚做了什么（不覆盖清单统计）。"""
@@ -277,8 +302,9 @@ class VideoListPanel(QWidget):
 
     def _path_at(self, row: int) -> str:
         """这一行是哪个文件。**路径存在单元格里**，不靠行号 —— 表头一点就重排了。"""
-        item = self.table.item(int(row), 0)
+        item = self.table.item(int(row), COL_NAME)
         return str(item.data(Qt.UserRole) or "") if item is not None else ""
+
 
     def _row_of(self, path: str) -> int | None:
         """按**规范化后的路径**找行。
@@ -311,8 +337,10 @@ class VideoListPanel(QWidget):
         self.table.setSortingEnabled(True)
         # 明确按文件名升序：不指定的话 Qt 会沿用上一次的排序指示器，
         # 铺完行顺序就变了（曾经因此把对齐结果写到了别人那一行）
-        self.table.sortItems(0, Qt.AscendingOrder)
+        self.table.sortItems(COL_NAME, Qt.AscendingOrder)
+        self._renumber()
         self._say(0)
+
 
     def set_results(self, rows) -> None:
         """填对齐结果。`rows` 就是对齐台那份 `[{path,name,alignment,error}]`。
@@ -348,28 +376,59 @@ class VideoListPanel(QWidget):
         self._drop_unaligned()
         self.table.setSortingEnabled(True)
         self.table.resizeColumnsToContents()
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(COL_NAME, QHeaderView.Stretch)
+        self._renumber()
         self._say(done)
+
 
     def _drop_unaligned(self) -> int:
         """清掉状态还是「未对齐」的行。倒着删，行号才不会边删边错位。"""
         gone = 0
         for row in range(self.table.rowCount() - 1, -1, -1):
-            cell = self.table.item(row, 2)
+            cell = self.table.item(row, COL_STATUS)
+
             if cell is not None and cell.text() == UNALIGNED:
                 self.table.removeRow(row)
                 gone += 1
         return gone
 
     def _write(self, row: int, path: str, cells) -> None:
-        for column, text in enumerate(cells):
+        """写一行的正文（序号那一格由 `_renumber()` 统一填）。"""
+        for offset, text in enumerate(cells):
+            column = COL_NAME + offset
             item = QTableWidgetItem(str(text))
-            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if column == 0
+            item.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter if column == COL_NAME
                                   else Qt.AlignRight | Qt.AlignVCenter)
-            if column == 0:
+            if column == COL_NAME:
                 item.setData(Qt.UserRole, path)   # 行的真身：全路径
                 item.setToolTip(path)
             self.table.setItem(row, column, item)
+
+    def _renumber(self) -> None:
+        """把「#」那一列重新数成 1..N（按**屏幕上现在的顺序**）。
+
+        序号写成整数（`setData(DisplayRole, int)`）：按这一列排序时才是 1,2,…,10,11，
+        写成字符串会变成 1,10,11,2 那种字典序。
+        重数期间关掉排序 —— 一边排一边写会把行顺序搅乱，而且 `sortIndicatorChanged`
+        还会打回这里来（所以另外用 `_numbering` 挡一层）。
+        """
+        if self._numbering:
+            return
+        self._numbering = True
+        sorting = self.table.isSortingEnabled()
+        self.table.setSortingEnabled(False)
+        try:
+            for row in range(self.table.rowCount()):
+                item = self.table.item(row, COL_INDEX)
+                if item is None:
+                    item = QTableWidgetItem()
+                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    self.table.setItem(row, COL_INDEX, item)
+                item.setData(Qt.DisplayRole, row + 1)
+        finally:
+            self.table.setSortingEnabled(sorting)
+            self._numbering = False
+
 
     def _say(self, aligned: int) -> None:
         total = self.table.rowCount()
@@ -392,7 +451,8 @@ class VideoListPanel(QWidget):
         return out
 
 
-__all__ = ["VideoListPanel", "COLUMNS", "STATUS_TEXT", "FONT_SIZE", "UNALIGNED"]
+__all__ = ["VideoListPanel", "COLUMNS", "COL_INDEX", "COL_NAME", "COL_STATUS",
+           "STATUS_TEXT", "FONT_SIZE", "UNALIGNED"]
 
 
 
