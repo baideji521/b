@@ -134,6 +134,9 @@ class AlignBenchPanel(QWidget):
     results_ready = pyqtSignal(list)
     #: 首/尾余量被改了 → 矩阵、卡点表都要按新余量重算一遍
     rooms_changed = pyqtSignal()
+    #: 开跑时发现这些源视频已经不在盘上了（自动跳过，外面的列表也该跟着清）
+    missing_sources = pyqtSignal(list)
+
 
     def __init__(self, cfg, parent=None) -> None:
         super().__init__(parent)
@@ -963,9 +966,21 @@ class AlignBenchPanel(QWidget):
             return
         missing = [p for p in job["sources"] if not Path(p).is_file()]
         if missing:
-            QMessageBox.warning(self, "文件不在盘上",
-                                "这些路径找不到文件：\n" + "\n".join(missing[:6]))
-            return
+            # 少数几条在别处被删了/改名了，不该拦住其余几十条：把它们从清单里剔掉、
+            # 在日志里说清是哪几条，剩下的照跑。**全都不在**才算真的没法开工
+            self.drop_sources(missing)
+            self.say(f"[跳过] {len(missing)} 个文件不在盘上："
+                     + "；".join(Path(p).name for p in missing[:6])
+                     + ("…" if len(missing) > 6 else ""))
+            job = self.job()
+            if not job["sources"]:
+                QMessageBox.warning(self, "文件不在盘上",
+                                    "这些路径一个都找不到文件：\n"
+                                    + "\n".join(missing[:6]))
+
+                return
+            self.missing_sources.emit(list(missing))
+
 
         self.log.clear()
         self.say(f"[开始] 目标歌 {job['song']}｜源 {len(job['sources'])} 个"

@@ -193,6 +193,11 @@ class FramePlayer(QWidget):
         self._frame_index = 0          # 当前显示的是第几帧
         self._clock_origin = 0.0       # 本次播放的真实时间起点
         self._clock_base = 0.0         # 起点对应的视频位置（秒）
+        #: 帧映射：`秒 → 秒`。给卡帧抖动这类"只改取哪一帧"的效果用。
+        #: **只影响显示哪一帧，不影响 position()** —— 位置还是那口绝对钟说的，
+        #: 否则跟主音频的纠偏会把它当成漂移，一路来回拽
+        self._frame_map = None
+
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_tick)
 
@@ -323,25 +328,61 @@ class FramePlayer(QWidget):
             self._clock_base = self._position
         return True
 
+    def fps(self) -> float:
+        """当前文件的帧率。抖动这类"按帧算"的效果要拿它换算。"""
+        return float(self._fps)
+
+    def set_frame_map(self, mapper) -> None:
+        """装一个 `秒 → 秒` 的帧映射（None = 拆掉）。
+
+        卡帧抖动就靠它做预览：窗口内把时间"按档保持"，显示的是同一帧，
+        但 `position()` 照旧按绝对钟走 —— 位置不动手脚，跟主音频的纠偏才不会打架。
+        只在**内存播放**下生效（流式播放是顺着解的，硬回跳等于重解关键帧）。
+        """
+        self._frame_map = mapper
+        if self._cache:
+            self._show_cached(self._position)
+
     def _show_cached(self, seconds: float) -> None:
+
         """显示缓存里对应 `seconds` 的那一帧（越界就贴到最近的一端）。
 
         **同一帧就直接回**：跟着主音频走时每 50ms 会来纠一次偏，而一帧有 33ms，
         大半次纠偏落在已经显示着的那一帧上。一次缩放 + setPixmap 要 3ms，
         白做的话每秒就白烧几十毫秒 —— 那就是"内存播放了还觉得有点顿"的来源。
+
+        装了 `set_frame_map()` 的话，**取哪一帧**按映射走（卡帧抖动就是这么预览的），
+        但 `position()` 仍然是传进来的那个时间：位置一动手脚，外面的纠偏就会
+        把它当成漂移，一路来回拽（那正是之前那个"来回跳"的成因）。
         """
-        index = int(seconds * self._fps) - self._cache_first
-        index = max(0, min(index, len(self._cache) - 1))
-        if index >= len(self._cache) - 1 and self._playing:
+        clock = round(float(seconds), 3)
+        want = int(seconds * self._fps) - self._cache_first
+        last = len(self._cache) - 1
+        if want < 0 or want > last:
+            # 越界：贴到最近一端，**位置也跟着贴** —— 外面靠它知道"只能到这儿了"
+            clock = round((self._cache_first + max(0, min(want, last))) / self._fps, 3)
+        shown = seconds
+        if self._frame_map is not None:
+            try:
+                shown = float(self._frame_map(seconds))
+            except Exception:                    # noqa: BLE001 - 效果坏了不许带走播放
+                shown = seconds
+        index = max(0, min(int(shown * self._fps) - self._cache_first, last))
+        if want >= last and self._playing:
             self.pause()                         # 片段播完就停，不往后溢到下一段
         frame = self._cache_first + index
         if frame == self._frame_index and self._image is not None:
+            if clock != self._position:
+                self._position = clock           # 抖动"卡住"的是画面，位置照旧往前走
+                self.positionChanged.emit(self._position)
             return
         self._frame_index = frame
-        self._position = round(self._frame_index / self._fps, 3)
+        self._position = clock
         self._image = self._cache[index]
         self._repaint()
         self.positionChanged.emit(self._position)
+
+
 
     def step_frame(self, delta: int = 1) -> None:
         """逐帧走。**核卡点就靠它**：停下来一帧一帧比画面和鼓点。

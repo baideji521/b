@@ -53,6 +53,8 @@ class MasterTimeline(QWidget):
     segment_clicked = pyqtSignal(int)
     view_changed = pyqtSignal(float, float)      # 可见窗口 (起点, 跨度)
     mode_changed = pyqtSignal(str)               # 主可视化区换了显示什么
+    stutter_marked = pyqtSignal(float)           # 打点模式下点了这一秒（要加抖动点）
+
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -79,6 +81,9 @@ class MasterTimeline(QWidget):
         self._panning: tuple[int, float] | None = None   # 抓着音轨挪：(按下时的 x, 那会儿的窗口起点)
         self._view_start = 0.0              # 可见窗口起点（秒）
         self._view_span = 0.0               # 可见窗口跨度；0 = 看全曲
+        self._stutters: list[tuple[float, float]] = []   # 卡帧抖动点 (起, 止)
+        self._marking = False               # 正在「打抖动点」模式里
+
 
     # -------------------------------------------------------------- 显示模式
     @property
@@ -140,6 +145,30 @@ class MasterTimeline(QWidget):
         """可取区间：`[(start, end, score, level), …]`，来自 `vocal_activity.cut_zones`。"""
         self._zones = [(float(a), float(b), float(s), str(t)) for a, b, s, t in zones or ()]
         self.update()
+
+    # -------------------------------------------------------------- 卡帧抖动点
+    def set_stutters(self, points) -> None:
+        """要画出来的抖动点：`[(起, 止), …]`（秒）。**只画，不改数据。**"""
+        self._stutters = [(float(a), float(b)) for a, b in points or () if float(b) > float(a)]
+        self.update()
+
+    def set_marking(self, on: bool) -> None:
+        """进/出「打抖动点」模式。开着时左键点时间轴 = 在那儿打一个点，不再拖播放头。"""
+        self._marking = bool(on)
+        self.setCursor(Qt.PointingHandCursor if self._marking else Qt.CrossCursor)
+        self.update()
+
+    def marking(self) -> bool:
+        return bool(self._marking)
+
+    def stutter_near(self, x: float) -> int:
+        """横坐标 `x` 落在第几个抖动点上（点内或离起点很近）；没有就 −1。"""
+        moment = self._time_of(float(x))
+        for index, (start, end) in enumerate(self._stutters):
+            if start <= moment < end or abs(self._x_of(start) - float(x)) <= GRAB_PIXELS:
+                return index
+        return -1
+
 
     # ------------------------------------------------------------ 缩放/滚动
     def set_view(self, start: float, span: float) -> None:
@@ -298,7 +327,12 @@ class MasterTimeline(QWidget):
             return
         if event.button() != Qt.LeftButton:
             return
+        if self._marking:
+            # 打点模式：左键就是"在这儿加一个抖动点"，不动播放头、不碰分段边界
+            self.stutter_marked.emit(round(self._time_of(event.x()), 3))
+            return
         grabbed = self._boundary_at(event.x(), event.y())
+
         if grabbed >= 0:
             self._dragging = grabbed
             return
@@ -331,8 +365,11 @@ class MasterTimeline(QWidget):
             return
         near_boundary = self._boundary_at(event.x(), event.y()) >= 0
         near_head = abs(self._x_of(self._head_time()) - event.x()) <= PLAYHEAD_GRAB
+        if self._marking:
+            return                       # 打点模式下光标不变，免得看着像能拖东西
         self.setCursor(Qt.SplitHCursor if near_boundary
                        else (Qt.SizeHorCursor if near_head else Qt.CrossCursor))
+
 
     def mouseReleaseEvent(self, event) -> None:              # noqa: N802
         if self._panning is not None:
@@ -376,7 +413,33 @@ class MasterTimeline(QWidget):
         else:
             self._draw_wave(painter, lanes["view"])
         self._draw_segments(painter, lanes["segment"])
+        self._draw_stutters(painter, lanes)
         self._draw_heads(painter, lanes)
+
+    def _draw_stutters(self, painter: QPainter, lanes: dict[str, QRectF]) -> None:
+        """卡帧抖动点：主可视化区上一条带色的窄带 + 起点一根竖线 + 一个 ⚡。
+
+        画在段落条上方、播放位置线下方：它是"这一小段画面要抖"，属于画面那一层，
+        所以贴着主可视化区的底边，不去挤段落条。
+        """
+        if not self._stutters:
+            return
+        view = lanes["view"]
+        top = view.bottom() - 14
+        colour = QColor(theme.PLAYING)      # 绿色：和"这一段用它"那种绿是一家
+        for start, end in self._stutters:
+            left = self._x_of(start)
+            right = max(left + 2.0, self._x_of(end))
+            band = QRectF(left, top, right - left, 12)
+            fill = QColor(colour)
+            fill.setAlpha(110)
+            painter.fillRect(band, fill)
+            painter.setPen(QPen(colour, 2))
+            painter.drawLine(int(left), int(view.top()), int(left), int(view.bottom()))
+            painter.setPen(colour)
+            painter.drawText(QRectF(left + 2, top - 1, 40, 12), Qt.AlignLeft | Qt.AlignVCenter,
+                             "⚡")
+
 
 
     def wheelEvent(self, event) -> None:                      # noqa: N802 - Qt 的名字

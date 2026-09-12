@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
 from PyQt5.QtCore import QMimeData, QPoint, Qt, pyqtSignal
@@ -111,7 +112,9 @@ class CandidateCell(QFrame):
                         f"S{self.segment_index + 1}\n"
                         f"{self.payload.get('note') or ''}\n"
                         "点一下 = 这一段用它；也可以按住往上拖到「实时播放」那一行"
-                        "（只能在本列内拖）；双击 = 只预览这一格")
+                        "（只能在本列内拖）；**连续双击** = 打开这一格看看"
+                        "（单点不会打开视频）")
+
 
         box = QVBoxLayout(self)
         box.setContentsMargins(6, 3, 6, 3)
@@ -312,6 +315,8 @@ class MatrixPanel(QWidget):
         self._history: list[dict[int, int]] = []      # 撤销栈：每步存一份 picks
         self._future: list[dict[int, int]] = []       # 重做栈
         self._quiet = False                           # 恢复/撤销时不再往栈里压
+        #: 视频列表那边的顺序：`{名字去掉后缀: 第几个}`。空 = 没人告诉过，按出现先后排
+        self._video_order: dict[str, int] = {}
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(6, 6, 6, 6)
@@ -378,8 +383,21 @@ class MatrixPanel(QWidget):
         self._clear()
         self._quiet = True
         self.segments = [dict(spec) for spec in segments or ()]
+        self.videos = self._numbered(self._collect_videos())
 
-        # 行的顺序：先按候选顺序里出现的先后，保证"同一个视频永远在同一行"
+        self._build_header()
+        self._build_realtime()
+        self._build_rows()
+
+        self.grid.setRowStretch(len(self.videos) + 1, 1)
+        self.grid.setColumnStretch(len(self.segments) + 1, 1)
+        self._quiet = False
+        self._last_picks = self.picks()
+        self._paint_chosen()
+        self._say_summary()
+
+    def _collect_videos(self) -> list[dict[str, Any]]:
+        """出现过的所有视频（按候选顺序里第一次出现的先后）。"""
         order: list[dict[str, Any]] = []
         seen: set[int] = set()
         for spec in self.segments:
@@ -390,19 +408,80 @@ class MatrixPanel(QWidget):
                 seen.add(video_id)
                 order.append({"video_id": video_id,
                               "video_name": str(row.get("video_name") or f"#{video_id}")})
-        self.videos = order
+        return order
 
+    @staticmethod
+    def _order_key(name: str) -> str:
+        """认视频用「去掉目录和后缀的名字」：矩阵这边可能是素材文件的 stem，
+        视频列表那边是 `girl01.mp4`，比全名会认不出是同一个。"""
+        base = os.path.basename(str(name or "").strip())
+        return os.path.normcase(os.path.splitext(base)[0])
+
+    def _numbered(self, videos: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """给每行编号并按这个号排序。
+
+        有 `set_video_order()`（视频列表现在的顺序）就**用列表那边的序号**，
+        两张表的号才对得上：视频列表里的 3 号，在矩阵里也是 3 号那一行。
+        列表里没有的视频（比如文件已经删了但库里还有素材）排在后面接着编号。
+        """
+        known = len(self._video_order)
+        extra = 0
+        out: list[dict[str, Any]] = []
+        for index, video in enumerate(videos, start=1):
+            key = self._order_key(video.get("video_name", ""))
+            if not self._video_order:
+                number = index                    # 没人告诉顺序，就按出现的先后
+            elif key in self._video_order:
+                number = self._video_order[key] + 1
+            else:
+                extra += 1
+                number = known + extra
+            out.append({**video, "number": number})
+        out.sort(key=lambda item: item["number"])
+        return out
+
+    def set_video_order(self, names) -> None:
+        """告诉矩阵「视频列表现在的顺序」，行跟着它排、序号跟着它写。
+
+        `names` 是视频列表从上往下的文件名。这样两张表的序号是同一个意思，
+        换了排序也一起变。**只重排候选那几行**，实时播放行（=这一段用谁）一个字不动。
+        """
+        order: dict[str, int] = {}
+        for index, raw in enumerate(names or ()):
+            key = self._order_key(raw)
+            if key and key not in order:
+                order[key] = len(order)
+            del index
+        if order == self._video_order:
+            return
+        self._video_order = order
+        self._relayout_rows()
+
+    def _relayout_rows(self) -> None:
+        """按当前顺序重排候选区（行头 + 格子）。
+
+        **不走 `load()`**：load 会把实时播放行也重建，而"这一段用谁"只存在
+        那一行里（`picks()` 读的就是它），重建等于把用户的选择清了。
+        """
+        if not self.segments:
+            return
+        quiet, self._quiet = self._quiet, True
+        while self.grid.count():                  # 只清候选区这张网格
+            item = self.grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.setParent(None)
+        self.cells.clear()
+        self.videos = self._numbered(self._collect_videos())
         self._build_header()
-        self._build_realtime()
         self._build_rows()
         self.grid.setRowStretch(len(self.videos) + 1, 1)
         self.grid.setColumnStretch(len(self.segments) + 1, 1)
-        self._quiet = False
-        self._last_picks = self.picks()
+        self._quiet = quiet
         self._paint_chosen()
-        self._say_summary()
 
     def _build_header(self) -> None:
+
         head = QLabel("视频 ＼ 段落", self.board)
         head.setFixedWidth(HEAD_WIDTH)
         self.grid.addWidget(head, 0, 0)
@@ -466,9 +545,15 @@ class MatrixPanel(QWidget):
         by_segment = {int(spec.get("index", i)): (spec.get("materials") or ())
                       for i, spec in enumerate(self.segments)}
         for row_index, video in enumerate(self.videos, start=1):
-            head = QLabel(str(video["video_name"]), self.board)
+            # 行头带序号：跟上面视频列表那一列「#」是同一个号（`set_video_order()`
+            # 告诉过顺序就用列表那边的，没人说就按出现的先后）
+            name = str(video["video_name"])
+            number = int(video.get("number") or row_index)
+            head = QLabel(f"{number}. {name}", self.board)
             head.setFixedWidth(HEAD_WIDTH)
-            head.setToolTip(str(video["video_name"]))
+            head.setToolTip(f"第 {number} 个：{name}")
+
+
             self.grid.addWidget(head, row_index, 0)
             for column, spec in enumerate(self.segments, start=1):
                 index = int(spec.get("index", column - 1))
@@ -578,10 +663,12 @@ class MatrixPanel(QWidget):
         if cell is None:
             return
         if cell.material_id == material_id:
-            # 点的就是已经在用的那条：当成"想看看它"，不必再落一次库
-            self.preview_requested.emit(str(payload.get("path") or ""))
+            # 点的就是已经在用的那条：什么都不做。
+            # **打开/试听一律要连续双击**（`mouseDoubleClickEvent`）——
+            # 以前这里顺手发一次预览，于是"随便点一下"就把视频开起来了
             return
         cell.drop_payload(payload)
+
 
     def _realtime_replaced(self, segment_index: int, material_id: int) -> None:
         """实时播放行换人 = 一次人工决策：立刻落库 + 记流水账 + 通知外面换预览。

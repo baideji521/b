@@ -51,6 +51,7 @@ from PyQt5.QtWidgets import (
 )
 
 from ...logging_setup import get_logger
+from ...dance import frame_effects
 from .. import theme
 from . import dialogs
 from .master_timeline import DISPLAY_LABELS, DISPLAY_MODES, MasterTimeline
@@ -67,6 +68,13 @@ FIELD_HEIGHT = 30
 #: 离末尾还差这么多秒就算"已经播到头了"。播放器最后一次位置回调很少正好落在
 #: 整数时长上（50ms 一次，还有解码余量），留点余量才不会"看着播完了，再按却不重头"
 END_SLACK = 0.12
+#: 打一个抖动点默认持续多久（秒）。0.4s 在 30fps 下是 12 帧，
+#: 配合默认 4 帧一档 = 跳 3 次，肉眼一看就知道抖了（想细碎就把力度调回 2）
+SHAKE_SECONDS = 0.40
+#: 默认力度：几帧保持一次。2 帧一档在 30fps 下只有 66ms，很多人根本看不出来
+SHAKE_HOLD = 4
+
+
 
 
 def _big(button, height: int = BUTTON_HEIGHT, *, bold: bool = False):
@@ -229,12 +237,16 @@ class MasterAudioPanel(QWidget):
 
     template_changed = pyqtSignal(object)
     seek_requested = pyqtSignal(float)
+    stutters_changed = pyqtSignal()      # 抖动点加/删了 → 外面重铺矩阵、重算导出
 
     def __init__(self, cfg, db=None, parent=None) -> None:
         super().__init__(parent)
         self.cfg = cfg
         self.db = db
+        #: 卡帧抖动点（`frame_effects.Stutter`），时间是**主音频绝对秒数**
+        self._stutters: list[frame_effects.Stutter] = []
         self.worker: MasterAudioWorker | None = None
+
 
         self._activity = None          # VocalActivity
         self._template = None          # SegmentTemplate
@@ -520,6 +532,38 @@ class MasterAudioPanel(QWidget):
         self.btn_redo = _big(QPushButton("↷ 重做", holder))
         self.btn_redo.setEnabled(False)
 
+        # 画面效果：一个开关 + 玩法 + 时长 + 力度。开着开关，左键点时间轴就打一个点，
+        # 点在时间轴上看得见（绿带 + ⚡），右键点它能删。**只改帧序，不改时长**
+        self.btn_shake = _big(QPushButton("⚡ 打效果点", holder))
+        self.btn_shake.setCheckable(True)
+        self.btn_shake.setToolTip("按下之后，左键点时间轴就在那一刻打一个画面效果点"
+                                  "（时间轴上画出来的绿带就是它）。\n"
+                                  "右键点在点上可以删掉。效果只改帧序，素材时长一分一秒不变。")
+        self.shake_kind = QComboBox(holder)
+        self.shake_kind.setMinimumHeight(FIELD_HEIGHT)
+        for text, key in (("倒放→正放（回放感）", "rewind"),
+                          ("正放→倒放（回旋镜）", "pingpong"),
+                          ("卡帧抖动", "stutter")):
+            self.shake_kind.addItem(text, key)
+        self.shake_kind.setToolTip("倒放→正放＝画面先倒回去、再正着放回来（倒带重看一遍）；\n"
+                                   "正放→倒放＝先往前走再退回来（回旋镜）；\n"
+                                   "卡帧抖动＝每几帧保持一次（哒哒哒）。")
+
+        self.shake_len = QDoubleSpinBox(holder)
+        self.shake_len.setMinimumHeight(FIELD_HEIGHT)
+        self.shake_len.setRange(frame_effects.MIN_SECONDS, 2.0)
+        self.shake_len.setSingleStep(0.05)
+        self.shake_len.setDecimals(2)
+        self.shake_len.setValue(SHAKE_SECONDS)
+        self.shake_len.setSuffix(" s")
+        self.shake_len.setToolTip("一个效果点持续多久")
+        self.shake_hold = QComboBox(holder)
+        self.shake_hold.setMinimumHeight(FIELD_HEIGHT)
+        self.shake_kind.currentIndexChanged.connect(lambda _i: self._fill_shake_hold())
+        self._fill_shake_hold()
+
+
+
         # 顺序照画里那一行走：播放当前段 → 切分 → 取消切分 → 合并 → 撤销 → 重做。
         # 停顿导航（◀▶ + 锚点）挨在它们前面，都是同一行，天天点的东西不分两处。
         # 分段方式那个下拉框摆最前面 —— 它决定后面哪几个控件出现
@@ -532,8 +576,15 @@ class MasterAudioPanel(QWidget):
         for widget in (self.step, self.btn_uniform, self.anchor,
                        self.btn_prev, self.btn_next, self.btn_play_span,
                        self.btn_split, self.btn_unsplit, self.btn_merge,
-                       self.btn_undo, self.btn_redo):
+                       self.btn_undo, self.btn_redo,
+                       self.btn_shake, self.shake_kind, self.shake_len,
+                       self.shake_hold):
             row.addWidget(widget)
+
+
+        self.btn_shake.toggled.connect(self.timeline.set_marking)
+        self.timeline.stutter_marked.connect(self.add_stutter)
+
 
         self.btn_prev.clicked.connect(lambda: self._jump(-1))
         self.btn_next.clicked.connect(lambda: self._jump(1))
@@ -579,7 +630,81 @@ class MasterAudioPanel(QWidget):
             + ("。\n当前是**等间切分**：分段线不能拖，改秒数重新切就行。"
                if uniform else " / 切分。\n当前是**手动切分**：分段线可以直接拖。"))
 
+    # -------------------------------------------------------------- 画面效果点
+    def shake_kind_key(self) -> str:
+        """当前玩法：`rewind`（倒放→正放）、`pingpong`（正放→倒放）或 `stutter`（卡帧抖动）。"""
+        return str(self.shake_kind.currentData() or "rewind")
+
+    def _fill_shake_hold(self) -> None:
+        """力度那个下拉跟着玩法换：抖动是「N 帧一档」，来回类是「来回 N 趟」。"""
+        trips_mode = self.shake_kind_key() in ("pingpong", "rewind")
+        self.shake_hold.blockSignals(True)
+        self.shake_hold.clear()
+        if trips_mode:
+            for trips in range(1, frame_effects.MAX_TRIPS + 1):
+                self.shake_hold.addItem(f"来回 {trips} 趟", trips)
+            self.shake_hold.setToolTip("窗口里来回几趟（1~30）。1 趟＝倒回去再放回来（最慢、"
+                                       "最像回放）；趟数越多来回越快、越抖。\n"
+                                       "一趟至少要 2 帧，所以窗口太短时实际趟数会被夹住。")
+        else:
+
+
+            for hold in range(2, frame_effects.MAX_HOLD + 1):
+                self.shake_hold.addItem(f"{hold} 帧一档", hold)
+            spot = self.shake_hold.findData(SHAKE_HOLD)
+            if spot >= 0:
+                self.shake_hold.setCurrentIndex(spot)
+            self.shake_hold.setToolTip("力度：几帧保持一次。2 最细碎（30fps 下只有 66ms，"
+                                       "容易看不出来），越大越接近定格")
+        self.shake_hold.blockSignals(False)
+
+    def stutters(self) -> list[dict[str, Any]]:
+        """当前所有效果点（主音频绝对秒数）。切片/导出/预览都拿这一份。"""
+        return [point.to_dict() for point in self._stutters]
+
+    def add_stutter(self, at: float) -> bool:
+        """在 `at` 秒打一个效果点。落在已有点里就当"要改它"，先删掉旧的再打。"""
+        if self._duration <= 0:
+            return False
+        moment = max(0.0, min(float(at), max(0.0, self._duration - frame_effects.MIN_SECONDS)))
+        length = float(self.shake_len.value())
+        kind = self.shake_kind_key()
+        hold = int(self.shake_hold.currentData()
+                   or (1 if kind in ("pingpong", "rewind")
+                       else frame_effects.DEFAULT_HOLD))
+
+        # 和已有点重叠就把旧的顶掉：同一个地方两个点会互相盖，看不出是几个
+        self._stutters = [p for p in self._stutters
+                          if p.end <= moment or p.at >= moment + length]
+        self._stutters.append(frame_effects.Stutter(round(moment, 3), round(length, 3),
+                                                    hold, kind))
+        self._stutters.sort(key=lambda p: p.at)
+        self._refresh_stutters()
+        return True
+
+
+    def remove_stutter_at(self, x: float) -> bool:
+        """删掉横坐标 `x` 底下那个抖动点（右键菜单用）。"""
+        index = self.timeline.stutter_near(x)
+        if index < 0 or index >= len(self._stutters):
+            return False
+        del self._stutters[index]
+        self._refresh_stutters()
+        return True
+
+    def clear_stutters(self) -> None:
+        if not self._stutters:
+            return
+        self._stutters.clear()
+        self._refresh_stutters()
+
+    def _refresh_stutters(self) -> None:
+        """把点画到时间轴上，并告诉外面（导出要重算）。"""
+        self.timeline.set_stutters([(p.at, p.end) for p in self._stutters])
+        self.stutters_changed.emit()
+
     def use_wide_layout(self) -> None:
+
         """编排台里让主可视化区**通栏**：左边那列「人声导航」收起来。
 
         画里主可视化区是横铺满整页的；导航那列 260 像素占着，波形就被挤窄了。
@@ -626,7 +751,24 @@ class MasterAudioPanel(QWidget):
                     lambda _c=False, m=moment: self._play_segment_at(m))
             menu.addAction("✂ 在此处切分").triggered.connect(
                 lambda _c=False, m=moment: self._split_at(m))
+        # 抖动点独立于分段方式：两种模式下都能加/删（它改的是画面，不是分段）
+        menu.addSeparator()
+        if self.timeline.stutter_near(point.x()) >= 0:
+            menu.addAction("⚡ 删掉这个效果点").triggered.connect(
+                lambda _c=False, x=point.x(): self.remove_stutter_at(x))
+        else:
+            label = {"rewind": "回放（倒放→正放）",
+                     "pingpong": "来回放"}.get(self.shake_kind_key(), "卡帧抖动")
+
+            menu.addAction(f"⚡ 在此加{label}（{self.shake_len.value():.2f}s）"
+                           ).triggered.connect(
+                lambda _c=False, m=moment: self.add_stutter(m))
+        if self._stutters:
+            menu.addAction(f"⚡ 清空全部 {len(self._stutters)} 个效果点").triggered.connect(
+                lambda _c=False: self.clear_stutters())
+
         menu.exec_(self.timeline.mapToGlobal(point))
+
 
     def _seek_and_play(self, moment: float) -> None:
         """「播放到此处」：先跳过去再放，播放位置永远是主音频说了算。"""
@@ -1178,6 +1320,14 @@ class MasterAudioPanel(QWidget):
         return {"path": self.path.text().strip(), "step": float(self.step.value()),
                 # 分段方式：下次开界面接着用上次选的那种
                 "mode": self.mode_key(),
+                # 卡帧抖动：打过的点和当前力度都留到下次
+                "stutters": self.stutters(),
+                "shake_kind": self.shake_kind_key(),
+                "shake_len": float(self.shake_len.value()),
+                "shake_hold": int(self.shake_hold.currentData()
+                                  or frame_effects.DEFAULT_HOLD),
+
+
                 "min_score": float(self.min_score.value()),
                 "only_strong": bool(self.only_strong.isChecked()),
                 "volume": int(self.volume.value()),
@@ -1199,6 +1349,20 @@ class MasterAudioPanel(QWidget):
         if index >= 0:
             self.mode.setCurrentIndex(index)
         self._apply_mode()
+        # 卡帧抖动：先恢复力度，再把点铺回时间轴（每个点自己带 hold，不受当前力度影响）
+        wanted_kind = str(data.get("shake_kind") or "")
+        spot = self.shake_kind.findData(wanted_kind) if wanted_kind else -1
+        if spot >= 0:
+            self.shake_kind.setCurrentIndex(spot)       # 会顺手重填力度那个下拉
+        if data.get("shake_len"):
+            self.shake_len.setValue(float(data["shake_len"]))
+        spot = self.shake_hold.findData(int(data.get("shake_hold") or 0))
+        if spot >= 0:
+            self.shake_hold.setCurrentIndex(spot)
+
+        self._stutters = frame_effects.parse(data.get("stutters"))
+        self._refresh_stutters()
+
         if data.get("min_score") is not None:
             self.min_score.setValue(float(data["min_score"]))
         self.only_strong.setChecked(bool(data.get("only_strong")))

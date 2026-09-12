@@ -193,6 +193,9 @@ class ClipJobWorker(QThread):
         `"slices"` 把**实时播放行定下的那几段**按顺序各导一个文件到指定目录
                    （编排台页脚「切片导出」）。库里已经切好的直接拷一份，
                    内存里的临时格子现场渲染（含首尾补边界帧）
+        `"preview"` 同样那几段，但**拼成一条 mp4 + 接上主音频**（页脚「▶ 预览」）。
+                   输出固定文件名、每次覆盖，只为看效果
+
         其它       导出 `start → end` 这一段成一个独立文件（默认）
 
     刻意**不**做"顺手把整格素材都导出来"这种事：这里只是给人工细看用的一次性副本，
@@ -216,6 +219,10 @@ class ClipJobWorker(QThread):
             if kind == "slices":
                 self.done.emit(True, self._export_slices())
                 return
+            if kind == "preview":
+                self.done.emit(True, self._preview_montage())
+                return
+
             self.done.emit(True, self._export_clip())
         except Exception as exc:  # noqa: BLE001 - 后台线程抛出去就没人接了
             import traceback  # noqa: PLC0415
@@ -288,28 +295,8 @@ class ClipJobWorker(QThread):
         for order, item in enumerate(items, 1):
             target = out_dir / str(item["name"])
             try:
-                copy_from = str(item.get("copy_from") or "")
-                if copy_from:
-                    shutil.copy2(copy_from, target)
-                    self.log.emit(f"[切片 {order}/{len(items)}] 拷贝已入库的素材 → {target.name}")
-                    made += 1
-                    continue
-                head = float(item.get("head_pad") or 0.0)
-                tail = float(item.get("tail_pad") or 0.0)
-                start = float(item["source_start"])
-                end = float(item["source_end"])
-                spec = SliceSpec(segment_index=int(item.get("segment_index") or 0),
-                                 target_start=0.0,
-                                 target_end=round(end - start + head + tail, 6),
-                                 source_start=start, source_end=end,
-                                 head_pad=head, tail_pad=tail)
-                canvas = media_backend.resolve_canvas(self.cfg, [str(item["source"])])
-                padded = f"（补 {head + tail:.2f}s 边界帧）" if head or tail else ""
-                self.log.emit(f"[切片 {order}/{len(items)}] {start:.3f}→{end:.3f}s"
-                              f"{padded} → {target.name}")
-                material_slice.render_material(str(item["source"]), spec, target,
-                                               canvas=canvas, backend=engine,
-                                               on_log=self.log.emit)
+                self._render_item(engine, item, target, order, len(items),
+                                  shutil, material_slice, media_backend, SliceSpec)
                 made += 1
             except Exception as exc:  # noqa: BLE001 - 一条坏的不该毁掉整批
                 failed += 1
@@ -318,6 +305,84 @@ class ClipJobWorker(QThread):
         if made <= 0:
             raise RuntimeError("一条都没导出来（看上面的失败原因）")
         return str(out_dir)
+
+    def _render_item(self, engine, item, target: Path, order: int, total: int,
+                     shutil, material_slice, media_backend, SliceSpec) -> None:  # noqa: N803
+        """把一格渲成一个文件。切片导出和预览合成走的是**同一条**渲染路径。"""
+        copy_from = str(item.get("copy_from") or "")
+        if copy_from:
+            shutil.copy2(copy_from, target)
+            self.log.emit(f"[切片 {order}/{total}] 拷贝已入库的素材 → {target.name}")
+            return
+        head = float(item.get("head_pad") or 0.0)
+        tail = float(item.get("tail_pad") or 0.0)
+        start = float(item["source_start"])
+        end = float(item["source_end"])
+        spec = SliceSpec(segment_index=int(item.get("segment_index") or 0),
+                         target_start=0.0,
+                         target_end=round(end - start + head + tail, 6),
+                         source_start=start, source_end=end,
+                         head_pad=head, tail_pad=tail)
+        canvas = media_backend.resolve_canvas(self.cfg, [str(item["source"])])
+        padded = f"（补 {head + tail:.2f}s 边界帧）" if head or tail else ""
+        shakes = list(item.get("stutters") or ())
+        shaken = f"（画面效果 {len(shakes)} 处）" if shakes else ""
+        self.log.emit(f"[切片 {order}/{total}] {start:.3f}→{end:.3f}s"
+                      f"{padded}{shaken} → {target.name}")
+        material_slice.render_material(str(item["source"]), spec, target,
+                                       canvas=canvas, backend=engine,
+                                       stutters=shakes, on_log=self.log.emit)
+
+    def _preview_montage(self) -> str:
+        """把**实时播放行**那几段合成一条能直接看的 mp4，返回落地路径。
+
+        流程就是正式出片的缩小版，一步都不新造：
+        每一格先按切片那条路渲出来（含补边界帧和画面效果）→ 按顺序拼成一条无声视频
+        → 把主音频从**第一段的起点**接上去。
+
+        输出**固定文件名**（`job["target"]`）：这是给人看效果的一次性预览，
+        每次直接覆盖，不留一堆版本（正式成品才走 `montage_render` 那条带版本的路）。
+        """
+        import shutil  # noqa: PLC0415
+        import tempfile  # noqa: PLC0415
+
+        from ...dance import material_slice, media_backend  # noqa: PLC0415
+        from ...dance.types import SliceSpec  # noqa: PLC0415
+
+        items = list(self.job.get("items") or ())
+        if not items:
+            raise ValueError("实时播放行上一段都还没定")
+        target = Path(str(self.job["target"]))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        song = str(self.job.get("song") or "")
+        engine = media_backend.resolve(str(self.cfg.dance["media_backend"]))
+        canvas = media_backend.resolve_canvas(
+            self.cfg, [str(item.get("source") or item.get("copy_from") or "")
+                       for item in items])
+        stage = Path(tempfile.mkdtemp(prefix="dance_preview_"))
+        try:
+            spans: list[tuple[str, float, float]] = []
+            for order, item in enumerate(items, 1):
+                piece = stage / f"{order:03d}.mp4"
+                self._render_item(engine, item, piece, order, len(items),
+                                  shutil, material_slice, media_backend, SliceSpec)
+                spans.append((str(piece), 0.0, float(engine.probe(piece).duration)))
+            mute = stage / "mute.mp4"
+            self.log.emit(f"[预览] 把 {len(spans)} 段拼成一条 → {target.name}")
+            video = engine.render_spans(spans, mute, canvas, on_log=self.log.emit)
+            if song and Path(song).is_file():
+                # 音轨从第一段的起点开始对：预览里画面和音乐的相对关系才和成片一致
+                engine.mux_audio(mute, Path(song), target,
+                                 audio_start=float(self.job.get("audio_start") or 0.0),
+                                 duration=float(video.get("duration") or 0.0),
+                                 on_log=self.log.emit)
+            else:
+                self.log.emit("[预览] 没有可用的主音频，这条预览是无声的")
+                shutil.copy2(mute, target)
+        finally:
+            shutil.rmtree(stage, ignore_errors=True)
+        return str(target)
+
 
 
 __all__ = ["ENVELOPE_BUCKETS", "DanceAlignWorker", "ClipJobWorker"]

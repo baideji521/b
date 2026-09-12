@@ -25,6 +25,7 @@ from typing import Callable, Sequence
 
 from ..logging_setup import get_logger
 from . import MATERIAL_GENERATION_VERSION
+from . import frame_effects
 from .music_structure import target_positions
 from .types import DanceAlignment, SliceSpec, SlicePlan
 
@@ -182,7 +183,8 @@ def material_filename(source_stem: str, song_id: int, spec: SliceSpec,
 
 
 def render_material(source: str | Path, spec: SliceSpec, target: Path, *,
-                    canvas=None, backend=None, on_log: LogFn | None = None) -> dict:
+                    canvas=None, backend=None, stutters=None,
+                    on_log: LogFn | None = None) -> dict:
     """把一条切片渲成**无声**素材文件。
 
     素材一律无声：目标歌是成片唯一正式音轨（技术指导第十六节），源舞蹈视频的原声
@@ -191,15 +193,22 @@ def render_material(source: str | Path, spec: SliceSpec, target: Path, *,
     `spec.head_pad` / `tail_pad` 不为 0 时（源视频那一头不够长），首尾用**边界帧**
     补足到段落的精确时长 —— 时长准了成片才不会整体前移，代价是那一截是静帧。
 
+    `stutters` 是主音频上打的卡帧抖动点（**绝对秒数**）。这里裁到本段之内、再平移成
+    素材内时间：一个点只影响它所在那一段，不许溢到隔壁段（和"不许跨段取素材"同一条铁律）。
+    抖动只改帧序，`spec.duration` 一分一秒都不变。
+
     渲染走 `media_backend`，业务层不碰编码器细节，也不允许直接 subprocess ffmpeg。
     """
     from . import media_backend  # noqa: PLC0415 - 这里才会碰 cv2/av，GUI 主线程不该导入
 
     board = canvas if canvas is not None else media_backend.Canvas()
     engine = backend if backend is not None else media_backend.resolve("auto")
+    local = [point.shifted(-float(spec.target_start)) for point
+             in frame_effects.clip_to(stutters, spec.target_start, spec.target_end)]
     return engine.extract_clip(source, spec.source_start, spec.source_end, Path(target),
                                board, pad_head=spec.head_pad, pad_tail=spec.tail_pad,
-                               on_log=on_log)
+                               stutters=local, on_log=on_log)
+
 
 
 def render_plan(source: str | Path, plan: SlicePlan, out_dir: Path, *, canvas=None,

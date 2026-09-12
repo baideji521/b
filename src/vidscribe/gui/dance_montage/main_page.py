@@ -11,8 +11,9 @@
 
 一期第二十四节那四个区域一个都没少，只是不再和编排台平分屏幕：
 
-    音频对齐（offset / 置信度 / 重新对齐 / 手动修正）→ 右侧侧栏，Ctrl+1
-    输入与操作（选歌、参数、开跑、进度、日志）      → 左侧侧栏，Ctrl+2  RemixPanel
+    音频对齐（offset / 置信度 / 重新对齐 / 手动修正）→ 弹窗，Ctrl+1
+    素材矩阵（列＝Segment，行＝视频）                → 编排台右半屏，也能拉成弹窗 Ctrl+2
+
     素材资产（筛选 + 素材库）                      → 弹窗  FilterPanel + MaterialLibraryPanel
     选择与推荐（候选池 + 智能推荐）                 → 弹窗  CandidatePanel + RecommendationPanel
     历史与统计                                    → 弹窗  HistoryPanel + StatisticsPanel
@@ -32,8 +33,8 @@ from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtMultimedia import QMediaPlayer
 from PyQt5.QtWidgets import (
     QDialog,
-    QDockWidget,
     QHBoxLayout,
+
     QInputDialog,
     QLabel,
     QMainWindow,
@@ -47,6 +48,7 @@ from PyQt5.QtWidgets import (
 
 
 from ...logging_setup import get_logger
+from ...dance import frame_effects
 from .. import settings as gui_settings
 from .. import theme
 from ..player import FramePlayer, FramePrefetcher
@@ -81,6 +83,10 @@ LIVE_CACHED_RESYNC = 0.05
 #: 内存里最多留几段的帧。一段 2 秒的 3:4 片段（405×540 × 60 帧）约 39MB，
 #: 留 3 段（当前 + 下一段 + 上一段）
 FRAME_BUDGET = 3
+#: ▶ 预览合成出来的固定文件名。**每次覆盖**：它是给人看效果的一次性预览，
+#: 不留版本（正式成品才走 montage_render 那条带版本号的路）
+PREVIEW_NAME = "预览_实时成片.mp4"
+
 
 
 class DanceMontageWindow(QMainWindow):
@@ -121,6 +127,11 @@ class DanceMontageWindow(QMainWindow):
         self.setMinimumSize(1000, 640)     # 小窗口也要能用（一期第十五节）
 
         self.remix = RemixPanel(cfg, self)
+        # 混剪控制台那块侧栏已经撤了，但它还是这一页的"参数中枢"（目标歌、分段方式、
+        # 日志、进度都在它身上）：留着实例、只是不摆出来。**必须显式 hide()**，
+        # 否则它作为窗口的子控件会赖在左上角 0,0 那儿糊一片
+        self.remix.hide()
+
         self.filters = FilterPanel(self)
         self.library = MaterialLibraryPanel(self)
         self.alignment = AlignmentPanel(self)
@@ -169,10 +180,8 @@ class DanceMontageWindow(QMainWindow):
         self.remix.restore(state.get("remix") or {})
         self.master.restore(state.get("master") or {})
         self.bench.restore(state.get("bench") or {})
-        # 两个侧栏收着还是开着，也按上次那样恢复
-        self.dock_align.setVisible(bool(state.get("dock_align")))
-        self.dock_remix.setVisible(bool(state.get("dock_remix")))
         if str(self.remix.song.text()).strip().isdigit():
+
             self._song_typed(self.remix.song.text())
 
     def save_settings(self) -> None:
@@ -188,9 +197,8 @@ class DanceMontageWindow(QMainWindow):
         self.state["body_split"] = list(self.body_split.sizes())
         self.state["right_split"] = list(self.right_split.sizes())
         self.state["stage_split"] = list(self.stage_split.sizes())
-        self.state["dock_align"] = not self.dock_align.isHidden()
-        self.state["dock_remix"] = not self.dock_remix.isHidden()
         self.state["remix"] = self.remix.state()
+
         self.state["master"] = self.master.state()
         self.state["bench"] = self.bench.state()
         # 只写 dance_window 这一个键：主界面手里也捏着一份整份快照，
@@ -207,12 +215,12 @@ class DanceMontageWindow(QMainWindow):
 
         其余面板一个都没删，改成"要用才拉出来"：
 
-            音频对齐   → 右侧侧栏（QDockWidget，顶栏按钮 / Ctrl+1 开关），随时能点到
-            混剪控制台 → 左侧侧栏（选歌、参数、开跑、进度、日志）
+            音频对齐 → 顶栏按钮 / Ctrl+1 弹窗（不再占侧栏，编排台一寸都不让）
             素材资产 / 选择与推荐 / 历史与统计 → 独立弹窗，开着也不挡编排台
 
-        侧栏和弹窗里的面板还是 `__init__` 里那几个实例，信号连线一条没变 ——
+        弹窗里的面板还是 `__init__` 里那几个实例，信号连线一条没变 ——
         换的只是它们摆在哪儿。
+
         """
         page = QWidget(self)
         column = QVBoxLayout(page)
@@ -220,8 +228,8 @@ class DanceMontageWindow(QMainWindow):
         column.setSpacing(2)
         column.addWidget(self._build_entries())
         column.addWidget(self._build_studio(), 1)
-        self._build_docks()
         return page
+
 
     def _build_entries(self) -> QWidget:
         """顶栏第一行：编排台之外那些面板的入口。**只是入口，功能都还在。**"""
@@ -236,22 +244,16 @@ class DanceMontageWindow(QMainWindow):
         row.addWidget(title)
         row.addWidget(QLabel("主音频 → 分段 → 素材矩阵 → 实时成片 → 片段仓库", holder), 1)
 
-        self.btn_dock_align = QPushButton("音频对齐", holder)
-        self.btn_dock_align.setCheckable(True)
-        self.btn_dock_align.setToolTip("右侧拉出「音频对齐」：每个源视频的 offset / 置信度、"
-                                       "重新对齐、手动修正（Ctrl+1）")
-        self.btn_dock_align.clicked.connect(self._toggle_align_dock)
-
-        self.btn_dock_remix = QPushButton("混剪控制台", holder)
-        self.btn_dock_remix.setCheckable(True)
-        self.btn_dock_remix.setToolTip("左侧拉出「输入与操作」：选目标歌、切片长度、开跑、"
-                                       "进度和日志（Ctrl+2）")
-        self.btn_dock_remix.clicked.connect(self._toggle_remix_dock)
+        self.btn_open_align = QPushButton("音频对齐", holder)
+        self.btn_open_align.setToolTip("弹窗：每个源视频的 offset / 置信度、重新对齐、"
+                                       "手动修正（Ctrl+1）")
+        self.btn_open_align.clicked.connect(lambda: self._open_panel("align"))
 
         self.btn_open_matrix = QPushButton("素材矩阵", holder)
         self.btn_open_matrix.setToolTip("弹窗：列＝Segment，行＝视频，第一行＝实时成片。"
-                                       "片段切好入库之后才有内容")
+                                       "关掉弹窗它就回到编排台右半屏（Ctrl+2）")
         self.btn_open_matrix.clicked.connect(lambda: self._open_panel("matrix"))
+
 
         self.btn_open_assets = QPushButton("素材资产", holder)
         self.btn_open_assets.setToolTip("弹窗：多维筛选 + 素材资产库")
@@ -265,53 +267,14 @@ class DanceMontageWindow(QMainWindow):
         self.btn_open_review.setToolTip("弹窗：混剪历史 + 素材使用统计")
         self.btn_open_review.clicked.connect(lambda: self._open_panel("review"))
 
-        for button in (self.btn_dock_align, self.btn_dock_remix, self.btn_open_matrix,
+        for button in (self.btn_open_align, self.btn_open_matrix,
                        self.btn_open_assets, self.btn_open_choose, self.btn_open_review):
             button.setMinimumHeight(28)
             row.addWidget(button)
         return holder
 
-    def _build_docks(self) -> None:
-        """两个侧栏：音频对齐（右）、混剪控制台（左）。默认都收着，不挡编排台。"""
-        self.dock_align = QDockWidget("音频对齐", self)
-        self.dock_align.setObjectName("dance_dock_align")
-        self.dock_align.setWidget(self.alignment)
-        self.dock_align.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_align)
-        self.dock_align.hide()
-        self.dock_align.visibilityChanged.connect(
-            lambda shown: self.btn_dock_align.setChecked(bool(shown)))
-
-        remix_holder = QWidget(self)
-        remix_layout = QVBoxLayout(remix_holder)
-        remix_layout.setContentsMargins(6, 6, 6, 6)
-        hint = QLabel("固定音乐位置：所有源视频都贴在**目标歌**这同一把尺子上。"
-                      "素材是长期资产，只会停用、不会删除。", remix_holder)
-        hint.setWordWrap(True)
-        remix_layout.addWidget(hint)
-        remix_layout.addWidget(self.remix, 1)
-
-        self.dock_remix = QDockWidget("输入与操作", self)
-        self.dock_remix.setObjectName("dance_dock_remix")
-        self.dock_remix.setWidget(remix_holder)
-        self.dock_remix.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.dock_remix)
-        self.dock_remix.hide()
-        self.dock_remix.visibilityChanged.connect(
-            lambda shown: self.btn_dock_remix.setChecked(bool(shown)))
-
-    def _toggle_align_dock(self) -> None:
-        """开/收「音频对齐」侧栏。
-
-        判定用 `isHidden()` 而不是 `isVisible()`：窗口自己还没 show 的时候，
-        子控件的 `isVisible()` 恒为 False，用它会把"已经开着"误判成"收着"。
-        """
-        self.dock_align.setVisible(self.dock_align.isHidden())
-
-    def _toggle_remix_dock(self) -> None:
-        self.dock_remix.setVisible(self.dock_remix.isHidden())
-
     def _open_panel(self, key: str) -> QDialog:
+
         """把某组面板放进独立弹窗打开。**非模态**：开着也能继续排素材。
 
         弹窗只建一次，之后再点就是把它拉到前面 —— 面板实例始终是
@@ -329,8 +292,11 @@ class DanceMontageWindow(QMainWindow):
             return existing
 
         specs = {
+            "align": ("音频对齐（每条源视频的 offset / 置信度）", Qt.Vertical,
+                      ((self.alignment, 1),), (1100, 640)),
             "matrix": ("素材矩阵（列＝Segment，行＝视频，第一行＝实时成片）", Qt.Vertical,
                        ((self.matrix, 1),), (1280, 720)),
+
             "assets": ("素材资产（筛选 + 素材库）", Qt.Horizontal,
                        ((self.filters, 1), (self.library, 3)), (1180, 720)),
             "choose": ("选择与推荐（候选池 + 智能推荐）", Qt.Vertical,
@@ -351,8 +317,25 @@ class DanceMontageWindow(QMainWindow):
             split.setStretchFactor(index, stretch)
         layout.addWidget(split)
         dialogs_open[key] = window
+        if key == "matrix":
+            # 矩阵是编排台的正面成员，弹窗只是把它临时借走：关掉就搬回右半屏
+            window.finished.connect(lambda _code=0: self._return_matrix())
         window.show()
         return window
+
+    def _return_matrix(self) -> None:
+        """把素材矩阵放回编排台右半屏（视频列表 → 实时播放行 → 矩阵，还是老位置）。
+
+        顺手把弹窗从 `_panel_windows` 里摘掉：下次点「素材矩阵」重新建一个，
+        免得再拿到一个已经空掉的旧弹窗。
+        """
+        windows = getattr(self, "_panel_windows", None)
+        if windows is not None:
+            windows.pop("matrix", None)
+        self.right_split.insertWidget(2, self.matrix)
+        self.right_split.setStretchFactor(2, 3)
+        self.matrix.show()
+
 
     def _build_studio(self) -> QWidget:
         """编排台：**主音频 → 分段 → 素材 → 成片**，一页走完：
@@ -406,6 +389,11 @@ class DanceMontageWindow(QMainWindow):
                                   "段落起止只由主音频那条时间轴决定。", holder)
         self.studio_hint.setWordWrap(True)
         self.btn_preview_final = QPushButton("▶ 预览", holder)
+        self.btn_preview_final.setToolTip(
+            "把**实时播放行**那几段按顺序合成一条 mp4（含补边界帧和画面效果点），\n"
+            "接上主音频，然后用系统播放器打开给你看。\n"
+            f"文件名固定「{PREVIEW_NAME}」，每次直接覆盖 —— 它是一次性预览，不留版本。")
+
         self.btn_save_all = QPushButton("保存", holder)
         self.btn_slices = QPushButton("✂ 切片导出…", holder)
         self.btn_slices.setToolTip(
@@ -669,6 +657,9 @@ class DanceMontageWindow(QMainWindow):
             # 还没解好就先流式播（老行为），等预取线程送到再无缝换成内存播放 ——
             # 唯一不许发生的是"在这儿现场解码"，那就是切段落卡半秒的元凶
             self._use_cached_segment(payload)
+            # 这一段有抖动点就把帧映射装上，预览里就能看到抖（只改取哪一帧）
+            self.live.set_frame_map(self._stutter_map(payload))
+
         # 片段内位置 = 主音频时间 − 基准。基准分两种：
         #   · 库里的片段：`target_start`（切片时已经按 offset 算过，文件从那一刻起）
         #   · 内存里的实时格子：`seek_base` = offset（放的是**整条源视频**）
@@ -701,12 +692,56 @@ class DanceMontageWindow(QMainWindow):
             self.live.seek(want)
             self._live_synced_at = now
         self.live.play() if playing else self.live.pause()
+        # 效果到底有没有在生效，界面上说清楚 —— 不然只能干瞪眼猜"怎么看不出来"
+        shakes = self._segment_stutters(payload)
+        if not shakes:
+            shake_note = ""
+        elif cached:
+            shake_note = f"　⚡效果 {len(shakes)} 处（生效）"
+        else:
+            shake_note = f"　⚡效果 {len(shakes)} 处：等这一段预解码进内存才看得到"
+
         self.live_note.setText(
             f"{payload.get('video_name') or ''}　素材 #{material}　"
             f"片段内 {want:.3f}s{'　⚡内存' if cached else ''}"
-            f"{'（已对齐）' if fixed else ''}")
+            f"{'（已对齐）' if fixed else ''}{shake_note}")
+
+
+    def _stutter_map(self, payload: dict):
+        """这一格的卡帧抖动 → 播放器要的「秒 → 秒」映射；没打点就返回 None。
+
+        换算只有一条：`播放器时间 = 主音频时间 − base`（base 就是 `_sync_live` 里
+        减的那个基准）。窗口内取哪一帧交给 `frame_effects.frame_plan`，
+        和渲染那一头**用的是同一个函数** —— 预览看到的抖法就是导出会得到的抖法。
+        """
+        begin = float(payload.get("target_start") or 0.0)
+        end = float(payload.get("target_end") or 0.0)
+        base = float(payload.get("seek_base", payload.get("target_start") or 0.0) or 0.0)
+        points = frame_effects.clip_to(self.master.stutters(), begin, end)
+        if end <= begin or not points:
+            return None
+        fps = float(self.live.fps() or 0.0) or 30.0
+        total = max(1, int(round((end - begin) * fps)))
+        plan = frame_effects.frame_plan(total, fps,
+                                        [p.shifted(-begin) for p in points])
+        offset = begin - base
+
+        def mapper(seconds: float) -> float:
+            index = int(round((float(seconds) - offset) * fps))
+            if index < 0 or index >= total:
+                return float(seconds)
+            return offset + plan[index] / fps
+
+        return mapper
+
+    def _stutters_changed(self) -> None:
+        """抖动点改了 → 实时画面立刻按新点走（导出下次取的自然就是新的）。"""
+        index = self._segment_at(self.master.at)
+        payload = self.matrix.current_payload(index) if index >= 0 else {}
+        self.live.set_frame_map(self._stutter_map(payload) if payload else None)
 
     def _live_window(self, payload: dict) -> tuple[float, float] | None:
+
         """这一格在**播放器时间轴上**占的区间 —— 预解码就缓存这一段。
 
         一条公式覆盖两种素材，不分叉：
@@ -767,13 +802,54 @@ class DanceMontageWindow(QMainWindow):
             self.live.adopt_cache(path, begin, end, bundle)
 
     def _preview_final(self) -> None:
+        """▶ 预览：把**实时播放行**那几段合成一条 mp4，然后直接放给你看。
 
-        """▶ 预览：放主音频（成片的音轨就是它），画面预览走素材卡片上的 ▶。"""
-        self.master.play()
-        picks = self.matrix.picks()
-        self.statusBar().showMessage(
-            f"正在放主音频；已定 {len(picks)} 段。单条素材的画面点它卡片上的「▶ 预览」，"
-            "整片效果要导出后看成品。", 8000)
+        文件名固定（`PREVIEW_NAME`，落在 dance 输出目录），每次直接覆盖 ——
+        这是给人看效果的一次性预览，不留版本；正式成品才走「导出」那条带版本的路。
+
+        合成走的是切片那条同一路（含首尾补边界帧、画面效果点），再把主音频从
+        **第一段的起点**接上，所以预览里画面和音乐的关系跟成片一致。
+        """
+        if self.slices is not None and self.slices.isRunning():
+            QMessageBox.information(self, "还在忙", "上一批切片 / 预览还没做完。")
+            return
+        items, skipped = self._slice_items()
+        if not items:
+            QMessageBox.information(
+                self, "没有可预览的片段",
+                "实时播放行上一段都还没定 —— 在矩阵里点几格再来。\n"
+                + ("\n".join(skipped[:6]) if skipped else ""))
+            return
+        target = Path(str(self.cfg.dance["output_dir"])) / PREVIEW_NAME
+        job = {
+            "kind": "preview", "items": items, "target": str(target),
+            "song": self.master.path.text().strip(),
+            # 音轨从第一段起点开始对（段落不一定从 0 秒开始）
+            "audio_start": min(float(item.get("target_start") or 0.0) for item in items),
+        }
+        self.btn_preview_final.setEnabled(False)
+        self.statusBar().showMessage(f"正在合成预览（{len(items)} 段）…", 0)
+        from .align_worker import ClipJobWorker      # noqa: PLC0415 - 它会碰 cv2/av
+
+        self.slices = ClipJobWorker(self.cfg, job, self)
+
+        self.slices.log.connect(self.remix.append_log)
+        self.slices.done.connect(self._preview_done)
+        self.slices.start()
+
+    def _preview_done(self, ok: bool, message: str) -> None:
+        """合成完就用系统播放器打开它 —— 有声音、能拖，最省事的"看效果"。"""
+        self.btn_preview_final.setEnabled(True)
+        self.statusBar().clearMessage()
+        if not ok:
+            QMessageBox.warning(self, "预览合成失败", message)
+            return
+        from PyQt5.QtCore import QUrl                       # noqa: PLC0415
+        from PyQt5.QtGui import QDesktopServices            # noqa: PLC0415
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(message))
+        self.statusBar().showMessage(f"预览已合成并打开：{message}", 8000)
+
 
     def _export_final(self) -> None:
         """导出：拿 FINAL TIMELINE 这份选择走原来的出片流水线，不另造一套。"""
@@ -796,7 +872,8 @@ class DanceMontageWindow(QMainWindow):
         job["recommend"] = False          # 用户已经拍板了，别让推荐再插手
         if not job.get("song"):
             QMessageBox.information(self, "还没选目标歌",
-                                    "顶栏「混剪控制台」里先选一首目标歌（或填库里的 id）。")
+                                    "顶栏「主音频」里先选一首目标歌（或填库里的 id）。")
+
             return
         self.start(job)
 
@@ -823,7 +900,10 @@ class DanceMontageWindow(QMainWindow):
             item: dict[str, Any] = {
                 "name": f"{order:02d}_S{int(index) + 1:02d}_{safe}.mp4",
                 "segment_index": int(index),
+                # 这一格在主音频上的起点：预览合成要拿它对音轨
+                "target_start": float(payload.get("target_start") or 0.0),
             }
+
             if int(payload.get("material_id") or 0) > 0:
                 # 库里的素材文件本身就是切好的（画布、补帧都已经烤进去了）
                 item["copy_from"] = path
@@ -844,9 +924,25 @@ class DanceMontageWindow(QMainWindow):
                 # 所以导出来的东西和入库素材逐帧一致
                 "head_pad": max(0.0, round(source_start - begin, 6)),
                 "tail_pad": max(0.0, round(finish - source_end, 6)),
+                # 卡帧抖动点：裁到这一段之内，再换算成"这条切片自己的 0 起点"
+                "stutters": self._segment_stutters(payload),
             })
             items.append(item)
         return items, skipped
+
+    def _segment_stutters(self, payload: dict) -> list[dict[str, Any]]:
+        """这一格该带哪些抖动点，时间换算成**切片自己的 0 起点**。
+
+        主音频上打的点是绝对秒数；一个点只影响它所在那一段（跨界的裁短、
+        不相交的丢掉），这条规矩在 `frame_effects.clip_to` 里，界面不另写一套。
+        """
+        begin = float(payload.get("target_start") or 0.0)
+        end = float(payload.get("target_end") or 0.0)
+        if end <= begin:
+            return []
+        return [point.shifted(-begin).to_dict()
+                for point in frame_effects.clip_to(self.master.stutters(), begin, end)]
+
 
     def _export_slices(self) -> None:
         """✂ 切片导出：把实时播放行定下的那几段，按顺序单独导到一个目录。
@@ -918,11 +1014,20 @@ class DanceMontageWindow(QMainWindow):
         # 首/尾余量一改，矩阵和卡点表立刻按新余量重算 —— 不然改了数值界面没反应，
         # 看着就像这个框不起作用
         self.bench.rooms_changed.connect(self._rooms_changed)
+        # 开跑时发现文件没了：视频列表那几行也一起清掉（留着只会以为"这个没算"）
+        self.bench.missing_sources.connect(self.video_list.drop_files)
+
         self.video_list.picked.connect(self._video_picked)
         # 右键删除/粘贴要同步到批量清单，否则"列表里没了，跑批还在算它"
         self.video_list.about_to_delete.connect(self._release_files)
         self.video_list.removed.connect(self._videos_removed)
         self.video_list.added.connect(self._videos_added)
+        # 两张表的序号是同一个号：视频列表怎么排，下面矩阵的行就怎么排、怎么编号
+        self.video_list.order_changed.connect(self.matrix.set_video_order)
+        # 抖动点一改，实时画面立刻按新点走（预览和导出用同一份计划）
+        self.master.stutters_changed.connect(self._stutters_changed)
+
+
 
         self.candidates.manual_changed.connect(self.remix.set_manual)
         # 矩阵里拖出来的选择就是"手动指定这一格用谁"，和候选面板同一个出口
@@ -1000,8 +1105,9 @@ class DanceMontageWindow(QMainWindow):
         bind("Ctrl+S", self._save_everything)
         bind("Ctrl+Z", self._undo)
         bind("Ctrl+Y", self._redo)
-        bind("Ctrl+1", self._toggle_align_dock)
-        bind("Ctrl+2", self._toggle_remix_dock)
+        bind("Ctrl+1", lambda: self._open_panel("align"))
+        bind("Ctrl+2", lambda: self._open_panel("matrix"))
+
         # 逐帧：剪辑软件的老规矩。← → 归主音频时间轴，这里不抢
         bind(",", lambda: self.live.step_frame(-1))
         bind(".", lambda: self.live.step_frame(1))
@@ -1359,6 +1465,8 @@ class DanceMontageWindow(QMainWindow):
         分段一律以**主音频上那份模板**为准（不是库里存的那份），
         这样 ✂ 切分 / × 取消切分 一按，矩阵立刻跟着分列，不用先保存。
         """
+        # 行的顺序/序号跟着视频列表走，两张表的号才是同一个号
+        self.matrix.set_video_order(self.video_list.ordered_names())
         if self.db is None or not self._song_id:
             # 还没选目标歌也要能看：只要对齐算过，就按内存里那份铺格子
             self.matrix.attach(None, 0)
@@ -1519,13 +1627,15 @@ class DanceMontageWindow(QMainWindow):
             return
         job["strategy_id"] = self.recommend.strategy_id()
         job["preset"] = str(self.filters.preset.currentData() or "")
-        # 进度和日志都在「输入与操作」那一栏里，开跑就把它拉出来 ——
-        # 侧栏收着的时候啥都看不见，用户只会以为程序卡死了
-        self.dock_remix.setVisible(True)
+        # 混剪控制台那块侧栏撤了，进度改走状态栏 —— 不然开跑之后界面上一点动静都没有，
+        # 用户只会以为程序卡死了
+        self.statusBar().showMessage("混剪已开跑…")
         self.worker = DanceMontageWorker(self.cfg, job, self)
         self.worker.log.connect(self.remix.append_log)
         self.worker.stage.connect(self.remix.show_stage)
+        self.worker.stage.connect(lambda text: self.statusBar().showMessage(str(text)))
         self.worker.progress.connect(self.remix.show_progress)
+
         self.worker.done.connect(self._finished)
         self.remix.set_running(True)
         self.worker.start()

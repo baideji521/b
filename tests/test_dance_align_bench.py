@@ -791,9 +791,12 @@ def test_the_bench_tab_is_wired_into_the_window(work: Path) -> None:
         assert window.bench.receivers(window.bench.ingest_requested) >= 1
         assert window.bench.receivers(window.bench.changed) >= 1
 
-        # 编排台占满整个窗口：它就是中央控件，音频对齐挪进随时能拉出来的侧栏
+        # 编排台占满整个窗口：它就是中央控件，音频对齐挪进顶栏按钮的弹窗
         assert window.centralWidget().isAncestorOf(window.studio)
-        assert window.dock_align.widget() is window.alignment
+        align = window._open_panel("align")            # noqa: SLF001 - 测试里直接开
+        assert align.isAncestorOf(window.alignment)
+        align.close()
+
 
         # 编排台上半部分只剩一行工具栏：对齐台那一大片全收起来了
         assert not window.bench._stack.isVisible()           # noqa: SLF001
@@ -935,7 +938,67 @@ def test_the_compact_row_leaves_no_widget_without_a_layout(work: Path) -> None:
         db.close()
 
 
+def test_missing_files_are_skipped_not_a_dead_end(work: Path) -> None:
+    """有几条视频在别处被删了/改名了，**不许拦住其余几十条**。
+
+    以前只要清单里有一条找不到，「开始音频对齐」就弹个框直接不干活 ——
+    52 条里坏一条就全跑不了。现在坏的那几条被剔掉、日志里点名，剩下的照跑；
+    只有全都不在盘上才算真的没法开工。
+    """
+    from types import SimpleNamespace
+
+    from vidscribe.gui.dance_montage import align_bench as ab
+
+    panel, _cfg, db = _panel(work)
+    started: list[dict] = []
+    warned: list[str] = []
+
+    class _Stub:
+        def __init__(self, cfg, job, parent=None) -> None:
+            started.append(dict(job))
+            self.log = SimpleNamespace(connect=lambda _f: None)
+            self.progress = SimpleNamespace(connect=lambda _f: None)
+            self.done = SimpleNamespace(connect=lambda _f: None)
+
+        def isRunning(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            pass
+
+    real_worker, real_warn = ab.DanceAlignWorker, QMessageBox.warning
+    ab.DanceAlignWorker = _Stub
+    QMessageBox.warning = lambda *a, **k: warned.append(str(a[2]) if len(a) > 2 else "")
+    try:
+        here = work / "here.mp4"
+        here.write_bytes(b"x")                       # 存在就够了（worker 是替身）
+        gone = work / "gone.mp4"
+        panel.target.setText(str(work / "song.wav"))
+        panel.source.setText(str(here))
+        panel.add_sources([str(gone)])
+        assert len(panel.sources()) == 2, panel.sources()
+
+        panel.start()
+        assert started, "有一条文件没了就整批不跑了"
+        assert started[-1]["sources"] == [str(here)], started[-1]["sources"]
+        assert warned == [], f"这种情况不该弹框拦人：{warned}"
+        assert panel.more.count() == 0, "没了的那条该从批量清单里剔掉"
+
+        # 全都不在盘上：这才该拦住，并且说清楚
+        panel.source.clear()
+        panel.add_sources([str(work / "nope.mp4")])
+        before = len(started)
+        panel.start()
+        assert len(started) == before, "一个都不在盘上还开跑"
+        assert warned and "nope.mp4" in warned[-1], warned
+    finally:
+        ab.DanceAlignWorker = real_worker
+        QMessageBox.warning = real_warn
+        db.close()
+
+
 TESTS = (
+
 
     test_target_to_source_is_a_single_subtraction,
     test_span_maps_to_span,
@@ -943,6 +1006,7 @@ TESTS = (
     test_negative_offset_means_source_starts_first,
     test_head_and_tail_rooms_analyse_whatever_the_video_really_has,
     test_the_compact_row_leaves_no_widget_without_a_layout,
+    test_missing_files_are_skipped_not_a_dead_end,
     test_manual_offset_overrides_the_algorithm_and_keeps_the_original,
     test_fixed_two_second_positions,
     test_a_48_second_song_has_24_positions,

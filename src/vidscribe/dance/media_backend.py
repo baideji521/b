@@ -32,6 +32,7 @@ from typing import Any, Callable, Sequence
 import numpy as np
 
 from ..logging_setup import get_logger
+from . import frame_effects
 
 logger = get_logger("dance.media")
 
@@ -233,6 +234,7 @@ class MediaBackend:
 
     def render_spans(self, spans: Sequence[tuple[str, float, float]], target: Path,
                      canvas: Canvas, *, pad_head: float = 0.0, pad_tail: float = 0.0,
+                     stutters: Sequence[Any] | None = None,
                      on_log: LogFn | None = None,
                      on_progress: ProgressFn | None = None) -> dict[str, Any]:
         raise NotImplementedError
@@ -244,14 +246,19 @@ class MediaBackend:
 
     def extract_clip(self, source: str | Path, start: float, end: float, target: Path,
                      canvas: Canvas, *, pad_head: float = 0.0, pad_tail: float = 0.0,
+                     stutters: Sequence[Any] | None = None,
                      on_log: LogFn | None = None) -> dict[str, Any]:
         """切一段并归一到画布。默认实现就是"只有一段的 render_spans"。
 
         `pad_head` / `pad_tail`：源视频那一头不够长时，用**边界帧**补足这么多秒，
         好让切出来的素材时长精确等于它绑定的那个段落 —— 见 `render_spans`。
+
+        `stutters`：卡帧抖动点，时间是**这条素材自己的 0 起点**（见 `frame_effects`）。
         """
         return self.render_spans([(str(source), float(start), float(end))], target, canvas,
-                                 pad_head=pad_head, pad_tail=pad_tail, on_log=on_log)
+                                 pad_head=pad_head, pad_tail=pad_tail,
+                                 stutters=stutters, on_log=on_log)
+
 
 def _copy_stream(container: Any, template: Any) -> Any:
     """建一条"照抄模板"的输出流，用于视频 stream copy（不重编码）。
@@ -314,6 +321,7 @@ class PyAVBackend(MediaBackend):
 
     def render_spans(self, spans: Sequence[tuple[str, float, float]], target: Path,
                      canvas: Canvas, *, pad_head: float = 0.0, pad_tail: float = 0.0,
+                     stutters: Sequence[Any] | None = None,
                      on_log: LogFn | None = None,
                      on_progress: ProgressFn | None = None) -> dict[str, Any]:
         """把多个 `(源路径, 起, 止)` 按顺序渲成**一条无声视频**，归一到 canvas。
@@ -326,8 +334,13 @@ class PyAVBackend(MediaBackend):
         补足到段落的精确时长：时长准了，成片就不会因为某一格短半秒而整体前移，
         代价是那半秒画面是静帧。补几帧按 `canvas.fps` 算，所以时长是帧级精确的。
 
+        `stutters`：卡帧抖动点（`frame_effects.Stutter`），时间按**输出时间**算
+        （0 = 写出去的第一帧，含开头补的静帧）。它**只改这一帧去取源视频的哪一帧**，
+        写出去多少帧一点不变 —— 时长守恒是这一层不许破的规矩。
+
         落地方式：全程写 `.part`，完整收尾后 `os.replace` —— 崩溃只会留下 .part。
         """
+
         log = on_log or (lambda line: logger.info("%s", line))
         report = on_progress or (lambda done, total, stage: None)
         pieces = [(str(p), float(a), float(b)) for p, a, b in spans if float(b) > float(a)]
@@ -338,7 +351,12 @@ class PyAVBackend(MediaBackend):
 
         total_frames = (sum(canvas.frames_for(b - a) for _p, a, b in pieces)
                         + head_frames + tail_frames)
+        # 卡帧抖动：**只改帧序不改帧数**，所以 total_frames 上面已经算完，这里不许再动它
+        shakes = frame_effects.parse(stutters)
+        plan = frame_effects.frame_plan(total_frames, canvas.fps, shakes) if shakes else None
+        body_at = 0                     # 当前这一段的第一帧在"正文帧"里排第几
         part = target.with_name(target.name + PART_SUFFIX)
+
         writer = _Writer(part, canvas,
                          container_format=target.suffix.lstrip(".").lower() or "mp4")
         written = 0
@@ -362,8 +380,11 @@ class PyAVBackend(MediaBackend):
                             report(written, total_frames, "开头补边界帧")
                     frames = canvas.frames_for(end - start)
                     for k in range(frames):
-                        # 帧率归一化的关键：按**时间**取源帧，不顺序计数
-                        at = start + k / canvas.fps
+                        # 帧率归一化的关键：按**时间**取源帧，不顺序计数。
+                        # 有抖动点时取哪一帧由 plan 说（窗口内按档保持，出窗口立刻追回）
+                        step = k if plan is None else max(
+                            0, plan[head_frames + body_at + k] - head_frames - body_at)
+                        at = start + step / canvas.fps
                         rgb = reader.frame_at(int(math.floor(at * reader.fps)))
                         if rgb is None:
                             log(f"[段 {order}/{len(pieces)}] {Path(path).name} "
@@ -375,6 +396,8 @@ class PyAVBackend(MediaBackend):
                         report(written, total_frames, f"拼接第 {order}/{len(pieces)} 段")
                 finally:
                     reader.close()
+                body_at += frames
+
             if written <= 0:
                 raise RuntimeError("一帧都没写出来，检查源文件与区间是否有效")
             if tail_frames:
@@ -391,10 +414,14 @@ class PyAVBackend(MediaBackend):
         duration = round(written / canvas.fps, 4)
         padded = (f"（补边界帧 头 {head_frames} / 尾 {tail_frames}）"
                   if head_frames or tail_frames else "")
-        log(f"[画面] {len(pieces)} 段共 {written} 帧，{duration:.3f}s{padded} → {target.name}")
+        shaken = f"（卡帧抖动 {len(shakes)} 处）" if shakes else ""
+        log(f"[画面] {len(pieces)} 段共 {written} 帧，{duration:.3f}s{padded}{shaken}"
+            f" → {target.name}")
         return {"output": str(target), "clips": len(pieces), "frames": written,
                 "duration": duration, "canvas": canvas.to_dict(), "backend": self.name,
-                "pad_head_frames": head_frames, "pad_tail_frames": tail_frames}
+                "pad_head_frames": head_frames, "pad_tail_frames": tail_frames,
+                "stutters": [p.to_dict() for p in shakes]}
+
 
     def mux_audio(self, video: Path, audio: Path, target: Path, *,
                   audio_start: float = 0.0, duration: float | None = None,
@@ -517,7 +544,7 @@ class _FFmpegBackend(MediaBackend):
         return PyAVBackend().probe(path)
 
     def render_spans(self, spans, target, canvas, *, pad_head=0.0, pad_tail=0.0,
-                     on_log=None, on_progress=None):
+                     stutters=None, on_log=None, on_progress=None):
         raise NotImplementedError(
             f"{self.name} 后端还没实现（第一版只用 pyav）。"
             f"要接的话在 media_backend.py 里实现这个类，业务层不需要改动。")

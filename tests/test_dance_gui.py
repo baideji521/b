@@ -161,16 +161,16 @@ def test_window_has_all_four_regions(work: Path) -> None:
         # 一页到底：没有 Tab，编排台就是整个窗口的正面
         assert not hasattr(window, "tabs"), "编排台不该再被塞进 Tab 里"
         assert window.centralWidget().isAncestorOf(window.studio)
-        # 音频对齐是随时能点到的右侧侧栏（默认收着，不挡编排台）
-        # 窗口自己没 show，子控件 isVisible() 恒 False，所以看"有没有被显式收起来"
-        assert window.dock_align.widget() is window.alignment
-        assert window.dock_align.isHidden() is True
-        window.btn_dock_align.click()
-        assert window.dock_align.isHidden() is False
-        window.btn_dock_align.click()
-        assert window.dock_align.isHidden() is True
-        # 输入与操作在左侧侧栏里
-        assert window.dock_remix.widget().isAncestorOf(window.remix)
+        # 音频对齐改成顶栏按钮弹窗：编排台一寸都不让给侧栏
+        assert not hasattr(window, "dock_align"), "音频对齐不该再是侧栏"
+        assert not hasattr(window, "dock_remix"), "混剪控制台那块侧栏该删干净了"
+        window.btn_open_align.click()
+        align = window._panel_windows["align"]           # noqa: SLF001 - 测试里直接看
+        assert align.isAncestorOf(window.alignment)
+        align.close()
+        # 混剪控制台撤了，但 RemixPanel 还在（参数中枢），只是不摆出来
+        assert window.remix.isHidden() is True
+
         # 其余三组走弹窗，点了才建，建完面板还是原来那几个实例
         assets = window._open_panel("assets")            # noqa: SLF001 - 测试里直接开
         assert assets.isAncestorOf(window.filters) and assets.isAncestorOf(window.library)
@@ -218,7 +218,36 @@ def test_window_has_all_four_regions(work: Path) -> None:
         window.close()
 
 
+def test_the_matrix_comes_back_to_the_studio_when_the_popup_closes(work: Path) -> None:
+    """素材矩阵拉成弹窗、关掉弹窗，它得回到编排台右半屏那个老位置（第三块）。
+
+    弹窗把矩阵借走的时候 `right_split` 只剩两块；关掉必须补回 index 2，
+    不然编排台右半屏永远缺一块，只能重开窗口才回来。
+    """
+    window, _song_id, _m = _window(work)
+    try:
+        assert window.right_split.widget(2) is window.matrix
+        popup = window._open_panel("matrix")             # noqa: SLF001 - 测试里直接开
+        assert popup.isAncestorOf(window.matrix)
+        assert window.right_split.count() == 2, "矩阵还赖在编排台里"
+
+        popup.close()
+        assert window.right_split.count() == 3
+        assert window.right_split.widget(2) is window.matrix, "矩阵没回到老位置"
+        assert window.matrix.isHidden() is False
+        # 弹窗从台账里摘掉了：下次点是新建一个，不会拿到一个空壳
+        assert "matrix" not in window._panel_windows     # noqa: SLF001
+        again = window._open_panel("matrix")             # noqa: SLF001
+        assert again is not popup
+        assert again.isAncestorOf(window.matrix)
+        again.close()
+        assert window.right_split.widget(2) is window.matrix
+    finally:
+        window.close()
+
+
 def test_video_and_spectrum_take_only_the_left_half(work: Path) -> None:
+
     """视频 + 音谱同一块、视频在上音谱在下，**而且只占左半边**，右半边留给视频列表。
 
     这条必须量真实像素：只看控件树的话，"列表在右边"和"列表被挤成一条缝"
@@ -952,8 +981,8 @@ def test_settings_survive_a_restart(work: Path) -> None:
         first.bench.chk_sound.setChecked(True)
         first.bench.chk_sound.blockSignals(False)
         first.bench.btn_loop.setChecked(True)
-        first.dock_align.setVisible(True)      # 侧栏开着，下次开窗口该还是开着
         dialogs.remember("dance.source", work / "girl01.mp4")
+
     finally:
         first.close()                                       # closeEvent 里落盘
 
@@ -971,7 +1000,7 @@ def test_settings_survive_a_restart(work: Path) -> None:
         assert abs(second.bench.slice_seconds.value() - 1.5) < 1e-6
         assert second.bench.chk_sound.isChecked(), "「带声音」的勾选没记住"
         assert second.bench.btn_loop.isChecked()
-        assert second.dock_align.isHidden() is False, "侧栏开着的状态没记住"
+
         # 分栏比例：离屏窗口没有真实尺寸，Qt 会按控件大小重新缩放 setSizes，
         # 两次开窗口的可用尺寸还可能不一样。所以这里只钉住"每一块都还在、比例大致一致"，
         # 不比字面值 —— 比字面值测的是 Qt 的缩放实现，不是我们存没存对
@@ -1170,7 +1199,189 @@ def test_the_video_list_numbers_every_row_from_one(work: Path) -> None:
         window.close()
 
 
+def test_stutter_shows_up_in_the_live_preview(work: Path) -> None:
+    """打了抖动点，**实时画面就该抖**：窗口内几帧显示同一帧。
+
+    预览和渲染共用 `frame_effects.frame_plan`，所以看到的抖法就是导出会得到的。
+    关键不变量：卡住的是**画面**，`position()` 照旧按绝对钟往前走 ——
+    位置也跟着卡的话，跟主音频的纠偏会把它当成漂移，一路来回拽。
+    """
+    from itertools import groupby
+
+    from PyQt5.QtGui import QImage
+
+    from dance_fixtures import song, write_video
+    from vidscribe.gui.player import FramePlayer
+
+
+    window, _song_id, _m = _window(work)
+    try:
+        window.master._duration = 20.0                              # noqa: SLF001
+        window.master.shake_len.setValue(0.40)
+        window.master.timeline.stutter_marked.emit(10.0)             # S? 的 10.0s 起抖 0.4s
+        assert len(window.master.stutters()) == 1, window.master.stutters()
+
+        # 这一格覆盖主音频 10→12s，播放器时间 = 主音频时间 − 10
+        payload = {"target_start": 10.0, "target_end": 12.0, "seek_base": 10.0}
+        mapper = window._stutter_map(payload)                        # noqa: SLF001
+        assert mapper is not None, "打了点却没生成帧映射"
+        fps = float(window.live.fps() or 30.0)
+        # 默认玩法是「倒放→正放」：窗口一开头画面是**往回走**的
+        assert mapper(0.0) > mapper(1.0 / fps), (mapper(0.0), mapper(1.0 / fps))
+        assert abs(mapper(1.0) - 1.0) < 1e-6, "窗口外必须是恒等映射"
+        # 没打点的段落不该有映射（一分钱开销都不给）
+        assert window._stutter_map({"target_start": 0.0,             # noqa: SLF001
+                                    "target_end": 2.0}) is None
+
+        # 真视频 + 真内存帧：喂一串时间进去，画面必须**先倒回去再追回来**
+        clip = work / "shake.mp4"
+        write_video(clip, song(duration=3.0), fps=30.0, width=120, height=160)
+        real = FramePlayer()
+        try:
+            assert real.open(str(clip)), "测试素材解不开"
+            assert real.preload(0.0, 2.0), "2 秒的窗口应该缓存得下"
+            real.set_frame_map(mapper)
+            step = 1.0 / real.fps()
+            shown = []
+            for index in range(45):
+                real._show_cached(index * step)                       # noqa: SLF001
+                shown.append(real._frame_index)                      # noqa: SLF001
+            backwards = [b for a, b in zip(shown, shown[1:]) if b < a]
+            assert backwards, f"一帧都没倒着走，看不出回放：{shown}"
+            assert shown[-1] == 44, shown[-5:]                       # 窗口过后追回正确帧
+
+            # 换成卡帧抖动：同一条通路，改成"按档卡住"
+            window.master.clear_stutters()
+            index = window.master.shake_kind.findData("stutter")
+            window.master.shake_kind.setCurrentIndex(index)
+            window.master.timeline.stutter_marked.emit(10.0)
+            real.set_frame_map(window._stutter_map(payload))          # noqa: SLF001
+            shown = []
+            for index in range(45):
+                real._show_cached(index * step)                       # noqa: SLF001
+                shown.append(real._frame_index)                      # noqa: SLF001
+            held = max(len(list(group)) for _key, group in groupby(shown))
+            assert held >= 4, f"最长只卡了 {held} 帧，看不出抖动：{shown}"
+        finally:
+            real.close_video()
+    finally:
+        window.close()
+
+
+
+    # 画面卡住、位置不卡：这一条是"来回跳"不再复发的护栏
+    player = FramePlayer()
+    player._fps = 10.0                                               # noqa: SLF001
+    player._cache = [QImage(2, 2, QImage.Format_RGB888) for _ in range(10)]  # noqa: SLF001
+    player._cache_first = 0                                          # noqa: SLF001
+    player.set_frame_map(lambda _seconds: 0.0)                       # 永远显示第 0 帧
+    player._show_cached(0.5)                                         # noqa: SLF001
+    assert player._frame_index == 0, player._frame_index             # noqa: SLF001
+    assert abs(player.position() - 0.5) < 1e-6, player.position()
+    player.set_frame_map(None)
+    player._show_cached(0.5)                                         # noqa: SLF001
+    assert player._frame_index == 5, player._frame_index             # noqa: SLF001
+
+
+def test_preview_stitches_the_realtime_row_into_one_file(work: Path) -> None:
+    """▶ 预览：把实时播放行那几段**合成一条 mp4**（接上主音频），文件名固定、每次覆盖。
+
+    合成走的是切片那条同一路（补边界帧、画面效果点都在），所以预览里看到的
+    就是导出会得到的。名字固定是刻意的：这是一次性预览，不留一堆版本。
+    """
+    from dance_fixtures import make_project, make_song_file, make_source_video
+    from vidscribe.dance import media_backend
+    from vidscribe.gui.dance_montage.align_worker import ClipJobWorker
+    from vidscribe.gui.dance_montage.main_page import PREVIEW_NAME
+
+    cfg, db = make_project(work)
+    cfg.ensure_dance_dirs()
+    try:
+        song, pcm = make_song_file(cfg, "t.wav", duration=6.0)
+        source = make_source_video(cfg, "girl.mp4", pcm, fps=24.0)
+        target = Path(cfg.dance["output_dir"]) / PREVIEW_NAME
+        items = [
+            {"name": "01.mp4", "segment_index": 0, "target_start": 0.0,
+             "source": str(source), "source_start": 0.5, "source_end": 1.5,
+             "head_pad": 0.0, "tail_pad": 0.0,
+             "stutters": [{"at": 0.2, "duration": 0.4, "hold": 1, "kind": "rewind"}]},
+            {"name": "02.mp4", "segment_index": 1, "target_start": 1.0,
+             "source": str(source), "source_start": 1.5, "source_end": 2.5,
+             "head_pad": 0.0, "tail_pad": 0.0, "stutters": []},
+        ]
+        job = {"kind": "preview", "items": items, "target": str(target),
+               "song": str(song), "audio_start": 0.0}
+        worker = ClipJobWorker(cfg, job)
+        made = worker._preview_montage()                              # noqa: SLF001
+        assert Path(made) == target, made
+        assert target.is_file(), "预览文件没落地"
+        meta = media_backend.resolve("auto").probe(target)
+        assert abs(meta.duration - 2.0) < 0.3, meta.duration          # 两段各 1 秒
+        assert meta.audio_streams >= 1, "预览没有接上主音频"
+
+        # 再来一次：同名覆盖，不生成第二个文件
+        before = target.stat().st_mtime_ns
+        again = worker._preview_montage()                             # noqa: SLF001
+        assert Path(again) == target
+        assert target.stat().st_mtime_ns != before, "第二次预览没有覆盖同一个文件"
+        assert len(list(Path(cfg.dance["output_dir"]).glob("预览_*.mp4"))) == 1
+    finally:
+        db.close()
+
+
+def test_the_preview_button_really_starts_the_job(work: Path) -> None:
+    """点「▶ 预览」这条路必须走得通 —— 它曾经因为忘了 import 直接 NameError。
+
+    这里不真渲（那是上一个用例的事），只钉住"按钮按下去 → 真的派出一个
+    kind=preview 的活，参数齐全"。
+    """
+    from types import SimpleNamespace
+
+    from vidscribe.gui.dance_montage import align_worker
+
+
+    window, _song_id, _m = _window(work)
+    started: list[dict] = []
+
+    class _Stub:
+        """替身：只记参数，不真的开线程。"""
+
+        def __init__(self, cfg, job, parent=None) -> None:
+            started.append(dict(job))
+            self.log = SimpleNamespace(connect=lambda _f: None)
+            self.done = SimpleNamespace(connect=lambda _f: None)
+
+        def isRunning(self) -> bool:
+            return False
+
+        def start(self) -> None:
+            pass
+
+    original = align_worker.ClipJobWorker
+    align_worker.ClipJobWorker = _Stub
+    try:
+        window._slice_items = lambda: (                                # noqa: SLF001
+            [{"name": "01.mp4", "segment_index": 0, "target_start": 4.0,
+              "source": str(work / "girl01.mp4"), "source_start": 0.0,
+              "source_end": 2.0, "head_pad": 0.0, "tail_pad": 0.0,
+              "stutters": []}], [])
+        window.master.path.setText(str(work / "song.wav"))
+        window._preview_final()                                        # noqa: SLF001
+        assert started, "按了预览却没派出活（这就是那次 NameError）"
+        job = started[-1]
+        assert job["kind"] == "preview", job
+        assert job["target"].endswith(main_page.PREVIEW_NAME), job["target"]
+        assert abs(float(job["audio_start"]) - 4.0) < 1e-6, job
+        assert job["song"].endswith("song.wav"), job
+    finally:
+        align_worker.ClipJobWorker = original
+        window.close()
+
+
+
 TESTS = (
+
+
 
 
     test_the_master_audio_drives_the_realtime_row,
@@ -1178,12 +1389,17 @@ TESTS = (
     test_live_window_covers_both_kinds_of_material,
     test_unaligned_rows_disappear_once_alignment_ran,
     test_the_video_list_numbers_every_row_from_one,
+    test_stutter_shows_up_in_the_live_preview,
     test_right_click_can_copy_paste_and_really_delete,
     test_changing_the_head_room_refills_the_first_column,
     test_slice_export_lists_only_the_realtime_row_in_order,
+    test_preview_stitches_the_realtime_row_into_one_file,
+    test_the_preview_button_really_starts_the_job,
     test_frames_are_decoded_off_the_gui_thread,
     test_deleting_a_video_releases_the_file_first,
     test_window_has_all_four_regions,
+    test_the_matrix_comes_back_to_the_studio_when_the_popup_closes,
+
     test_panels_show_real_library,
     test_every_panel_fills_its_table_with_real_rows,
     test_filter_presets_reach_the_query,

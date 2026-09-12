@@ -552,10 +552,61 @@ def test_the_song_picker_really_opens(work: Path) -> None:
         db.close()
 
 
+def test_stutter_points_are_clicked_onto_the_timeline() -> None:
+    """卡帧抖动点：**在时间轴上点出来、看得见、能删、能记住**。
+
+    打点模式开着时左键点时间轴 = 在那一刻打一个点（不再拖播放头）；
+    点画在时间轴上（绿带 + ⚡），右键点它能删；关掉再开还在。
+    它只改帧序，段落和分段方式一个都不碰。
+    """
+    work = Path(tempfile.mkdtemp(prefix="dancemaster_"))
+    panel, _cfg, db = _panel(work, duration=20.0)
+    try:
+        assert panel.stutters() == [], "一开始不该有抖动点"
+        panel.btn_shake.setChecked(True)
+        assert panel.timeline.marking() is True
+
+        panel.shake_len.setValue(0.30)
+        panel.timeline.stutter_marked.emit(6.5)
+        points = panel.stutters()
+        assert len(points) == 1, points
+        assert abs(points[0]["at"] - 6.5) < 1e-6, points
+        assert abs(points[0]["duration"] - 0.30) < 1e-6, points
+        assert panel.timeline._stutters == [(6.5, 6.8)], \
+            panel.timeline._stutters                                  # noqa: SLF001
+
+        # 同一个位置再打一次 = 改它，不叠成两个
+        panel.timeline.stutter_marked.emit(6.6)
+        assert len(panel.stutters()) == 1, panel.stutters()
+        # 分段和分段方式一点没动
+        assert panel.mode_key() == "uniform"
+        assert panel.template is None
+
+        # 删：按屏幕横坐标找那个点（右键菜单走的就是这条）
+        x = panel.timeline._x_of(6.6)                                 # noqa: SLF001
+        assert panel.remove_stutter_at(x) is True
+        assert panel.stutters() == [], panel.stutters()
+
+        # 记得住：state → restore 之后点还在
+        panel.shake_len.setValue(0.25)
+        panel.timeline.stutter_marked.emit(3.0)
+        saved = panel.state()
+        again, _cfg2, db2 = _panel(work / "again", duration=20.0)
+        try:
+            again.restore(saved)
+            assert [round(p["at"], 3) for p in again.stutters()] == [3.0], again.stutters()
+            assert again.timeline._stutters, again.timeline._stutters  # noqa: SLF001
+        finally:
+            db2.close()
+    finally:
+        db.close()
+
+
 TESTS = (
 
 
     test_analysis_never_touches_the_segments,
+
     test_uniform_and_pause_starters,
     test_split_snaps_to_the_nearest_reference_point,
     test_dragging_too_far_says_why_and_changes_nothing,
@@ -567,6 +618,7 @@ TESTS = (
     test_unsplit_removes_a_boundary_not_a_clip,
     test_mode_dropdown_gates_each_kind_of_cut,
     test_pressing_play_after_the_end_starts_over,
+    test_stutter_points_are_clicked_onto_the_timeline,
     test_the_visualisation_area_switches_what_it_shows,
     test_playing_one_segment_stops_at_its_end,
     test_the_song_picker_really_opens,

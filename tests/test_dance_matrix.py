@@ -115,13 +115,50 @@ def test_clicking_a_cell_picks_it_for_that_segment() -> None:
     _click(other)
     assert panel.picks().get(1) == other.material_id, panel.picks()
 
-    # 再点已经在用的那一条：不重复落库，只当"想看看它"
+    # 再点已经在用的那一条：不重复落库，**也不许把视频打开** ——
+    # 打开/试听只认连续双击（下一个用例专门测它）
     previews: list[str] = []
     panel.preview_requested.connect(previews.append)
     before = len(seen)
     _click(other)
     assert len(seen) == before, "同一条素材被重复选了一遍"
-    assert previews, "点已经选中的格子，至少该给个预览"
+    assert previews == [], "单点就把视频打开了（打开必须要连续双击）"
+
+
+def _double(widget) -> None:
+    """在控件正中来一次**连续双击**（Qt 的 MouseButtonDblClick 就是"第二下够快"）。"""
+    from PyQt5.QtCore import QEvent, QPointF, Qt
+    from PyQt5.QtGui import QMouseEvent
+
+    center = QPointF(widget.width() / 2, widget.height() / 2)
+    widget.mouseDoubleClickEvent(QMouseEvent(QEvent.MouseButtonDblClick, center,
+                                             Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+
+
+def test_only_a_real_double_click_opens_the_video() -> None:
+    """打开视频要**连续双击**：单点只是选中，慢慢点两下也不算。
+
+    Qt 自己的 `MouseButtonDblClick` 就是"第二下在双击间隔内"，所以这条规矩
+    交给它判定；我们要保证的是**单点那条路上没有任何打开视频的口子**。
+    """
+    panel = mx.MatrixPanel()
+    panel.load([{"index": 0, "title": "S1", "span": (0.0, 1.0),
+                 "materials": _rows("a", 2, 0)}])
+    opened: list[dict] = []
+    previews: list[str] = []
+    panel.segment_preview.connect(opened.append)
+    panel.preview_requested.connect(previews.append)
+
+    cell = panel.cells[(1, 0)]
+    _click(cell)                       # 选中
+    _click(cell)                       # 再单点一次（间隔多久都算两次单点）
+    assert opened == [] and previews == [], (opened, previews)
+
+    _double(cell)
+    assert len(opened) == 1, opened
+    assert previews and previews[-1] == str(cell.payload.get("path") or ""), previews
+    assert panel.picks().get(0) == cell.material_id, "双击把这一段的选择弄丢了"
+
 
 
 def test_a_click_does_not_leak_into_the_next_segment() -> None:
@@ -294,7 +331,63 @@ def test_the_panel_saves_and_restores_the_realtime_row() -> None:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def test_every_row_in_the_matrix_shows_its_number() -> None:
+    """行头带序号：`1. a0.mp4`、`2. a1.mp4`……
+
+    跟视频列表那一列「#」同一个意思 —— 从上往下第几个。行数一多，
+    没序号就分不清"我刚才点的是第几个视频"。重新 load 要从 1 重新数。
+    """
+    panel = mx.MatrixPanel()
+    panel.load([{"index": i, "title": f"S{i + 1}", "span": (float(i), float(i + 1)),
+                 "materials": _rows("a", 3, i)} for i in range(2)])
+
+    def heads() -> list[str]:
+        return [panel.grid.itemAtPosition(row, 0).widget().text()
+                for row in range(1, len(panel.videos) + 1)]
+
+    assert heads() == ["1. a0.mp4", "2. a1.mp4", "3. a2.mp4"], heads()
+
+    panel.load([{"index": 0, "title": "S1", "span": (0.0, 1.0),
+                 "materials": _rows("b", 2, 0)}])
+    assert heads() == ["1. b0.mp4", "2. b1.mp4"], heads()
+
+
+def test_the_matrix_rows_follow_the_video_list_numbers() -> None:
+    """两张表的序号是同一个号：视频列表怎么排，矩阵的行就怎么排、怎么编号。
+
+    换排序只重排候选区 —— 实时播放行（这一段用谁）一个字都不许动，
+    那一行才是成片读的东西。列表里没有的视频（文件删了、库里还有素材）排在后面。
+    """
+    panel = mx.MatrixPanel()
+    panel.load([{"index": 0, "title": "S1", "span": (0.0, 1.0),
+                 "materials": _rows("a", 3, 0), "current": 1}])
+
+    def heads() -> list[str]:
+        return [panel.grid.itemAtPosition(row, 0).widget().text()
+                for row in range(1, len(panel.videos) + 1)]
+
+    assert heads() == ["1. a0.mp4", "2. a1.mp4", "3. a2.mp4"], heads()
+    assert panel.picks() == {0: 1}, panel.picks()
+
+    # 视频列表倒着排（a2 在最上面）→ 矩阵跟着倒过来，号也跟着变
+    panel.set_video_order(["a2.mp4", "a0.mp4", "a1.mp4"])
+    assert heads() == ["1. a2.mp4", "2. a0.mp4", "3. a1.mp4"], heads()
+    assert panel.picks() == {0: 1}, "重排把实时播放行的选择弄丢了"
+    assert (3, 0) in panel.cells, "重排之后 a2 那一格没了"
+
+    # 只剩 a1 在列表里：它是 1 号，另外两个排在后面（顺序不乱）
+    panel.set_video_order(["a1.mp4"])
+    assert heads() == ["1. a1.mp4", "2. a0.mp4", "3. a2.mp4"], heads()
+
+    # 下一次 load 也按这个顺序铺
+    panel.load([{"index": 0, "title": "S1", "span": (0.0, 1.0),
+                 "materials": _rows("a", 3, 0)}])
+    assert heads() == ["1. a1.mp4", "2. a0.mp4", "3. a2.mp4"], heads()
+
+
 def test_candidate_pools_are_isolated_per_segment() -> None:
+
+
     """X8：仓库按「歌 + 段落」隔离 —— 查 S1 只会拿到 S1 的候选，绝不串段。"""
     from dance_fixtures import (
         fake_alignment,
@@ -338,12 +431,15 @@ TESTS = (
 
     test_dragging_a_cell_up_sets_who_this_segment_uses,
     test_crossing_segments_is_refused_and_changes_nothing,
+    test_only_a_real_double_click_opens_the_video,
     test_the_matrix_has_one_column_per_segment,
     test_mime_packing_ignores_anything_that_is_not_ours,
     test_realtime_row_is_what_the_final_cut_reads,
     test_current_segment_follows_the_master_audio,
     test_right_click_clears_that_segment_not_the_current_one,
     test_the_panel_saves_and_restores_the_realtime_row,
+    test_every_row_in_the_matrix_shows_its_number,
+    test_the_matrix_rows_follow_the_video_list_numbers,
     test_candidate_pools_are_isolated_per_segment,
 )
 

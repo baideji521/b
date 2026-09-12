@@ -83,6 +83,8 @@ class VideoListPanel(QWidget):
     about_to_delete = pyqtSignal(list)  # 马上要删这些文件 → 外面赶紧松开占用
     removed = pyqtSignal(list)        # 右键删除 = 这些文件已经从磁盘上没了
     added = pyqtSignal(list)          # 右键粘贴 = 这些文件进了列表
+    order_changed = pyqtSignal(list)  # 序号重数过了（换排序 / 加行 / 删行）→ 名字按屏幕顺序
+
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -428,6 +430,16 @@ class VideoListPanel(QWidget):
         finally:
             self.table.setSortingEnabled(sorting)
             self._numbering = False
+        self.order_changed.emit(self.ordered_names())
+
+    def ordered_names(self) -> list[str]:
+        """屏幕上从上往下的文件名。下面那张矩阵按它排行、按它编号。"""
+        out: list[str] = []
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, COL_NAME)
+            out.append(item.text() if item is not None else "")
+        return out
+
 
 
     def _say(self, aligned: int) -> None:
